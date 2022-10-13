@@ -26,21 +26,22 @@ import (
 	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/kv"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/operator"
 	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/server/statistics"
+	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/storage/endpoint"
 	"github.com/tikv/pd/server/versioninfo"
 )
 
 func init() {
 	schedulePeerPr = 1.0
-	schedule.RegisterScheduler(statistics.Write.String(), func(opController *schedule.OperatorController, storage *core.Storage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	schedule.RegisterScheduler(statistics.Write.String(), func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		cfg := initHotRegionScheduleConfig()
 		return newHotWriteScheduler(opController, cfg), nil
 	})
-	schedule.RegisterScheduler(statistics.Read.String(), func(opController *schedule.OperatorController, storage *core.Storage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	schedule.RegisterScheduler(statistics.Read.String(), func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		return newHotReadScheduler(opController, initHotRegionScheduleConfig()), nil
 	})
 }
@@ -57,6 +58,10 @@ func newHotWriteScheduler(opController *schedule.OperatorController, conf *hotRe
 	ret.name = ""
 	ret.types = []statistics.RWType{statistics.Write}
 	return ret
+}
+
+func clearPendingInfluence(h *hotScheduler) {
+	h.regionPendings = make(map[uint64]*pendingInfluence)
 }
 
 type testHotSchedulerSuite struct{}
@@ -82,7 +87,7 @@ func (s *testHotSchedulerSuite) TestGCPendingOpInfos(c *C) {
 		tc.PutStoreWithLabels(id)
 	}
 
-	sche, err := schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), core.NewStorage(kv.NewMemoryKV()), schedule.ConfigJSONDecoder([]byte("null")))
+	sche, err := schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), storage.NewStorageWithMemoryBackend(), schedule.ConfigJSONDecoder([]byte("null")))
 	c.Assert(err, IsNil)
 	hb := sche.(*hotScheduler)
 
@@ -93,7 +98,7 @@ func (s *testHotSchedulerSuite) TestGCPendingOpInfos(c *C) {
 		case movePeer:
 			op, err = operator.CreateMovePeerOperator("move-peer-test", tc, region, operator.OpAdmin, 2, &metapb.Peer{Id: region.GetID()*10000 + 1, StoreId: 4})
 		case transferLeader:
-			op, err = operator.CreateTransferLeaderOperator("transfer-leader-test", tc, region, 1, 2, operator.OpAdmin)
+			op, err = operator.CreateTransferLeaderOperator("transfer-leader-test", tc, region, 1, 2, []uint64{}, operator.OpAdmin)
 		}
 		c.Assert(err, IsNil)
 		c.Assert(op, NotNil)
@@ -162,8 +167,8 @@ func (s *testHotWriteRegionSchedulerSuite) TestByteRateOnly(c *C) {
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetMaxReplicas(3)
 	tc.SetLocationLabels([]string{"zone", "host"})
-	tc.DisableFeature(versioninfo.JointConsensus)
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	tc.SetHotRegionCacheHitsThreshold(0)
 
@@ -211,13 +216,13 @@ func (s *testHotWriteRegionSchedulerSuite) checkByteRateOnly(c *C, tc *mockclust
 		{3, []uint64{1, 2, 4}, 512 * KB, 0, 0},
 	})
 	c.Assert(hb.Schedule(tc), Not(HasLen), 0)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 
 	// Will transfer a hot region from store 1, because the total count of peers
 	// which is hot for store 1 is larger than other stores.
 	for i := 0; i < 20; i++ {
 		op := hb.Schedule(tc)[0]
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		switch op.Len() {
 		case 1:
 			// balance by leader selected
@@ -239,12 +244,12 @@ func (s *testHotWriteRegionSchedulerSuite) checkByteRateOnly(c *C, tc *mockclust
 	// hot region scheduler is restricted by `hot-region-schedule-limit`.
 	tc.SetHotRegionScheduleLimit(0)
 	c.Assert(hb.IsScheduleAllowed(tc), IsFalse)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 	tc.SetHotRegionScheduleLimit(int(config.NewTestOptions().GetScheduleConfig().HotRegionScheduleLimit))
 
 	for i := 0; i < 20; i++ {
 		op := hb.Schedule(tc)[0]
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		c.Assert(op.Len(), Equals, 4)
 		if op.RegionID() == 2 {
 			// peer in store 1 of the region 2 can transfer to store 5 or store 6 because of the label
@@ -258,12 +263,12 @@ func (s *testHotWriteRegionSchedulerSuite) checkByteRateOnly(c *C, tc *mockclust
 	// hot region scheduler is not affect by `balance-region-schedule-limit`.
 	tc.SetRegionScheduleLimit(0)
 	c.Assert(hb.Schedule(tc), HasLen, 1)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 	// Always produce operator
 	c.Assert(hb.Schedule(tc), HasLen, 1)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 	c.Assert(hb.Schedule(tc), HasLen, 1)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 
 	// | store_id | write_bytes_rate |
 	// |----------|------------------|
@@ -306,7 +311,7 @@ func (s *testHotWriteRegionSchedulerSuite) checkByteRateOnly(c *C, tc *mockclust
 	//   Region 5 can only move peer to store 6.
 	for i := 0; i < 30; i++ {
 		op := hb.Schedule(tc)[0]
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		switch op.RegionID() {
 		case 1, 2:
 			if op.Len() == 3 {
@@ -330,7 +335,7 @@ func (s *testHotWriteRegionSchedulerSuite) checkByteRateOnly(c *C, tc *mockclust
 		tc.Regions.RemoveRegion(tc.GetRegion(i))
 	}
 	hb.Schedule(tc)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 }
 
 func (s *testHotWriteRegionSchedulerSuite) TestByteRateOnlyWithTiFlash(c *C) {
@@ -339,7 +344,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestByteRateOnlyWithTiFlash(c *C) {
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.SetHotRegionCacheHitsThreshold(0)
 	c.Assert(tc.RuleManager.SetRules([]*placement.Rule{
 		{
@@ -364,7 +369,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestByteRateOnlyWithTiFlash(c *C) {
 			},
 		},
 	}), IsNil)
-	sche, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	sche, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb := sche.(*hotScheduler)
 
@@ -426,7 +431,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestByteRateOnlyWithTiFlash(c *C) {
 	// Will transfer a hot learner from store 8, because the total count of peers
 	// which is hot for store 8 is larger than other TiFlash stores.
 	for i := 0; i < 20; i++ {
-		hb.clearPendingInfluence()
+		clearPendingInfluence(hb)
 		op := hb.Schedule(tc)[0]
 		switch op.Len() {
 		case 1:
@@ -442,7 +447,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestByteRateOnlyWithTiFlash(c *C) {
 	// Disable for TiFlash
 	hb.conf.SetEnableForTiFlash(false)
 	for i := 0; i < 20; i++ {
-		hb.clearPendingInfluence()
+		clearPendingInfluence(hb)
 		op := hb.Schedule(tc)[0]
 		testutil.CheckTransferLeaderFrom(c, op, operator.OpHotRegion, 1)
 	}
@@ -503,7 +508,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestByteRateOnlyWithTiFlash(c *C) {
 		pdServerCfg := tc.GetOpts().GetPDServerConfig()
 		pdServerCfg.FlowRoundByDigit = 8
 		tc.GetOpts().SetPDServerConfig(pdServerCfg)
-		hb.clearPendingInfluence()
+		clearPendingInfluence(hb)
 		c.Assert(hb.Schedule(tc), Not(HasLen), 0)
 		c.Assert(
 			loadsEqual(
@@ -517,7 +522,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestByteRateOnlyWithTiFlash(c *C) {
 	// Will transfer a hot region from store 1, because the total count of peers
 	// which is hot for store 1 is larger than other stores.
 	for i := 0; i < 20; i++ {
-		hb.clearPendingInfluence()
+		clearPendingInfluence(hb)
 		op := hb.Schedule(tc)[0]
 		switch op.Len() {
 		case 1:
@@ -547,7 +552,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestWithQuery(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.SetSrcToleranceRatio(1)
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1)
@@ -570,7 +575,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestWithQuery(c *C) {
 	})
 	schedulePeerPr = 0.0
 	for i := 0; i < 100; i++ {
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		op := hb.Schedule(tc)[0]
 		testutil.CheckTransferLeader(c, op, operator.OpHotRegion, 1, 3)
 	}
@@ -581,14 +586,14 @@ func (s *testHotWriteRegionSchedulerSuite) TestWithKeyRate(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1)
 	hb.(*hotScheduler).conf.SetSrcToleranceRatio(1)
 
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetHotRegionCacheHitsThreshold(0)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -608,7 +613,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestWithKeyRate(c *C) {
 	})
 
 	for i := 0; i < 100; i++ {
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		op := hb.Schedule(tc)[0]
 		// byteDecRatio <= 0.95 && keyDecRatio <= 0.95
 		testutil.CheckTransferPeer(c, op, operator.OpHotRegion, 1, 4)
@@ -635,14 +640,14 @@ func (s *testHotWriteRegionSchedulerSuite) TestUnhealthyStore(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1)
 	hb.(*hotScheduler).conf.SetSrcToleranceRatio(1)
 
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetHotRegionCacheHitsThreshold(0)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -671,7 +676,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestUnhealthyStore(c *C) {
 	// test dst
 	for _, interval := range intervals {
 		tc.SetStoreLastHeartbeatInterval(4, interval)
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		hb.Schedule(tc)
 		// no panic
 	}
@@ -682,14 +687,14 @@ func (s *testHotWriteRegionSchedulerSuite) TestCheckHot(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1)
 	hb.(*hotScheduler).conf.SetSrcToleranceRatio(1)
 
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetHotRegionCacheHitsThreshold(0)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -715,7 +720,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestLeader(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 
 	tc := mockcluster.NewCluster(ctx, opt)
@@ -747,7 +752,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestLeader(c *C) {
 	})
 
 	for i := 0; i < 100; i++ {
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		c.Assert(hb.Schedule(tc), HasLen, 0)
 	}
 
@@ -760,7 +765,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestLeader(c *C) {
 	// store3 has 2 peer as leader
 	// We expect to transfer leader from store2 to store1 or store3
 	for i := 0; i < 100; i++ {
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		op := hb.Schedule(tc)[0]
 		testutil.CheckTransferLeaderFrom(c, op, operator.OpHotRegion, 2)
 		c.Assert(hb.Schedule(tc), HasLen, 0)
@@ -772,7 +777,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestWithPendingInfluence(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	old := pendingAmpFactor
 	pendingAmpFactor = 0.0
@@ -784,7 +789,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestWithPendingInfluence(c *C) {
 		// 1: key rate
 		tc := mockcluster.NewCluster(ctx, opt)
 		tc.SetHotRegionCacheHitsThreshold(0)
-		tc.DisableFeature(versioninfo.JointConsensus)
+		tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 		tc.AddRegionStore(1, 20)
 		tc.AddRegionStore(2, 20)
 		tc.AddRegionStore(3, 20)
@@ -820,7 +825,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestWithPendingInfluence(c *C) {
 		}
 
 		for i := 0; i < 20; i++ {
-			hb.(*hotScheduler).clearPendingInfluence()
+			clearPendingInfluence(hb.(*hotScheduler))
 			cnt := 0
 		testLoop:
 			for j := 0; j < 1000; j++ {
@@ -862,7 +867,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestWithRuleEnabled(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetEnablePlacementRules(true)
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	tc.SetHotRegionCacheHitsThreshold(0)
 	key, err := hex.DecodeString("")
@@ -921,7 +926,7 @@ func (s *testHotWriteRegionSchedulerSuite) TestWithRuleEnabled(c *C) {
 	})
 
 	for i := 0; i < 100; i++ {
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		op := hb.Schedule(tc)[0]
 		// The targetID should always be 1 as leader is only allowed to be placed in store1 or store2 by placement rule
 		testutil.CheckTransferLeader(c, op, operator.OpHotRegion, 2, 1)
@@ -934,8 +939,8 @@ func (s *testHotReadRegionSchedulerSuite) TestByteRateOnly(c *C) {
 	defer cancel()
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
-	hb, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	hb, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.ReadPriorities = []string{BytePriority, KeyPriority}
 	tc.SetHotRegionCacheHitsThreshold(0)
@@ -994,19 +999,7 @@ func (s *testHotReadRegionSchedulerSuite) TestByteRateOnly(c *C) {
 	// move leader from store 1 to store 5
 	// it is better than transfer leader from store 1 to store 3
 	testutil.CheckTransferPeerWithLeaderTransfer(c, op, operator.OpHotRegion, 1, 5)
-	hb.(*hotScheduler).clearPendingInfluence()
-
-	// test if region lose leader can cause PD panic
-	r1 := tc.GetRegion(3)
-	tc.PutRegion(core.NewRegionInfo(r1.GetMeta(), nil,
-		core.SetReadBytes(r1.GetBytesRead()),
-		core.SetReadKeys(r1.GetKeysRead()),
-		core.SetReadQuery(r1.GetReadQueryNum()),
-		core.SetReportInterval(r1.GetInterval().GetEndTimestamp()),
-	))
-	_ = hb.Schedule(tc)[0]
-	hb.(*hotScheduler).clearPendingInfluence()
-	tc.PutRegion(r1)
+	clearPendingInfluence(hb.(*hotScheduler))
 
 	// assume handle the transfer leader operator rather than move leader
 	tc.AddRegionWithReadInfo(3, 3, 512*KB*statistics.ReadReportInterval, 0, 0, statistics.ReadReportInterval, []uint64{1, 2})
@@ -1041,14 +1034,14 @@ func (s *testHotReadRegionSchedulerSuite) TestByteRateOnly(c *C) {
 
 	// We will move leader peer of region 1 from 1 to 5
 	testutil.CheckTransferPeerWithLeaderTransfer(c, hb.Schedule(tc)[0], operator.OpHotRegion|operator.OpLeader, 1, 5)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 
 	// Should not panic if region not found.
 	for i := uint64(1); i <= 3; i++ {
 		tc.Regions.RemoveRegion(tc.GetRegion(i))
 	}
 	hb.Schedule(tc)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 }
 
 func (s *testHotReadRegionSchedulerSuite) TestWithQuery(c *C) {
@@ -1056,7 +1049,7 @@ func (s *testHotReadRegionSchedulerSuite) TestWithQuery(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.SetSrcToleranceRatio(1)
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1)
@@ -1077,7 +1070,7 @@ func (s *testHotReadRegionSchedulerSuite) TestWithQuery(c *C) {
 	})
 
 	for i := 0; i < 100; i++ {
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		op := hb.Schedule(tc)[0]
 		testutil.CheckTransferLeader(c, op, operator.OpHotRegion, 1, 3)
 	}
@@ -1088,7 +1081,7 @@ func (s *testHotReadRegionSchedulerSuite) TestWithKeyRate(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.SetSrcToleranceRatio(1)
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1)
@@ -1115,7 +1108,7 @@ func (s *testHotReadRegionSchedulerSuite) TestWithKeyRate(c *C) {
 	})
 
 	for i := 0; i < 100; i++ {
-		hb.(*hotScheduler).clearPendingInfluence()
+		clearPendingInfluence(hb.(*hotScheduler))
 		op := hb.Schedule(tc)[0]
 		// byteDecRatio <= 0.95 && keyDecRatio <= 0.95
 		testutil.CheckTransferLeader(c, op, operator.OpHotRegion, 1, 4)
@@ -1141,7 +1134,7 @@ func (s *testHotReadRegionSchedulerSuite) TestWithPendingInfluence(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	// For test
 	hb.(*hotScheduler).conf.GreatDecRatio = 0.99
@@ -1158,7 +1151,7 @@ func (s *testHotReadRegionSchedulerSuite) TestWithPendingInfluence(c *C) {
 		// 1: key rate
 		tc := mockcluster.NewCluster(ctx, opt)
 		tc.SetHotRegionCacheHitsThreshold(0)
-		tc.DisableFeature(versioninfo.JointConsensus)
+		tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 		tc.AddRegionStore(1, 20)
 		tc.AddRegionStore(2, 20)
 		tc.AddRegionStore(3, 20)
@@ -1200,7 +1193,7 @@ func (s *testHotReadRegionSchedulerSuite) TestWithPendingInfluence(c *C) {
 		// Before schedule, store byte/key rate: 7.1 | 6.1 | 6 | 5
 		// Min and max from storeLoadPred. They will be generated in the comparison of current and future.
 		for i := 0; i < 20; i++ {
-			hb.(*hotScheduler).clearPendingInfluence()
+			clearPendingInfluence(hb.(*hotScheduler))
 
 			op1 := hb.Schedule(tc)[0]
 			testutil.CheckTransferPeer(c, op1, operator.OpHotRegion, 1, 4)
@@ -1222,7 +1215,7 @@ func (s *testHotReadRegionSchedulerSuite) TestWithPendingInfluence(c *C) {
 
 		// Before schedule, store byte/key rate: 7.1 | 6.1 | 6 | 5
 		for i := 0; i < 20; i++ {
-			hb.(*hotScheduler).clearPendingInfluence()
+			clearPendingInfluence(hb.(*hotScheduler))
 
 			op1 := hb.Schedule(tc)[0]
 			testutil.CheckTransferPeer(c, op1, operator.OpHotRegion, 1, 4)
@@ -1508,8 +1501,8 @@ func (s *testHotCacheSuite) TestCheckRegionFlow(c *C) {
 		tc := mockcluster.NewCluster(ctx, opt)
 		tc.SetMaxReplicas(3)
 		tc.SetLocationLabels([]string{"zone", "host"})
-		tc.DisableFeature(versioninfo.JointConsensus)
-		sche, err := schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), core.NewStorage(kv.NewMemoryKV()), schedule.ConfigJSONDecoder([]byte("null")))
+		tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+		sche, err := schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), storage.NewStorageWithMemoryBackend(), schedule.ConfigJSONDecoder([]byte("null")))
 		c.Assert(err, IsNil)
 		hb := sche.(*hotScheduler)
 		heartbeat := tc.AddLeaderRegionWithWriteInfo
@@ -1546,12 +1539,12 @@ func (s *testHotCacheSuite) TestCheckRegionFlow(c *C) {
 			// try schedule
 			hb.prepareForBalance(testcase.kind, tc)
 			leaderSolver := newBalanceSolver(hb, tc, testcase.kind, transferLeader)
-			leaderSolver.cur = &solution{srcDetail: hb.stLoadInfos[toResourceType(testcase.kind, transferLeader)][2]}
-			c.Check(leaderSolver.filterHotPeers(), HasLen, 0) // skip schedule
+			leaderSolver.cur = &solution{srcStore: hb.stLoadInfos[toResourceType(testcase.kind, transferLeader)][2]}
+			c.Check(leaderSolver.filterHotPeers(leaderSolver.cur.srcStore), HasLen, 0) // skip schedule
 			threshold := tc.GetHotRegionCacheHitsThreshold()
-			tc.SetHotRegionCacheHitsThreshold(0)
-			c.Check(leaderSolver.filterHotPeers(), HasLen, 1)
-			tc.SetHotRegionCacheHitsThreshold(threshold)
+			leaderSolver.minHotDegree = 0
+			c.Check(leaderSolver.filterHotPeers(leaderSolver.cur.srcStore), HasLen, 1)
+			leaderSolver.minHotDegree = threshold
 		}
 
 		// move peer: add peer and remove peer
@@ -1580,7 +1573,7 @@ func (s *testHotCacheSuite) TestCheckRegionFlowWithDifferentThreshold(c *C) {
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetMaxReplicas(3)
 	tc.SetLocationLabels([]string{"zone", "host"})
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	// some peers are hot, and some are cold #3198
 
 	rate := uint64(512 * KB)
@@ -1611,8 +1604,7 @@ func (s *testHotCacheSuite) TestSortHotPeer(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetMaxReplicas(3)
-	tc.DisableFeature(versioninfo.JointConsensus)
-	sche, err := schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), core.NewStorage(kv.NewMemoryKV()), schedule.ConfigJSONDecoder([]byte("null")))
+	sche, err := schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), storage.NewStorageWithMemoryBackend(), schedule.ConfigJSONDecoder([]byte("null")))
 	c.Assert(err, IsNil)
 	hb := sche.(*hotScheduler)
 	leaderSolver := newBalanceSolver(hb, tc, statistics.Read, transferLeader)
@@ -1636,10 +1628,12 @@ func (s *testHotCacheSuite) TestSortHotPeer(c *C) {
 		},
 	}}
 
-	u := leaderSolver.sortHotPeers(hotPeers, 1)
+	leaderSolver.maxPeerNum = 1
+	u := leaderSolver.sortHotPeers(hotPeers)
 	checkSortResult(c, []uint64{1}, u)
 
-	u = leaderSolver.sortHotPeers(hotPeers, 2)
+	leaderSolver.maxPeerNum = 2
+	u = leaderSolver.sortHotPeers(hotPeers)
 	checkSortResult(c, []uint64{1, 2}, u)
 }
 
@@ -1666,13 +1660,13 @@ func (s *testInfluenceSerialSuite) TestInfluenceByRWType(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1)
 	hb.(*hotScheduler).conf.SetSrcToleranceRatio(1)
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetHotRegionCacheHitsThreshold(0)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -1752,14 +1746,14 @@ func (s *testHotReadRegionSchedulerSuite) TestHotReadPeerSchedule(c *C) {
 	defer cancel()
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.SetMaxReplicas(3)
 	tc.SetLocationLabels([]string{"zone", "host"})
 	for id := uint64(1); id <= 6; id++ {
 		tc.PutStoreWithLabels(id)
 	}
 
-	sche, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, tc, nil), core.NewStorage(kv.NewMemoryKV()), schedule.ConfigJSONDecoder([]byte("null")))
+	sche, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, tc, nil), storage.NewStorageWithMemoryBackend(), schedule.ConfigJSONDecoder([]byte("null")))
 	c.Assert(err, IsNil)
 	hb := sche.(*hotScheduler)
 	hb.conf.ReadPriorities = []string{BytePriority, KeyPriority}
@@ -1778,14 +1772,14 @@ func (s *testHotSchedulerSuite) TestHotScheduleWithPriority(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1.05)
 	hb.(*hotScheduler).conf.SetSrcToleranceRatio(1.05)
 
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetHotRegionCacheHitsThreshold(0)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -1807,15 +1801,15 @@ func (s *testHotSchedulerSuite) TestHotScheduleWithPriority(c *C) {
 	ops := hb.Schedule(tc)
 	c.Assert(ops, HasLen, 1)
 	testutil.CheckTransferPeer(c, ops[0], operator.OpHotRegion, 1, 5)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 	hb.(*hotScheduler).conf.WritePeerPriorities = []string{KeyPriority, BytePriority}
 	ops = hb.Schedule(tc)
 	c.Assert(ops, HasLen, 1)
 	testutil.CheckTransferPeer(c, ops[0], operator.OpHotRegion, 4, 5)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 
 	// assert read priority schedule
-	hb, err = schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err = schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	tc.UpdateStorageReadStats(5, 10*MB*statistics.StoreHeartBeatReportInterval, 10*MB*statistics.StoreHeartBeatReportInterval)
 	tc.UpdateStorageReadStats(4, 10*MB*statistics.StoreHeartBeatReportInterval, 10*MB*statistics.StoreHeartBeatReportInterval)
@@ -1829,13 +1823,13 @@ func (s *testHotSchedulerSuite) TestHotScheduleWithPriority(c *C) {
 	ops = hb.Schedule(tc)
 	c.Assert(ops, HasLen, 1)
 	testutil.CheckTransferLeader(c, ops[0], operator.OpHotRegion, 1, 2)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 	hb.(*hotScheduler).conf.ReadPriorities = []string{KeyPriority, BytePriority}
 	ops = hb.Schedule(tc)
 	c.Assert(ops, HasLen, 1)
 	testutil.CheckTransferLeader(c, ops[0], operator.OpHotRegion, 1, 3)
 
-	hb, err = schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err = schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.StrictPickingStore = false
 	// assert loose store picking
@@ -1848,7 +1842,7 @@ func (s *testHotSchedulerSuite) TestHotScheduleWithPriority(c *C) {
 	ops = hb.Schedule(tc)
 	c.Assert(ops, HasLen, 1)
 	testutil.CheckTransferPeer(c, ops[0], operator.OpHotRegion, 1, 5)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 
 	tc.UpdateStorageWrittenStats(1, 6*MB*statistics.StoreHeartBeatReportInterval, 6*MB*statistics.StoreHeartBeatReportInterval)
 	tc.UpdateStorageWrittenStats(2, 6*MB*statistics.StoreHeartBeatReportInterval, 6*MB*statistics.StoreHeartBeatReportInterval)
@@ -1859,7 +1853,7 @@ func (s *testHotSchedulerSuite) TestHotScheduleWithPriority(c *C) {
 	ops = hb.Schedule(tc)
 	c.Assert(ops, HasLen, 1)
 	testutil.CheckTransferPeer(c, ops[0], operator.OpHotRegion, 4, 5)
-	hb.(*hotScheduler).clearPendingInfluence()
+	clearPendingInfluence(hb.(*hotScheduler))
 }
 
 func (s *testHotWriteRegionSchedulerSuite) TestHotWriteLeaderScheduleWithPriority(c *C) {
@@ -1867,13 +1861,13 @@ func (s *testHotWriteRegionSchedulerSuite) TestHotWriteLeaderScheduleWithPriorit
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1)
 	hb.(*hotScheduler).conf.SetSrcToleranceRatio(1)
 
 	tc := mockcluster.NewCluster(ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.SetHotRegionCacheHitsThreshold(0)
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
@@ -1909,7 +1903,7 @@ func (s *testHotSchedulerSuite) TestCompatibility(c *C) {
 	defer cancel()
 	statistics.Denoising = false
 	opt := config.NewTestOptions()
-	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), nil)
+	hb, err := schedule.CreateScheduler(statistics.Write.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
 	c.Assert(err, IsNil)
 	tc := mockcluster.NewCluster(ctx, opt)
 	// default
@@ -1928,7 +1922,7 @@ func (s *testHotSchedulerSuite) TestCompatibility(c *C) {
 		{statistics.ByteDim, statistics.KeyDim},
 	})
 	// low version
-	tc.DisableFeature(versioninfo.HotScheduleWithQuery)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version5_0))
 	checkPriority(c, hb.(*hotScheduler), tc, [3][2]int{
 		{statistics.ByteDim, statistics.KeyDim},
 		{statistics.KeyDim, statistics.ByteDim},
@@ -1962,9 +1956,7 @@ func (s *testHotSchedulerSuite) TestCompatibility(c *C) {
 		{statistics.ByteDim, statistics.KeyDim},
 	})
 	// test version change
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version5_0))
-	c.Assert(hb.(*hotScheduler).conf.lastQuerySupported, IsFalse)
-	tc.EnableFeature(versioninfo.HotScheduleWithQuery)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.HotScheduleWithQuery))
 	c.Assert(hb.(*hotScheduler).conf.lastQuerySupported, IsFalse) // it will updated after scheduling
 	checkPriority(c, hb.(*hotScheduler), tc, [3][2]int{
 		{statistics.QueryDim, statistics.ByteDim},
@@ -1981,7 +1973,7 @@ func (s *testHotSchedulerSuite) TestCompatibilityConfig(c *C) {
 	tc := mockcluster.NewCluster(ctx, opt)
 
 	// From new or 3.x cluster
-	hb, err := schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), core.NewStorage(kv.NewMemoryKV()), schedule.ConfigSliceDecoder("hot-region", nil))
+	hb, err := schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder("hot-region", nil))
 	c.Assert(err, IsNil)
 	checkPriority(c, hb.(*hotScheduler), tc, [3][2]int{
 		{statistics.QueryDim, statistics.ByteDim},
@@ -1990,7 +1982,7 @@ func (s *testHotSchedulerSuite) TestCompatibilityConfig(c *C) {
 	})
 
 	// Config file is not currently supported
-	hb, err = schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), core.NewStorage(kv.NewMemoryKV()),
+	hb, err = schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), storage.NewStorageWithMemoryBackend(),
 		schedule.ConfigSliceDecoder("hot-region", []string{"read-priorities=byte,query"}))
 	c.Assert(err, IsNil)
 	checkPriority(c, hb.(*hotScheduler), tc, [3][2]int{
@@ -2001,7 +1993,7 @@ func (s *testHotSchedulerSuite) TestCompatibilityConfig(c *C) {
 
 	// from 4.0 or 5.0 or 5.1 cluster
 	var data []byte
-	storage := core.NewStorage(kv.NewMemoryKV())
+	storage := storage.NewStorageWithMemoryBackend()
 	data, err = schedule.EncodeConfig(map[string]interface{}{
 		"min-hot-byte-rate":         100,
 		"min-hot-key-rate":          10,
@@ -2018,7 +2010,7 @@ func (s *testHotSchedulerSuite) TestCompatibilityConfig(c *C) {
 	c.Assert(err, IsNil)
 	err = storage.SaveScheduleConfig(HotRegionName, data)
 	c.Assert(err, IsNil)
-	hb, err = schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), core.NewStorage(kv.NewMemoryKV()), schedule.ConfigJSONDecoder(data))
+	hb, err = schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, tc, nil), storage, schedule.ConfigJSONDecoder(data))
 	c.Assert(err, IsNil)
 	checkPriority(c, hb.(*hotScheduler), tc, [3][2]int{
 		{statistics.ByteDim, statistics.KeyDim},
@@ -2027,7 +2019,6 @@ func (s *testHotSchedulerSuite) TestCompatibilityConfig(c *C) {
 	})
 
 	// From configured cluster
-	storage = core.NewStorage(kv.NewMemoryKV())
 	cfg := initHotRegionScheduleConfig()
 	cfg.ReadPriorities = []string{"key", "query"}
 	cfg.WriteLeaderPriorities = []string{"query", "key"}
@@ -2035,7 +2026,7 @@ func (s *testHotSchedulerSuite) TestCompatibilityConfig(c *C) {
 	c.Assert(err, IsNil)
 	err = storage.SaveScheduleConfig(HotRegionName, data)
 	c.Assert(err, IsNil)
-	hb, err = schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, nil, nil), core.NewStorage(kv.NewMemoryKV()), schedule.ConfigJSONDecoder(data))
+	hb, err = schedule.CreateScheduler(HotRegionType, schedule.NewOperatorController(ctx, nil, nil), storage, schedule.ConfigJSONDecoder(data))
 	c.Assert(err, IsNil)
 	checkPriority(c, hb.(*hotScheduler), tc, [3][2]int{
 		{statistics.KeyDim, statistics.QueryDim},

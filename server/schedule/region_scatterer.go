@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -27,11 +26,11 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/cache"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
 	"go.uber.org/zap"
 )
 
@@ -41,7 +40,7 @@ var gcInterval = time.Minute
 var gcTTL = time.Minute * 3
 
 type selectedStores struct {
-	mu                sync.RWMutex
+	mu                syncutil.RWMutex
 	groupDistribution *cache.TTLString // value type: map[uint64]uint64, group -> StoreID -> count
 }
 
@@ -118,7 +117,7 @@ func (s *selectedStores) getDistributionByGroupLocked(group string) (map[uint64]
 type RegionScatterer struct {
 	ctx            context.Context
 	name           string
-	cluster        opt.Cluster
+	cluster        Cluster
 	ordinaryEngine engineContext
 	specialEngines map[string]engineContext
 	opController   *OperatorController
@@ -126,14 +125,14 @@ type RegionScatterer struct {
 
 // NewRegionScatterer creates a region scatterer.
 // RegionScatter is used for the `Lightning`, it will scatter the specified regions before import data.
-func NewRegionScatterer(ctx context.Context, cluster opt.Cluster, opController *OperatorController) *RegionScatterer {
+func NewRegionScatterer(ctx context.Context, cluster Cluster, opController *OperatorController) *RegionScatterer {
 	return &RegionScatterer{
 		ctx:            ctx,
 		name:           regionScatterName,
 		cluster:        cluster,
-		opController:   opController,
 		ordinaryEngine: newEngineContext(ctx, filter.NewOrdinaryEngineFilter(regionScatterName)),
 		specialEngines: make(map[string]engineContext),
+		opController:   opController,
 	}
 }
 
@@ -206,7 +205,7 @@ func (r *RegionScatterer) ScatterRegionsByID(regionsID []uint64, group string, r
 	return opsCount, failures, nil
 }
 
-// ScatterRegions relocates the regions. If the group is defined, the regions' leader with the same group would be scattered
+// scatterRegions relocates the regions. If the group is defined, the regions' leader with the same group would be scattered
 // in a group level instead of cluster level.
 // RetryTimes indicates the retry times if any of the regions failed to relocate during scattering. There will be
 // time.Sleep between each retry.
@@ -388,7 +387,7 @@ func (r *RegionScatterer) selectCandidates(region *core.RegionInfo, sourceStoreI
 	filters := []filter.Filter{
 		filter.NewExcludedFilter(r.name, nil, selectedStores),
 	}
-	scoreGuard := filter.NewPlacementSafeguard(r.name, r.cluster, region, sourceStore)
+	scoreGuard := filter.NewPlacementSafeguard(r.name, r.cluster.GetOpts(), r.cluster.GetBasicCluster(), r.cluster.GetRuleManager(), region, sourceStore)
 	filters = append(filters, context.filters...)
 	filters = append(filters, scoreGuard)
 	stores := r.cluster.GetStores()

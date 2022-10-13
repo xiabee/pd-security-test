@@ -186,6 +186,23 @@ func (s *configTestSuite) TestConfig(c *C) {
 	c.Assert(json.Unmarshal(output, &labelPropertyCfg), IsNil)
 	c.Assert(labelPropertyCfg, DeepEquals, svr.GetLabelProperty())
 
+	// config set min-resolved-ts-persistence-interval <value>
+	args = []string{"-u", pdAddr, "config", "set", "min-resolved-ts-persistence-interval", "1s"}
+	_, err = pdctl.ExecuteCommand(cmd, args...)
+	c.Assert(err, IsNil)
+	c.Assert(svr.GetPDServerConfig().MinResolvedTSPersistenceInterval, Equals, typeutil.NewDuration(time.Second))
+
+	// config set max-store-preparing-time 10m
+	args = []string{"-u", pdAddr, "config", "set", "max-store-preparing-time", "10m"}
+	_, err = pdctl.ExecuteCommand(cmd, args...)
+	c.Assert(err, IsNil)
+	c.Assert(svr.GetScheduleConfig().MaxStorePreparingTime, Equals, typeutil.NewDuration(10*time.Minute))
+
+	args = []string{"-u", pdAddr, "config", "set", "max-store-preparing-time", "0s"}
+	_, err = pdctl.ExecuteCommand(cmd, args...)
+	c.Assert(err, IsNil)
+	c.Assert(svr.GetScheduleConfig().MaxStorePreparingTime, Equals, typeutil.NewDuration(0))
+
 	// test config read and write
 	testItems := []testItem{
 		{"leader-schedule-limit", uint64(64), func(scheduleConfig *config.ScheduleConfig) interface{} {

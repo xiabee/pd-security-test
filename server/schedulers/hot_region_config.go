@@ -19,18 +19,16 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"reflect"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/log"
+	"github.com/tikv/pd/pkg/reflectutil"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/schedule"
-	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/statistics"
+	"github.com/tikv/pd/server/storage/endpoint"
 	"github.com/tikv/pd/server/versioninfo"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
@@ -110,8 +108,8 @@ func (conf *hotRegionSchedulerConfig) getValidConf() *hotRegionSchedulerConfig {
 }
 
 type hotRegionSchedulerConfig struct {
-	sync.RWMutex
-	storage            *core.Storage
+	syncutil.RWMutex
+	storage            endpoint.ConfigStorage
 	lastQuerySupported bool
 
 	MinHotByteRate  float64 `json:"min-hot-byte-rate"`
@@ -221,7 +219,7 @@ func (conf *hotRegionSchedulerConfig) GetGreatDecRatio() float64 {
 	return conf.GreatDecRatio
 }
 
-func (conf *hotRegionSchedulerConfig) GetMinorGreatDecRatio() float64 {
+func (conf *hotRegionSchedulerConfig) GetMinorDecRatio() float64 {
 	conf.RLock()
 	defer conf.RUnlock()
 	return conf.MinorDecRatio
@@ -328,16 +326,10 @@ func (conf *hotRegionSchedulerConfig) handleSetConfig(w http.ResponseWriter, r *
 		rd.JSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	t := reflect.TypeOf(conf).Elem()
-	for i := 0; i < t.NumField(); i++ {
-		jsonTag := t.Field(i).Tag.Get("json")
-		if i := strings.Index(jsonTag, ","); i != -1 { // trim 'foobar,string' to 'foobar'
-			jsonTag = jsonTag[:i]
-		}
-		if _, ok := m[jsonTag]; ok {
-			rd.Text(w, http.StatusOK, "no changed")
-			return
-		}
+	ok := reflectutil.FindSameFieldByJSON(conf, m)
+	if ok {
+		rd.Text(w, http.StatusOK, "no changed")
+		return
 	}
 
 	rd.Text(w, http.StatusBadRequest, "config item not found")
@@ -351,8 +343,8 @@ func (conf *hotRegionSchedulerConfig) persistLocked() error {
 	return conf.storage.SaveScheduleConfig(HotRegionName, data)
 }
 
-func (conf *hotRegionSchedulerConfig) checkQuerySupport(cluster opt.Cluster) bool {
-	querySupport := cluster.IsFeatureSupported(versioninfo.HotScheduleWithQuery)
+func (conf *hotRegionSchedulerConfig) checkQuerySupport(cluster schedule.Cluster) bool {
+	querySupport := versioninfo.IsFeatureSupported(cluster.GetOpts().GetClusterVersion(), versioninfo.HotScheduleWithQuery)
 	conf.Lock()
 	defer conf.Unlock()
 	if querySupport != conf.lastQuerySupported {

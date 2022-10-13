@@ -79,6 +79,7 @@ func OfflineStore(physicallyDestroyed bool) StoreCreateOption {
 	return func(store *StoreInfo) {
 		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.State = metapb.StoreState_Offline
+		meta.NodeState = metapb.NodeState_Removing
 		meta.PhysicallyDestroyed = physicallyDestroyed
 		store.meta = meta
 	}
@@ -89,6 +90,7 @@ func UpStore() StoreCreateOption {
 	return func(store *StoreInfo) {
 		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.State = metapb.StoreState_Up
+		meta.NodeState = metapb.NodeState_Serving
 		store.meta = meta
 	}
 }
@@ -98,6 +100,7 @@ func TombstoneStore() StoreCreateOption {
 	return func(store *StoreInfo) {
 		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.State = metapb.StoreState_Tombstone
+		meta.NodeState = metapb.NodeState_Removed
 		store.meta = meta
 	}
 }
@@ -211,6 +214,13 @@ func SetNewStoreStats(stats *pdpb.StoreStats) StoreCreateOption {
 		store.storeStats = &storeStats{
 			rawStats: stats,
 		}
+	}
+}
+
+// SetMinResolvedTS sets min resolved ts for the store.
+func SetMinResolvedTS(minResolvedTS uint64) StoreCreateOption {
+	return func(store *StoreInfo) {
+		store.minResolvedTS = minResolvedTS
 	}
 }
 

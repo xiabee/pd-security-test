@@ -54,7 +54,7 @@ func (s *testRuleCheckerSerialSuite) SetUpTest(c *C) {
 	cfg := config.NewTestOptions()
 	cfg.SetPlacementRulesCacheEnabled(true)
 	s.cluster = mockcluster.NewCluster(s.ctx, cfg)
-	s.cluster.DisableFeature(versioninfo.JointConsensus)
+	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	s.cluster.SetEnablePlacementRules(true)
 	s.ruleManager = s.cluster.RuleManager
 	s.rc = NewRuleChecker(s.cluster, s.ruleManager, cache.NewDefaultCache(10))
@@ -79,7 +79,7 @@ func (s *testRuleCheckerSuite) TearDownTest(c *C) {
 func (s *testRuleCheckerSuite) SetUpTest(c *C) {
 	cfg := config.NewTestOptions()
 	s.cluster = mockcluster.NewCluster(s.ctx, cfg)
-	s.cluster.DisableFeature(versioninfo.JointConsensus)
+	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	s.cluster.SetEnablePlacementRules(true)
 	s.ruleManager = s.cluster.RuleManager
 	s.rc = NewRuleChecker(s.cluster, s.ruleManager, cache.NewDefaultCache(10))
@@ -287,6 +287,45 @@ func (s *testRuleCheckerSuite) TestFixRoleLeaderIssue3130(c *C) {
 	c.Assert(op, NotNil)
 	c.Assert(op.Desc(), Equals, "remove-orphan-peer")
 	c.Assert(op.Step(0).(operator.RemovePeer).FromStore, Equals, uint64(1))
+}
+
+func (s *testRuleCheckerSuite) TestFixLeaderRoleWithUnhealthyRegion(c *C) {
+	s.cluster.AddLabelsStore(1, 1, map[string]string{"rule": "follower"})
+	s.cluster.AddLabelsStore(2, 1, map[string]string{"rule": "follower"})
+	s.cluster.AddLabelsStore(3, 1, map[string]string{"rule": "leader"})
+	s.ruleManager.SetRuleGroup(&placement.RuleGroup{
+		ID:       "cluster",
+		Index:    2,
+		Override: true,
+	})
+	err := s.ruleManager.SetRules([]*placement.Rule{
+		{
+			GroupID: "cluster",
+			ID:      "r1",
+			Index:   100,
+			Role:    placement.Follower,
+			Count:   2,
+			LabelConstraints: []placement.LabelConstraint{
+				{Key: "rule", Op: "in", Values: []string{"follower"}},
+			},
+		},
+		{
+			GroupID: "cluster",
+			ID:      "r2",
+			Index:   100,
+			Role:    placement.Leader,
+			Count:   1,
+			LabelConstraints: []placement.LabelConstraint{
+				{Key: "rule", Op: "in", Values: []string{"leader"}},
+			},
+		},
+	})
+	c.Assert(err, IsNil)
+	// no Leader
+	s.cluster.AddNoLeaderRegion(1, 1, 2, 3)
+	r := s.cluster.GetRegion(1)
+	op := s.rc.Check(r)
+	c.Assert(op, IsNil)
 }
 
 func (s *testRuleCheckerSuite) TestBetterReplacement(c *C) {
@@ -819,4 +858,25 @@ func (s *testRuleCheckerSuite) TestOfflineAndDownStore(c *C) {
 	op = s.rc.Check(region)
 	c.Assert(op, NotNil)
 	c.Assert(op.Desc(), Equals, "replace-rule-down-peer")
+}
+
+func (s *testRuleCheckerSuite) TestPendingList(c *C) {
+	// no enough store
+	s.cluster.AddLeaderStore(1, 1)
+	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
+	op := s.rc.Check(s.cluster.GetRegion(1))
+	c.Assert(op, IsNil)
+	_, exist := s.rc.pendingList.Get(1)
+	c.Assert(exist, IsTrue)
+
+	// add more stores
+	s.cluster.AddLeaderStore(2, 1)
+	s.cluster.AddLeaderStore(3, 1)
+	op = s.rc.Check(s.cluster.GetRegion(1))
+	c.Assert(op, NotNil)
+	c.Assert(op.Desc(), Equals, "add-rule-peer")
+	c.Assert(op.GetPriorityLevel(), Equals, core.HighPriority)
+	c.Assert(op.Step(0).(operator.AddLearner).ToStore, Equals, uint64(3))
+	_, exist = s.rc.pendingList.Get(1)
+	c.Assert(exist, IsFalse)
 }

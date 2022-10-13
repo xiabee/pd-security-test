@@ -16,19 +16,19 @@ package core
 
 import (
 	"bytes"
-	"sync"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/slice"
+	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/core/storelimit"
 	"go.uber.org/zap"
 )
 
 // BasicCluster provides basic data member and interface for a tikv cluster.
 type BasicCluster struct {
-	sync.RWMutex
+	syncutil.RWMutex
 	Stores  *StoresInfo
 	Regions *RegionsInfo
 }
@@ -114,6 +114,17 @@ func (bc *BasicCluster) GetFollowerStores(region *RegionInfo) []*StoreInfo {
 		}
 	}
 	return Stores
+}
+
+// GetLeaderStoreByRegionID returns the leader store of the given region.
+func (bc *BasicCluster) GetLeaderStoreByRegionID(regionID uint64) *StoreInfo {
+	bc.RLock()
+	defer bc.RUnlock()
+	region := bc.Regions.GetRegion(regionID)
+	if region == nil || region.GetLeader() == nil {
+		return nil
+	}
+	return bc.Stores.GetStore(region.GetLeader().GetStoreId())
 }
 
 // GetLeaderStore returns all Stores that contains the region's leader peer.
@@ -354,7 +365,7 @@ func (bc *BasicCluster) getRelevantRegions(region *RegionInfo) (origin *RegionIn
 func isRegionRecreated(region *RegionInfo) bool {
 	// Regions recreated by online unsafe recover have both ver and conf ver equal to 1. To
 	// prevent stale bootstrap region (first region in a cluster which covers the entire key
-	// range) from reporting stale info, we execlude regions that covers the entire key range
+	// range) from reporting stale info, we exclude regions that covers the entire key range
 	// here. Technically, it is possible for unsafe recover to recreate such region, but that
 	// means the entire key range is unavailable, and we don't expect unsafe recover to perform
 	// better than recreating the cluster.
@@ -393,6 +404,13 @@ func (bc *BasicCluster) PutRegion(region *RegionInfo) []*RegionInfo {
 	return bc.Regions.SetRegion(region)
 }
 
+// GetRegionSizeByRange scans regions intersecting [start key, end key), returns the total region size of this range.
+func (bc *BasicCluster) GetRegionSizeByRange(startKey, endKey []byte) int64 {
+	bc.RLock()
+	defer bc.RUnlock()
+	return bc.Regions.GetRegionSizeByRange(startKey, endKey)
+}
+
 // CheckAndPutRegion checks if the region is valid to put, if valid then put.
 func (bc *BasicCluster) CheckAndPutRegion(region *RegionInfo) []*RegionInfo {
 	origin, err := bc.PreCheckPutRegion(region)
@@ -404,6 +422,22 @@ func (bc *BasicCluster) CheckAndPutRegion(region *RegionInfo) []*RegionInfo {
 	return bc.PutRegion(region)
 }
 
+// RemoveRegionIfExist removes RegionInfo from regionTree and regionMap if exists.
+func (bc *BasicCluster) RemoveRegionIfExist(id uint64) {
+	bc.Lock()
+	defer bc.Unlock()
+	if r := bc.Regions.GetRegion(id); r != nil {
+		bc.Regions.RemoveRegion(r)
+	}
+}
+
+// ResetRegionCache drops all region cache.
+func (bc *BasicCluster) ResetRegionCache() {
+	bc.Lock()
+	defer bc.Unlock()
+	bc.Regions = NewRegionsInfo()
+}
+
 // RemoveRegion removes RegionInfo from regionTree and regionMap.
 func (bc *BasicCluster) RemoveRegion(region *RegionInfo) {
 	bc.Lock()
@@ -411,18 +445,18 @@ func (bc *BasicCluster) RemoveRegion(region *RegionInfo) {
 	bc.Regions.RemoveRegion(region)
 }
 
-// SearchRegion searches RegionInfo from regionTree.
-func (bc *BasicCluster) SearchRegion(regionKey []byte) *RegionInfo {
+// GetRegionByKey searches RegionInfo from regionTree.
+func (bc *BasicCluster) GetRegionByKey(regionKey []byte) *RegionInfo {
 	bc.RLock()
 	defer bc.RUnlock()
-	return bc.Regions.SearchRegion(regionKey)
+	return bc.Regions.GetRegionByKey(regionKey)
 }
 
-// SearchPrevRegion searches previous RegionInfo from regionTree.
-func (bc *BasicCluster) SearchPrevRegion(regionKey []byte) *RegionInfo {
+// GetPrevRegionByKey searches previous RegionInfo from regionTree.
+func (bc *BasicCluster) GetPrevRegionByKey(regionKey []byte) *RegionInfo {
 	bc.RLock()
 	defer bc.RUnlock()
-	return bc.Regions.SearchPrevRegion(regionKey)
+	return bc.Regions.GetPrevRegionByKey(regionKey)
 }
 
 // ScanRange scans regions intersecting [start key, end key), returns at most
