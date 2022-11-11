@@ -16,24 +16,22 @@ package placement
 
 import (
 	"encoding/hex"
-
 	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/codec"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage"
-	"github.com/tikv/pd/server/storage/endpoint"
+	"github.com/tikv/pd/server/kv"
 )
 
 var _ = Suite(&testManagerSuite{})
 
 type testManagerSuite struct {
-	store   endpoint.RuleStorage
+	store   *core.Storage
 	manager *RuleManager
 }
 
 func (s *testManagerSuite) SetUpTest(c *C) {
-	s.store = storage.NewStorageWithMemoryBackend()
+	s.store = core.NewStorage(kv.NewMemoryKV())
 	var err error
 	s.manager = NewRuleManager(s.store, nil, nil)
 	err = s.manager.Initialize(3, []string{"zone", "rack", "host"})

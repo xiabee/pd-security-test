@@ -19,7 +19,7 @@ import (
 	"time"
 
 	. "github.com/pingcap/check"
-	tu "github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 )
@@ -48,12 +48,12 @@ func (s *testTsoSuite) TearDownSuite(c *C) {
 }
 
 func (s *testTsoSuite) TestTransferAllocator(c *C) {
-	tu.WaitUntil(c, func() bool {
+	testutil.WaitUntil(c, func(c *C) bool {
 		s.svr.GetTSOAllocatorManager().ClusterDCLocationChecker()
 		_, err := s.svr.GetTSOAllocatorManager().GetAllocator("dc-1")
 		return err == nil
-	}, tu.WithRetryTimes(5), tu.WithSleepInterval(3*time.Second))
+	}, testutil.WithRetryTimes(5), testutil.WithSleepInterval(3*time.Second))
 	addr := s.urlPrefix + "/tso/allocator/transfer/pd1?dcLocation=dc-1"
-	err := tu.CheckPostJSON(testDialClient, addr, nil, tu.StatusOK(c))
+	err := postJSON(testDialClient, addr, nil)
 	c.Assert(err, IsNil)
 }

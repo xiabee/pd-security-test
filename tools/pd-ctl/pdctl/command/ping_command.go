@@ -33,7 +33,7 @@ func NewPingCommand() *cobra.Command {
 
 func showPingCommandFunc(cmd *cobra.Command, args []string) {
 	start := time.Now()
-	_, err := doRequest(cmd, pingPrefix, http.MethodGet, http.Header{})
+	_, err := doRequest(cmd, pingPrefix, http.MethodGet)
 	if err != nil {
 		cmd.Println(err)
 		return

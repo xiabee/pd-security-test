@@ -22,23 +22,22 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/codec"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage/endpoint"
 	"go.uber.org/zap"
 )
 
 // RuleManager is responsible for the lifecycle of all placement Rules.
 // It is thread safe.
 type RuleManager struct {
-	storage endpoint.RuleStorage
-	syncutil.RWMutex
+	storage *core.Storage
+	sync.RWMutex
 	initialized bool
 	ruleConfig  *ruleConfig
 	ruleList    ruleList
@@ -51,7 +50,7 @@ type RuleManager struct {
 }
 
 // NewRuleManager creates a RuleManager instance.
-func NewRuleManager(storage endpoint.RuleStorage, storeSetInformer core.StoreSetInformer, opt *config.PersistOptions) *RuleManager {
+func NewRuleManager(storage *core.Storage, storeSetInformer core.StoreSetInformer, opt *config.PersistOptions) *RuleManager {
 	return &RuleManager{
 		storage:          storage,
 		storeSetInformer: storeSetInformer,
@@ -307,14 +306,7 @@ func (m *RuleManager) GetRulesByKey(key []byte) []*Rule {
 func (m *RuleManager) GetRulesForApplyRegion(region *core.RegionInfo) []*Rule {
 	m.RLock()
 	defer m.RUnlock()
-	return m.ruleList.getRulesForApplyRange(region.GetStartKey(), region.GetEndKey())
-}
-
-// GetRulesForApplyRange returns the rules list that should be applied to a range.
-func (m *RuleManager) GetRulesForApplyRange(start, end []byte) []*Rule {
-	m.RLock()
-	defer m.RUnlock()
-	return m.ruleList.getRulesForApplyRange(start, end)
+	return m.ruleList.getRulesForApplyRegion(region.GetStartKey(), region.GetEndKey())
 }
 
 // FitRegion fits a region to the rules it matches.
@@ -326,7 +318,7 @@ func (m *RuleManager) FitRegion(storeSet StoreSet, region *core.RegionInfo) *Reg
 			return fit
 		}
 	}
-	fit := fitRegion(regionStores, region, rules)
+	fit := FitRegion(regionStores, region, rules)
 	fit.regionStores = regionStores
 	fit.rules = rules
 	return fit
@@ -445,7 +437,8 @@ func (r RuleOp) String() string {
 // Batch executes a series of actions at once.
 func (m *RuleManager) Batch(todo []RuleOp) error {
 	for _, t := range todo {
-		if t.Action == RuleOpAdd {
+		switch t.Action {
+		case RuleOpAdd:
 			err := m.adjustRule(t.Rule, "")
 			if err != nil {
 				return err

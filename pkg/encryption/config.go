@@ -50,10 +50,11 @@ type Config struct {
 func (c *Config) Adjust() error {
 	if len(c.DataEncryptionMethod) == 0 {
 		c.DataEncryptionMethod = defaultDataEncryptionMethod
-	} else if _, err := c.GetMethod(); err != nil {
-		return err
+	} else {
+		if _, err := c.GetMethod(); err != nil {
+			return err
+		}
 	}
-
 	if c.DataKeyRotationPeriod.Duration == 0 {
 		duration, err := time.ParseDuration(defaultDataKeyRotationPeriod)
 		if err != nil {
@@ -69,8 +70,10 @@ func (c *Config) Adjust() error {
 	}
 	if len(c.MasterKey.Type) == 0 {
 		c.MasterKey.Type = masterKeyTypePlaintext
-	} else if _, err := c.GetMasterKeyMeta(); err != nil {
-		return err
+	} else {
+		if _, err := c.GetMasterKeyMeta(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

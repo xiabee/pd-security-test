@@ -17,9 +17,9 @@ package placement
 import (
 	"math"
 	"sort"
+	"sync"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/core"
 )
 
@@ -28,7 +28,7 @@ import (
 // rules, and the remaining Peers are placed in the OrphanPeers list.
 type RegionFit struct {
 	mu struct {
-		syncutil.RWMutex
+		sync.RWMutex
 		cached bool
 	}
 	RuleFits     []*RuleFit
@@ -147,8 +147,8 @@ type StoreSet interface {
 	GetStore(id uint64) *core.StoreInfo
 }
 
-// fitRegion tries to fit peers of a region to the rules.
-func fitRegion(stores []*core.StoreInfo, region *core.RegionInfo, rules []*Rule) *RegionFit {
+// FitRegion tries to fit peers of a region to the rules.
+func FitRegion(stores []*core.StoreInfo, region *core.RegionInfo, rules []*Rule) *RegionFit {
 	w := newFitWorker(stores, region, rules)
 	w.run()
 	return &w.bestFit
@@ -174,11 +174,7 @@ func newFitWorker(stores []*core.StoreInfo, region *core.RegionInfo, rules []*Ru
 		})
 	}
 	// Sort peers to keep the match result deterministic.
-	sort.Slice(peers, func(i, j int) bool {
-		// Put healthy peers in front to priority to fit healthy peers.
-		si, sj := stateScore(region, peers[i].GetId()), stateScore(region, peers[j].GetId())
-		return si > sj || (si == sj && peers[i].GetId() < peers[j].GetId())
-	})
+	sort.Slice(peers, func(i, j int) bool { return peers[i].GetId() < peers[j].GetId() })
 
 	return &fitWorker{
 		stores:        stores,
@@ -355,15 +351,4 @@ func needIsolation(rules []*Rule) bool {
 		}
 	}
 	return false
-}
-
-func stateScore(region *core.RegionInfo, peerID uint64) int {
-	switch {
-	case region.GetDownPeer(peerID) != nil:
-		return 0
-	case region.GetPendingPeer(peerID) != nil:
-		return 1
-	default:
-		return 2
-	}
 }

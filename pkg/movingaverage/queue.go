@@ -15,13 +15,14 @@
 package movingaverage
 
 import (
+	"sync"
+
 	"github.com/phf/go-queue/queue"
-	"github.com/tikv/pd/pkg/syncutil"
 )
 
 // SafeQueue is a concurrency safe queue
 type SafeQueue struct {
-	mu  syncutil.Mutex
+	mu  sync.Mutex
 	que *queue.Queue
 }
 

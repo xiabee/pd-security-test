@@ -22,7 +22,7 @@ import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/tikv/pd/client/testutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"go.uber.org/goleak"
 	"google.golang.org/grpc"
 )
@@ -100,6 +100,7 @@ func (s *testClientDialOptionSuite) TestGRPCDialOption(c *C) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.TODO(), 500*time.Millisecond)
 	defer cancel()
+	// nolint
 	cli := &baseClient{
 		checkLeaderCh:        make(chan struct{}, 1),
 		checkTSODispatcherCh: make(chan struct{}, 1),

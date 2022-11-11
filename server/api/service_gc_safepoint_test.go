@@ -23,7 +23,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/storage/endpoint"
+	"github.com/tikv/pd/server/core"
 )
 
 var _ = Suite(&testServiceGCSafepointSuite{})
@@ -42,19 +42,19 @@ func (s *testServiceGCSafepointSuite) SetUpSuite(c *C) {
 	s.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
 
 	mustBootstrapCluster(c, s.svr)
-	mustPutStore(c, s.svr, 1, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
+	mustPutStore(c, s.svr, 1, metapb.StoreState_Up, nil)
 }
 
 func (s *testServiceGCSafepointSuite) TearDownSuite(c *C) {
 	s.cleanup()
 }
 
-func (s *testServiceGCSafepointSuite) TestServiceGCSafepoint(c *C) {
+func (s *testServiceGCSafepointSuite) TestRegionStats(c *C) {
 	sspURL := s.urlPrefix + "/gc/safepoint"
 
 	storage := s.svr.GetStorage()
 	list := &listServiceGCSafepoint{
-		ServiceGCSafepoints: []*endpoint.ServiceSafePoint{
+		ServiceGCSafepoints: []*core.ServiceSafePoint{
 			{
 				ServiceID: "a",
 				ExpiredAt: time.Now().Unix() + 10,
@@ -81,17 +81,16 @@ func (s *testServiceGCSafepointSuite) TestServiceGCSafepoint(c *C) {
 
 	res, err := testDialClient.Get(sspURL)
 	c.Assert(err, IsNil)
-	defer res.Body.Close()
 	listResp := &listServiceGCSafepoint{}
 	err = apiutil.ReadJSON(res.Body, listResp)
 	c.Assert(err, IsNil)
 	c.Assert(listResp, DeepEquals, list)
 
-	statusCode, err := apiutil.DoDelete(testDialClient, sspURL+"/a")
+	res, err = doDelete(testDialClient, sspURL+"/a")
 	c.Assert(err, IsNil)
-	c.Assert(statusCode, Equals, http.StatusOK)
+	c.Assert(res.StatusCode, Equals, http.StatusOK)
 
-	left, err := storage.LoadAllServiceGCSafePoints()
+	left, err := storage.GetAllServiceGCSafePoints()
 	c.Assert(err, IsNil)
 	c.Assert(left, DeepEquals, list.ServiceGCSafepoints[1:])
 }

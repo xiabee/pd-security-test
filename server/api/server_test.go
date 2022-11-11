@@ -17,7 +17,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"sort"
 	"sync"
 	"testing"
 
@@ -25,7 +24,6 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
@@ -41,9 +39,8 @@ var (
 	}
 
 	store = &metapb.Store{
-		Id:        1,
-		Address:   "localhost",
-		NodeState: metapb.NodeState_Serving,
+		Id:      1,
+		Address: "localhost",
 	}
 	peers = []*metapb.Peer{
 		{
@@ -125,8 +122,9 @@ func mustNewCluster(c *C, num int, opts ...func(cfg *config.Config)) ([]*config.
 	return cfgs, svrs, clean
 }
 
-func mustWaitLeader(c *C, svrs []*server.Server) {
-	testutil.WaitUntil(c, func() bool {
+func mustWaitLeader(c *C, svrs []*server.Server) *server.Server {
+	var leaderServer *server.Server
+	testutil.WaitUntil(c, func(c *C) bool {
 		var leader *pdpb.Member
 		for _, svr := range svrs {
 			l := svr.GetLeader()
@@ -137,9 +135,13 @@ func mustWaitLeader(c *C, svrs []*server.Server) {
 			if leader == nil {
 				leader = l
 			}
+			if leader.GetMemberId() == svr.GetMember().ID() {
+				leaderServer = svr
+			}
 		}
 		return true
 	})
+	return leaderServer
 }
 
 func mustBootstrapCluster(c *C, s *server.Server) {
@@ -152,78 +154,4 @@ func mustBootstrapCluster(c *C, s *server.Server) {
 	resp, err := grpcPDClient.Bootstrap(context.Background(), req)
 	c.Assert(err, IsNil)
 	c.Assert(resp.GetHeader().GetError().GetType(), Equals, pdpb.ErrorType_OK)
-}
-
-var _ = Suite(&testServerServiceSuite{})
-
-type testServerServiceSuite struct {
-	svr     *server.Server
-	cleanup cleanUpFunc
-}
-
-func (s *testServerServiceSuite) SetUpSuite(c *C) {
-	s.svr, s.cleanup = mustNewServer(c)
-	mustWaitLeader(c, []*server.Server{s.svr})
-
-	mustBootstrapCluster(c, s.svr)
-	mustPutStore(c, s.svr, 1, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
-}
-
-func (s *testServerServiceSuite) TearDownSuite(c *C) {
-	s.cleanup()
-}
-
-func (s *testServiceSuite) TestServiceLabels(c *C) {
-	accessPaths := s.svr.GetServiceLabels("Profile")
-	c.Assert(accessPaths, HasLen, 1)
-	c.Assert(accessPaths[0].Path, Equals, "/pd/api/v1/debug/pprof/profile")
-	c.Assert(accessPaths[0].Method, Equals, "")
-	serviceLabel := s.svr.GetAPIAccessServiceLabel(
-		apiutil.NewAccessPath("/pd/api/v1/debug/pprof/profile", ""))
-	c.Assert(serviceLabel, Equals, "Profile")
-	serviceLabel = s.svr.GetAPIAccessServiceLabel(
-		apiutil.NewAccessPath("/pd/api/v1/debug/pprof/profile", http.MethodGet))
-	c.Assert(serviceLabel, Equals, "Profile")
-
-	accessPaths = s.svr.GetServiceLabels("GetSchedulerConfig")
-	c.Assert(accessPaths, HasLen, 1)
-	c.Assert(accessPaths[0].Path, Equals, "/pd/api/v1/scheduler-config")
-	c.Assert(accessPaths[0].Method, Equals, "")
-
-	accessPaths = s.svr.GetServiceLabels("ResignLeader")
-	c.Assert(accessPaths, HasLen, 1)
-	c.Assert(accessPaths[0].Path, Equals, "/pd/api/v1/leader/resign")
-	c.Assert(accessPaths[0].Method, Equals, http.MethodPost)
-	serviceLabel = s.svr.GetAPIAccessServiceLabel(
-		apiutil.NewAccessPath("/pd/api/v1/leader/resign", http.MethodPost))
-	c.Assert(serviceLabel, Equals, "ResignLeader")
-	serviceLabel = s.svr.GetAPIAccessServiceLabel(
-		apiutil.NewAccessPath("/pd/api/v1/leader/resign", http.MethodGet))
-	c.Assert(serviceLabel, Equals, "")
-	serviceLabel = s.svr.GetAPIAccessServiceLabel(
-		apiutil.NewAccessPath("/pd/api/v1/leader/resign", ""))
-	c.Assert(serviceLabel, Equals, "")
-
-	accessPaths = s.svr.GetServiceLabels("QueryMetric")
-	c.Assert(accessPaths, HasLen, 4)
-	sort.Slice(accessPaths, func(i, j int) bool {
-		if accessPaths[i].Path == accessPaths[j].Path {
-			return accessPaths[i].Method < accessPaths[j].Method
-		}
-		return accessPaths[i].Path < accessPaths[j].Path
-	})
-	c.Assert(accessPaths[0].Path, Equals, "/pd/api/v1/metric/query")
-	c.Assert(accessPaths[0].Method, Equals, http.MethodGet)
-	c.Assert(accessPaths[1].Path, Equals, "/pd/api/v1/metric/query")
-	c.Assert(accessPaths[1].Method, Equals, http.MethodPost)
-	c.Assert(accessPaths[2].Path, Equals, "/pd/api/v1/metric/query_range")
-	c.Assert(accessPaths[2].Method, Equals, http.MethodGet)
-	c.Assert(accessPaths[3].Path, Equals, "/pd/api/v1/metric/query_range")
-	c.Assert(accessPaths[3].Method, Equals, http.MethodPost)
-	serviceLabel = s.svr.GetAPIAccessServiceLabel(
-		apiutil.NewAccessPath("/pd/api/v1/metric/query", http.MethodPost))
-	c.Assert(serviceLabel, Equals, "QueryMetric")
-	serviceLabel = s.svr.GetAPIAccessServiceLabel(
-		apiutil.NewAccessPath("/pd/api/v1/metric/query", http.MethodGet))
-	c.Assert(serviceLabel, Equals, "QueryMetric")
 }

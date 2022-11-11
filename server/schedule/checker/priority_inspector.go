@@ -20,7 +20,7 @@ import (
 	"github.com/tikv/pd/pkg/cache"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/schedule/placement"
 )
 
@@ -29,13 +29,13 @@ const defaultPriorityQueueSize = 1280
 
 // PriorityInspector ensures high priority region should run first
 type PriorityInspector struct {
-	cluster schedule.Cluster
+	cluster opt.Cluster
 	opts    *config.PersistOptions
 	queue   *cache.PriorityQueue
 }
 
 // NewPriorityInspector creates a priority inspector.
-func NewPriorityInspector(cluster schedule.Cluster) *PriorityInspector {
+func NewPriorityInspector(cluster opt.Cluster) *PriorityInspector {
 	return &PriorityInspector{
 		cluster: cluster,
 		opts:    cluster.GetOpts(),
@@ -75,7 +75,7 @@ func (p *PriorityInspector) Inspect(region *core.RegionInfo) (fit *placement.Reg
 
 // inspectRegionInPlacementRule inspects region in placement rule mode
 func (p *PriorityInspector) inspectRegionInPlacementRule(region *core.RegionInfo) (makeupCount int, fit *placement.RegionFit) {
-	fit = p.cluster.GetRuleManager().FitRegion(p.cluster, region)
+	fit = opt.FitRegion(p.cluster, region)
 	if len(fit.RuleFits) == 0 {
 		return
 	}
@@ -102,7 +102,7 @@ func (p *PriorityInspector) addOrRemoveRegion(priority int, regionID uint64) {
 	if priority < 0 {
 		if entry := p.queue.Get(regionID); entry != nil && entry.Priority == priority {
 			e := entry.Value.(*RegionPriorityEntry)
-			e.Attempt++
+			e.Attempt = e.Attempt + 1
 			e.Last = time.Now()
 		}
 		entry := NewRegionEntry(regionID)

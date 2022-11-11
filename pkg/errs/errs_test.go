@@ -89,7 +89,7 @@ func (s *testErrorSuite) TestError(c *C) {
 	c.Assert(strings.Contains(lg.Message(), rfc), IsTrue)
 	err := errors.New("test error")
 	log.Error("test", ZapError(ErrEtcdLeaderNotFound, err))
-	rfc = `[error="[PD:member:ErrEtcdLeaderNotFound]test error`
+	rfc = `[error="[PD:member:ErrEtcdLeaderNotFound]test error"]`
 	c.Assert(strings.Contains(lg.Message(), rfc), IsTrue)
 }
 
@@ -140,9 +140,5 @@ func (s *testErrorSuite) TestErrorWithStack(c *C) {
 	m2 := lg.Message()
 	// This test is based on line number and the first log is in line 141, the second is in line 142.
 	// So they have the same length stack. Move this test to another place need to change the corresponding length.
-	idx1 := strings.Index(m1, "[stack=")
-	c.Assert(idx1, GreaterEqual, -1)
-	idx2 := strings.Index(m2, "[stack=")
-	c.Assert(idx2, GreaterEqual, -1)
-	c.Assert(len(m1[idx1:]), Equals, len(m2[idx2:]))
+	c.Assert(len(m1[strings.Index(m1, "[stack="):]), Equals, len(m2[strings.Index(m2, "[stack="):]))
 }

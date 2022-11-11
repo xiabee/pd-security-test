@@ -34,15 +34,6 @@ var (
 			Buckets:   []float64{0.5, 1, 2, 4, 8, 16, 20, 40, 60, 90, 120, 180, 240, 300, 480, 600, 720, 900, 1200, 1800, 3600},
 		}, []string{"type"})
 
-	operatorSizeHist = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "pd",
-			Subsystem: "schedule",
-			Name:      "operator_region_size",
-			Help:      "Bucketed histogram of the operator region size.",
-			Buckets:   prometheus.ExponentialBuckets(1, 2, 20), // 1MB~1TB
-		}, []string{"type"})
-
 	operatorWaitCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "pd",
@@ -93,5 +84,4 @@ func init() {
 	prometheus.MustRegister(operatorWaitCounter)
 	prometheus.MustRegister(scatterCounter)
 	prometheus.MustRegister(scatterDistributionCounter)
-	prometheus.MustRegister(operatorSizeHist)
 }

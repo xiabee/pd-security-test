@@ -42,8 +42,8 @@ func NewRemoveFailedStoresCommand() *cobra.Command {
 		Short: "Remove failed stores unsafely",
 		Run:   removeFailedStoresCommandFunc,
 	}
-	cmd.PersistentFlags().Float64("timeout", 300, "timeout in seconds")
 	cmd.AddCommand(NewRemoveFailedStoresShowCommand())
+	cmd.AddCommand(NewRemoveFailedStoresHistoryCommand())
 	return cmd
 }
 
@@ -56,40 +56,51 @@ func NewRemoveFailedStoresShowCommand() *cobra.Command {
 	}
 }
 
+// NewRemoveFailedStoresHistoryCommand returns the unsafe remove failed stores history command.
+func NewRemoveFailedStoresHistoryCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "history",
+		Short: "Show the history of failed stores removal",
+		Run:   removeFailedStoresHistoryCommandFunc,
+	}
+}
+
 func removeFailedStoresCommandFunc(cmd *cobra.Command, args []string) {
 	prefix := fmt.Sprintf("%s/remove-failed-stores", unsafePrefix)
-	if len(args) < 1 {
+	if len(args) != 1 {
 		cmd.Usage()
 		return
 	}
 	strStores := strings.Split(args[0], ",")
-	var stores []uint64
+	stores := make(map[string]interface{})
 	for _, strStore := range strStores {
-		store, err := strconv.ParseUint(strStore, 10, 64)
+		_, err := strconv.Atoi(strStore)
 		if err != nil {
-			cmd.Println(err)
+			cmd.Usage()
 			return
 		}
-		stores = append(stores, store)
+		stores[strStore] = ""
 	}
-	postInput := map[string]interface{}{
-		"stores": stores,
-	}
-	timeout, err := cmd.Flags().GetFloat64("timeout")
-	if err != nil {
-		cmd.Println(err)
-		return
-	} else if timeout != 300 {
-		postInput["timeout"] = timeout
-	}
-	postJSON(cmd, prefix, postInput)
+	postJSON(cmd, prefix, stores)
 }
 
 func removeFailedStoresShowCommandFunc(cmd *cobra.Command, args []string) {
 	var resp string
 	var err error
 	prefix := fmt.Sprintf("%s/remove-failed-stores/show", unsafePrefix)
-	resp, err = doRequest(cmd, prefix, http.MethodGet, http.Header{})
+	resp, err = doRequest(cmd, prefix, http.MethodGet)
+	if err != nil {
+		cmd.Println(err)
+		return
+	}
+	cmd.Println(resp)
+}
+
+func removeFailedStoresHistoryCommandFunc(cmd *cobra.Command, args []string) {
+	var resp string
+	var err error
+	prefix := fmt.Sprintf("%s/remove-failed-stores/history", unsafePrefix)
+	resp, err = doRequest(cmd, prefix, http.MethodGet)
 	if err != nil {
 		cmd.Println(err)
 		return

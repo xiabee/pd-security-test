@@ -39,7 +39,7 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m, testutil.LeakOptions...)
 }
 
-var _ = SerialSuites(&regionSyncerTestSuite{})
+var _ = Suite(&regionSyncerTestSuite{})
 
 type regionSyncerTestSuite struct {
 	ctx    context.Context
@@ -65,11 +65,6 @@ func (i *idAllocator) alloc() uint64 {
 }
 
 func (s *regionSyncerTestSuite) TestRegionSyncer(c *C) {
-	c.Assert(failpoint.Enable("github.com/tikv/pd/server/storage/regionStorageFastFlush", `return(true)`), IsNil)
-	c.Assert(failpoint.Enable("github.com/tikv/pd/server/syncer/noFastExitSync", `return(true)`), IsNil)
-	defer failpoint.Disable("github.com/tikv/pd/server/storage/regionStorageFastFlush")
-	defer failpoint.Disable("github.com/tikv/pd/server/syncer/noFastExitSync")
-
 	cluster, err := tests.NewTestCluster(s.ctx, 3, func(conf *config.Config, serverName string) { conf.PDServerCfg.UseRegionStorage = true })
 	defer cluster.Destroy()
 	c.Assert(err, IsNil)
@@ -81,8 +76,6 @@ func (s *regionSyncerTestSuite) TestRegionSyncer(c *C) {
 	c.Assert(leaderServer.BootstrapCluster(), IsNil)
 	rc := leaderServer.GetServer().GetRaftCluster()
 	c.Assert(rc, NotNil)
-	c.Assert(cluster.WaitRegionSyncerClientsReady(2), IsTrue)
-
 	regionLen := 110
 	regions := initRegions(regionLen)
 	for _, region := range regions {
@@ -135,22 +128,17 @@ func (s *regionSyncerTestSuite) TestRegionSyncer(c *C) {
 	// region storage flush rate limit (3s).
 	time.Sleep(4 * time.Second)
 
-	// test All regions have been synchronized to the cache of followerServer
+	//test All regions have been synchronized to the cache of followerServer
 	followerServer := cluster.GetServer(cluster.GetFollower())
 	c.Assert(followerServer, NotNil)
-	cacheRegions := leaderServer.GetServer().GetBasicCluster().GetRegions()
+	cacheRegions := followerServer.GetServer().GetBasicCluster().GetRegions()
 	c.Assert(cacheRegions, HasLen, regionLen)
-	testutil.WaitUntil(c, func() bool {
-		for _, region := range cacheRegions {
-			r := followerServer.GetServer().GetBasicCluster().GetRegion(region.GetID())
-			if !(c.Check(r.GetMeta(), DeepEquals, region.GetMeta()) &&
-				c.Check(r.GetStat(), DeepEquals, region.GetStat()) &&
-				c.Check(r.GetLeader(), DeepEquals, region.GetLeader())) {
-				return false
-			}
-		}
-		return true
-	})
+	for _, region := range cacheRegions {
+		r := followerServer.GetServer().GetBasicCluster().GetRegion(region.GetID())
+		c.Assert(r.GetMeta(), DeepEquals, region.GetMeta())
+		c.Assert(r.GetStat(), DeepEquals, region.GetStat())
+		c.Assert(r.GetLeader(), DeepEquals, region.GetLeader())
+	}
 
 	err = leaderServer.Stop()
 	c.Assert(err, IsNil)
@@ -164,7 +152,6 @@ func (s *regionSyncerTestSuite) TestRegionSyncer(c *C) {
 		c.Assert(r.GetMeta(), DeepEquals, region.GetMeta())
 		c.Assert(r.GetStat(), DeepEquals, region.GetStat())
 		c.Assert(r.GetLeader(), DeepEquals, region.GetLeader())
-		c.Assert(r.GetBuckets(), DeepEquals, region.GetBuckets())
 	}
 }
 
@@ -272,16 +259,7 @@ func initRegions(regionLen int) []*core.RegionInfo {
 				{Id: allocator.alloc(), StoreId: uint64(0)},
 			},
 		}
-		region := core.NewRegionInfo(r, r.Peers[0])
-		if i < regionLen/2 {
-			buckets := &metapb.Buckets{
-				RegionId: r.Id,
-				Keys:     [][]byte{r.StartKey, r.EndKey},
-				Version:  1,
-			}
-			region.UpdateBuckets(buckets, region.GetBuckets())
-		}
-		regions = append(regions, region)
+		regions = append(regions, core.NewRegionInfo(r, r.Peers[0]))
 	}
 	return regions
 }

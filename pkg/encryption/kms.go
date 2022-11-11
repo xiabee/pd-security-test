@@ -32,8 +32,7 @@ const (
 	kmsVendorAWS = "AWS"
 
 	// K8S IAM related environment variables.
-	envAwsRoleArn = "AWS_ROLE_ARN"
-	// #nosec
+	envAwsRoleArn              = "AWS_ROLE_ARN"
 	envAwsWebIdentityTokenFile = "AWS_WEB_IDENTITY_TOKEN_FILE"
 	envAwsRoleSessionName      = "AWS_ROLE_SESSION_NAME"
 )

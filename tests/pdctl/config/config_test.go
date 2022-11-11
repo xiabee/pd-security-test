@@ -186,23 +186,6 @@ func (s *configTestSuite) TestConfig(c *C) {
 	c.Assert(json.Unmarshal(output, &labelPropertyCfg), IsNil)
 	c.Assert(labelPropertyCfg, DeepEquals, svr.GetLabelProperty())
 
-	// config set min-resolved-ts-persistence-interval <value>
-	args = []string{"-u", pdAddr, "config", "set", "min-resolved-ts-persistence-interval", "1s"}
-	_, err = pdctl.ExecuteCommand(cmd, args...)
-	c.Assert(err, IsNil)
-	c.Assert(svr.GetPDServerConfig().MinResolvedTSPersistenceInterval, Equals, typeutil.NewDuration(time.Second))
-
-	// config set max-store-preparing-time 10m
-	args = []string{"-u", pdAddr, "config", "set", "max-store-preparing-time", "10m"}
-	_, err = pdctl.ExecuteCommand(cmd, args...)
-	c.Assert(err, IsNil)
-	c.Assert(svr.GetScheduleConfig().MaxStorePreparingTime, Equals, typeutil.NewDuration(10*time.Minute))
-
-	args = []string{"-u", pdAddr, "config", "set", "max-store-preparing-time", "0s"}
-	_, err = pdctl.ExecuteCommand(cmd, args...)
-	c.Assert(err, IsNil)
-	c.Assert(svr.GetScheduleConfig().MaxStorePreparingTime, Equals, typeutil.NewDuration(0))
-
 	// test config read and write
 	testItems := []testItem{
 		{"leader-schedule-limit", uint64(64), func(scheduleConfig *config.ScheduleConfig) interface{} {
@@ -316,7 +299,7 @@ func (s *configTestSuite) TestPlacementRules(c *C) {
 		Count:   2,
 	})
 	b, _ = json.Marshal(rules)
-	os.WriteFile(fname, b, 0600)
+	os.WriteFile(fname, b, 0644)
 	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "save", "--in="+fname)
 	c.Assert(err, IsNil)
 
@@ -333,7 +316,7 @@ func (s *configTestSuite) TestPlacementRules(c *C) {
 	// test delete
 	rules[0].Count = 0
 	b, _ = json.Marshal(rules)
-	os.WriteFile(fname, b, 0600)
+	os.WriteFile(fname, b, 0644)
 	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "save", "--in="+fname)
 	c.Assert(err, IsNil)
 	output, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "show", "--group=pd")
@@ -464,7 +447,7 @@ func (s *configTestSuite) TestPlacementRuleBundle(c *C) {
 	bundle.Rules[0].GroupID = "pe"
 	b, err = json.Marshal(bundle)
 	c.Assert(err, IsNil)
-	c.Assert(os.WriteFile(fname, b, 0600), IsNil)
+	c.Assert(os.WriteFile(fname, b, 0644), IsNil)
 	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "set", "--in="+fname)
 	c.Assert(err, IsNil)
 
@@ -494,7 +477,7 @@ func (s *configTestSuite) TestPlacementRuleBundle(c *C) {
 	bundle.Rules = []*placement.Rule{{GroupID: "pf", ID: "default", Role: "voter", Count: 3}}
 	b, err = json.Marshal(bundle)
 	c.Assert(err, IsNil)
-	c.Assert(os.WriteFile(fname, b, 0600), IsNil)
+	c.Assert(os.WriteFile(fname, b, 0644), IsNil)
 	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "set", "--in="+fname)
 	c.Assert(err, IsNil)
 
@@ -514,7 +497,7 @@ func (s *configTestSuite) TestPlacementRuleBundle(c *C) {
 	bundles = append(bundles, bundle)
 	b, err = json.Marshal(bundles)
 	c.Assert(err, IsNil)
-	c.Assert(os.WriteFile(fname, b, 0600), IsNil)
+	c.Assert(os.WriteFile(fname, b, 0644), IsNil)
 	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "save", "--in="+fname)
 	c.Assert(err, IsNil)
 
@@ -532,7 +515,7 @@ func (s *configTestSuite) TestPlacementRuleBundle(c *C) {
 	bundles = []placement.GroupBundle{{ID: "pe", Rules: []*placement.Rule{}}}
 	b, err = json.Marshal(bundles)
 	c.Assert(err, IsNil)
-	c.Assert(os.WriteFile(fname, b, 0600), IsNil)
+	c.Assert(os.WriteFile(fname, b, 0644), IsNil)
 	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "save", "--in="+fname, "--partial")
 	c.Assert(err, IsNil)
 
@@ -599,11 +582,6 @@ func (s *configTestSuite) TestReplicationMode(c *C) {
 	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "set", "replication-mode", "dr-auto-sync", "primary-replicas", "5")
 	c.Assert(err, IsNil)
 	conf.DRAutoSync.PrimaryReplicas = 5
-	check()
-
-	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "set", "replication-mode", "dr-auto-sync", "wait-store-timeout", "10m")
-	c.Assert(err, IsNil)
-	conf.DRAutoSync.WaitStoreTimeout = typeutil.NewDuration(time.Minute * 10)
 	check()
 }
 
@@ -710,7 +688,7 @@ func (s *configTestSuite) TestUpdateDefaultReplicaConfig(c *C) {
 	}
 	b, err := json.Marshal(rules)
 	c.Assert(err, IsNil)
-	os.WriteFile(fname, b, 0600)
+	os.WriteFile(fname, b, 0644)
 	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "save", "--in="+fname)
 	c.Assert(err, IsNil)
 	checkMaxReplicas(3)
@@ -752,7 +730,7 @@ func (s *configTestSuite) TestPDServerConfig(c *C) {
 	json.Unmarshal(output, &conf)
 
 	c.Assert(conf.UseRegionStorage, Equals, bool(true))
-	c.Assert(conf.MaxResetTSGap.Duration, Equals, 24*time.Hour)
+	c.Assert(conf.MaxResetTSGap.Duration, Equals, time.Duration(24*time.Hour))
 	c.Assert(conf.KeyType, Equals, "table")
 	c.Assert(conf.RuntimeServices, DeepEquals, typeutil.StringSlice([]string{}))
 	c.Assert(conf.MetricStorage, Equals, "")

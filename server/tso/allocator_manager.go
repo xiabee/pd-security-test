@@ -31,11 +31,10 @@ import (
 	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/pkg/grpcutil"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/election"
+	"github.com/tikv/pd/server/kv"
 	"github.com/tikv/pd/server/member"
-	"github.com/tikv/pd/server/storage/kv"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -48,8 +47,7 @@ const (
 	patrolStep                  = 1 * time.Second
 	defaultAllocatorLeaderLease = 3
 	leaderTickInterval          = 50 * time.Millisecond
-	localTSOAllocatorEtcdPrefix = "lta"
-	localTSOSuffixEtcdPrefix    = "lts"
+	localTSOSuffixEtcdPrefix    = "local-tso-suffix"
 )
 
 var (
@@ -100,7 +98,7 @@ func (info *DCLocationInfo) clone() DCLocationInfo {
 type AllocatorManager struct {
 	enableLocalTSO bool
 	mu             struct {
-		syncutil.RWMutex
+		sync.RWMutex
 		// There are two kinds of TSO Allocators:
 		//   1. Global TSO Allocator, as a global single point to allocate
 		//      TSO for global transactions, such as cross-region cases.
@@ -123,7 +121,7 @@ type AllocatorManager struct {
 	securityConfig         *grpcutil.TLSConfig
 	// for gRPC use
 	localAllocatorConn struct {
-		syncutil.RWMutex
+		sync.RWMutex
 		clientConns map[string]*grpc.ClientConn
 	}
 }
@@ -330,13 +328,7 @@ func (am *AllocatorManager) getAllocatorPath(dcLocation string) string {
 	if dcLocation == GlobalDCLocation {
 		return am.rootPath
 	}
-	return path.Join(am.getLocalTSOAllocatorPath(), dcLocation)
-}
-
-// Add a prefix to the root path to prevent being conflicted
-// with other system key paths such as leader, member, alloc_id, raft, etc.
-func (am *AllocatorManager) getLocalTSOAllocatorPath() string {
-	return path.Join(am.rootPath, localTSOAllocatorEtcdPrefix)
+	return path.Join(am.rootPath, dcLocation)
 }
 
 // similar logic with leaderLoop in server/server.go
@@ -741,7 +733,7 @@ func (am *AllocatorManager) getOrCreateLocalTSOSuffix(dcLocation string) (int32,
 			zap.Uint64("server-id", am.member.ID()))
 		return -1, errs.ErrEtcdTxnConflict.FastGenByArgs()
 	}
-	return maxSuffix, nil
+	return int32(maxSuffix), nil
 }
 
 func (am *AllocatorManager) getDCLocationSuffixMapFromEtcd() (map[string]int32, error) {
@@ -1153,7 +1145,7 @@ func (am *AllocatorManager) transferLocalAllocator(dcLocation string, serverID u
 }
 
 func (am *AllocatorManager) nextLeaderKey(dcLocation string) string {
-	return path.Join(am.getAllocatorPath(dcLocation), "next-leader")
+	return path.Join(am.rootPath, dcLocation, "next-leader")
 }
 
 // EnableLocalTSO returns the value of AllocatorManager.enableLocalTSO.

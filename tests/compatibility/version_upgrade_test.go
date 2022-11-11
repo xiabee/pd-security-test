@@ -66,7 +66,7 @@ func (s *compatibilityTestSuite) TestStoreRegister(c *C) {
 		},
 	}
 
-	svr := &server.GrpcServer{Server: leaderServer.GetServer()}
+	svr := leaderServer.GetServer()
 	_, err = svr.PutStore(context.Background(), putStoreRequest)
 	c.Assert(err, IsNil)
 	// FIX ME: read v0.0.0 in sometime
@@ -142,7 +142,7 @@ func (s *compatibilityTestSuite) TestRollingUpgrade(c *C) {
 		},
 	}
 
-	svr := &server.GrpcServer{Server: leaderServer.GetServer()}
+	svr := leaderServer.GetServer()
 	for _, store := range stores {
 		_, err = svr.PutStore(context.Background(), store)
 		c.Assert(err, IsNil)
@@ -152,7 +152,6 @@ func (s *compatibilityTestSuite) TestRollingUpgrade(c *C) {
 	for i, store := range stores {
 		if i == 0 {
 			store.Store.State = metapb.StoreState_Tombstone
-			store.Store.NodeState = metapb.NodeState_Removed
 		}
 		store.Store.Version = "2.1.0"
 		resp, err := svr.PutStore(context.Background(), store)

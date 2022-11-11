@@ -14,6 +14,36 @@
 
 package statistics
 
+// FlowKind is a identify Flow types.
+type FlowKind uint32
+
+// Flags for flow.
+const (
+	WriteFlow FlowKind = iota
+	ReadFlow
+)
+
+func (k FlowKind) String() string {
+	switch k {
+	case WriteFlow:
+		return "write"
+	case ReadFlow:
+		return "read"
+	}
+	return "unimplemented"
+}
+
+// RegionStats returns hot items according to kind
+func (k FlowKind) RegionStats() []RegionStatKind {
+	switch k {
+	case WriteFlow:
+		return []RegionStatKind{RegionWriteBytes, RegionWriteKeys, RegionWriteQuery}
+	case ReadFlow:
+		return []RegionStatKind{RegionReadBytes, RegionReadKeys, RegionReadQuery}
+	}
+	return nil
+}
+
 // RegionStatKind represents the statistics type of region.
 type RegionStatKind int
 
@@ -113,56 +143,4 @@ func (k sourceKind) String() string {
 		return "inherit"
 	}
 	return "unknown"
-}
-
-// RWType is a identify hot region types.
-type RWType int
-
-// Flags for r/w type.
-const (
-	Write RWType = iota
-	Read
-)
-
-func (k RWType) String() string {
-	switch k {
-	case Write:
-		return "write"
-	case Read:
-		return "read"
-	}
-	return "unimplemented"
-}
-
-// RegionStats returns hot items according to kind
-func (k RWType) RegionStats() []RegionStatKind {
-	switch k {
-	case Write:
-		return []RegionStatKind{RegionWriteBytes, RegionWriteKeys, RegionWriteQuery}
-	case Read:
-		return []RegionStatKind{RegionReadBytes, RegionReadKeys, RegionReadQuery}
-	}
-	return nil
-}
-
-// ActionType indicates the action type for the stat item.
-type ActionType int
-
-// Flags for action type.
-const (
-	Add ActionType = iota
-	Remove
-	Update
-)
-
-func (t ActionType) String() string {
-	switch t {
-	case Add:
-		return "add"
-	case Remove:
-		return "remove"
-	case Update:
-		return "update"
-	}
-	return "unimplemented"
 }

@@ -56,11 +56,13 @@ func (pq *PriorityQueue) Put(priority int, value PriorityQueueItem) bool {
 			}
 			pq.Remove(min.(*Entry).Value.ID())
 		}
-	} else if entry.Priority != priority { // delete before update
-		pq.btree.Delete(entry)
-		entry.Priority = priority
+	} else {
+		// delete before update
+		if entry.Priority != priority {
+			pq.btree.Delete(entry)
+			entry.Priority = priority
+		}
 	}
-
 	pq.btree.ReplaceOrInsert(entry)
 	pq.items[id] = entry
 	return true

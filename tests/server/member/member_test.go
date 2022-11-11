@@ -111,9 +111,9 @@ func (s *memberTestSuite) TestMemberDelete(c *C) {
 	httpClient := &http.Client{Timeout: 15 * time.Second}
 	for _, t := range table {
 		c.Log(time.Now(), "try to delete:", t.path)
-		testutil.WaitUntil(c, func() bool {
+		testutil.WaitUntil(c, func(c *C) bool {
 			addr := leader.GetConfig().ClientUrls + "/pd/api/v1/members/" + t.path
-			req, err := http.NewRequest(http.MethodDelete, addr, nil)
+			req, err := http.NewRequest("DELETE", addr, nil)
 			c.Assert(err, IsNil)
 			res, err := httpClient.Do(req)
 			c.Assert(err, IsNil)
@@ -187,7 +187,7 @@ func (s *memberTestSuite) TestLeaderPriority(c *C) {
 	server1 := cluster.GetServer(leader1)
 	addr := server1.GetConfig().ClientUrls
 	// PD leader should sync with etcd leader.
-	testutil.WaitUntil(c, func() bool {
+	testutil.WaitUntil(c, func(c *C) bool {
 		return cluster.GetLeader() == leader1
 	})
 	// Bind a lower priority to current leader.
@@ -195,14 +195,14 @@ func (s *memberTestSuite) TestLeaderPriority(c *C) {
 	// Wait etcd leader change.
 	leader2 := s.waitEtcdLeaderChange(c, server1, leader1)
 	// PD leader should sync with etcd leader again.
-	testutil.WaitUntil(c, func() bool {
+	testutil.WaitUntil(c, func(c *C) bool {
 		return cluster.GetLeader() == leader2
 	})
 }
 
 func (s *memberTestSuite) post(c *C, url string, body string) {
-	testutil.WaitUntil(c, func() bool {
-		res, err := http.Post(url, "", bytes.NewBufferString(body)) // #nosec
+	testutil.WaitUntil(c, func(c *C) bool {
+		res, err := http.Post(url, "", bytes.NewBufferString(body))
 		c.Assert(err, IsNil)
 		b, err := io.ReadAll(res.Body)
 		res.Body.Close()
@@ -214,7 +214,7 @@ func (s *memberTestSuite) post(c *C, url string, body string) {
 
 func (s *memberTestSuite) waitEtcdLeaderChange(c *C, server *tests.TestServer, old string) string {
 	var leader string
-	testutil.WaitUntil(c, func() bool {
+	testutil.WaitUntil(c, func(c *C) bool {
 		var err error
 		leader, err = server.GetEtcdLeader()
 		if err != nil {
@@ -271,7 +271,7 @@ func (s *memberTestSuite) TestLeaderResignWithBlock(c *C) {
 
 func (s *memberTestSuite) waitLeaderChange(c *C, cluster *tests.TestCluster, old string) string {
 	var leader string
-	testutil.WaitUntil(c, func() bool {
+	testutil.WaitUntil(c, func(c *C) bool {
 		leader = cluster.GetLeader()
 		if leader == old || leader == "" {
 			return false
@@ -383,7 +383,7 @@ func (s *leaderTestSuite) sendRequest(c *C, addr string) {
 
 func mustWaitLeader(c *C, svrs []*server.Server) *server.Server {
 	var leader *server.Server
-	testutil.WaitUntil(c, func() bool {
+	testutil.WaitUntil(c, func(c *C) bool {
 		for _, s := range svrs {
 			if !s.IsClosed() && s.GetMember().IsLeader() {
 				leader = s

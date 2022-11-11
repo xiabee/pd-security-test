@@ -16,14 +16,14 @@ package core
 
 import (
 	"math"
+	"sync"
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/tikv/pd/pkg/movingaverage"
-	"github.com/tikv/pd/pkg/syncutil"
 )
 
 type storeStats struct {
-	mu       syncutil.RWMutex
+	mu       sync.RWMutex
 	rawStats *pdpb.StoreStats
 
 	// avgAvailable is used to make available smooth, aka no sudden changes.

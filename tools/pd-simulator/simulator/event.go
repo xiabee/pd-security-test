@@ -84,7 +84,7 @@ type WriteFlowOnSpot struct {
 func (e *WriteFlowOnSpot) Run(raft *RaftEngine, tickCount int64) bool {
 	res := e.descriptor.Step(tickCount)
 	for key, size := range res {
-		region := raft.GetRegionByKey([]byte(key))
+		region := raft.SearchRegion([]byte(key))
 		simutil.Logger.Debug("search the region", zap.Reflect("region", region.GetMeta()))
 		if region == nil {
 			simutil.Logger.Error("region not found for key", zap.String("key", key))

@@ -86,10 +86,11 @@ func (c *LRU) contains(key uint64) bool {
 
 // Remove eliminates an item from cache.
 func (c *LRU) Remove(key uint64) {
-	c.removeIfExist(key)
+	c.remove(key)
 }
 
-func (c *LRU) removeIfExist(key uint64) bool {
+// revive:disable-next-line:confusing-naming
+func (c *LRU) remove(key uint64) bool {
 	if ele, ok := c.cache[key]; ok {
 		c.removeElement(ele)
 		return ok

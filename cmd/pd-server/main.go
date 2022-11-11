@@ -32,7 +32,6 @@ import (
 	"github.com/tikv/pd/pkg/swaggerserver"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
-	"github.com/tikv/pd/server/apiv2"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/join"
 	"go.uber.org/zap"
@@ -75,6 +74,12 @@ func main() {
 	// Flushing any buffered log entries
 	defer log.Sync()
 
+	// The old logger
+	err = logutil.InitLogger(&cfg.Log)
+	if err != nil {
+		log.Fatal("initialize logger error", errs.ZapError(err))
+	}
+
 	server.LogPDInfo()
 
 	for _, msg := range cfg.WarningMsgs {
@@ -93,7 +98,7 @@ func main() {
 
 	// Creates server.
 	ctx, cancel := context.WithCancel(context.Background())
-	serviceBuilders := []server.HandlerBuilder{api.NewHandler, apiv2.NewV2Handler, swaggerserver.NewHandler, autoscaling.NewHandler}
+	serviceBuilders := []server.HandlerBuilder{api.NewHandler, swaggerserver.NewHandler, autoscaling.NewHandler}
 	serviceBuilders = append(serviceBuilders, dashboard.GetServiceBuilders()...)
 	svr, err := server.CreateServer(ctx, cfg, serviceBuilders...)
 	if err != nil {

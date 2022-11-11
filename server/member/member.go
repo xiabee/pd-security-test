@@ -33,7 +33,7 @@ import (
 	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/election"
-	"github.com/tikv/pd/server/storage/kv"
+	"github.com/tikv/pd/server/kv"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
 	"go.uber.org/zap"
@@ -316,11 +316,10 @@ func (m *Member) SetMemberLeaderPriority(id uint64, priority int) error {
 	key := m.getMemberLeaderPriorityPath(id)
 	res, err := m.leadership.LeaderTxn().Then(clientv3.OpPut(key, strconv.Itoa(priority))).Commit()
 	if err != nil {
-		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
+		return errors.WithStack(err)
 	}
 	if !res.Succeeded {
-		log.Error("save etcd leader priority failed, maybe not pd leader")
-		return errs.ErrEtcdTxnConflict.FastGenByArgs()
+		return errors.New("save etcd leader priority failed, maybe not pd leader")
 	}
 	return nil
 }
@@ -330,11 +329,10 @@ func (m *Member) DeleteMemberLeaderPriority(id uint64) error {
 	key := m.getMemberLeaderPriorityPath(id)
 	res, err := m.leadership.LeaderTxn().Then(clientv3.OpDelete(key)).Commit()
 	if err != nil {
-		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
+		return errors.WithStack(err)
 	}
 	if !res.Succeeded {
-		log.Error("delete etcd leader priority failed, maybe not pd leader")
-		return errs.ErrEtcdTxnConflict.FastGenByArgs()
+		return errors.New("delete etcd leader priority failed, maybe not pd leader")
 	}
 	return nil
 }
@@ -344,11 +342,10 @@ func (m *Member) DeleteMemberDCLocationInfo(id uint64) error {
 	key := m.GetDCLocationPath(id)
 	res, err := m.leadership.LeaderTxn().Then(clientv3.OpDelete(key)).Commit()
 	if err != nil {
-		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
+		return errors.WithStack(err)
 	}
 	if !res.Succeeded {
-		log.Error("delete dc-location info failed, maybe not pd leader")
-		return errs.ErrEtcdTxnConflict.FastGenByArgs()
+		return errors.New("delete dc-location info failed, maybe not pd leader")
 	}
 	return nil
 }

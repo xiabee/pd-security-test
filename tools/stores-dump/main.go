@@ -65,11 +65,7 @@ func main() {
 	rootPath = path.Join(pdRootPath, strconv.FormatUint(*clusterID, 10))
 	f, err := os.Create(*filePath)
 	checkErr(err)
-	defer func() {
-		if err := f.Close(); err != nil {
-			fmt.Printf("error closing file: %s\n", err)
-		}
-	}()
+	defer f.Close()
 
 	urls := strings.Split(*endpoints, ",")
 

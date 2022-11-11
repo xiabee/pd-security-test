@@ -15,8 +15,6 @@
 package placement
 
 import (
-	"time"
-
 	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
@@ -177,10 +175,6 @@ func (s *testRuleSuite) TestRegionRuleFitCache(c *C) {
 		c.Log(testcase.name)
 		c.Assert(cache.IsUnchanged(testcase.region, testcase.rules, mockStores(3)), Equals, testcase.unchanged)
 	}
-	for _, testcase := range testcases {
-		c.Log(testcase.name)
-		c.Assert(cache.IsUnchanged(testcase.region, testcase.rules, mockStoresNoHeartbeat(3)), Equals, false)
-	}
 	// Invalid Input4
 	c.Assert(cache.IsUnchanged(mockRegion(3, 0), addExtraRules(0), nil), IsFalse)
 	// Invalid Input5
@@ -203,16 +197,6 @@ func mockRegionRuleFitCache(region *core.RegionInfo, rules []*Rule, regionStores
 }
 
 func mockStores(num int) []*core.StoreInfo {
-	stores := make([]*core.StoreInfo, 0, num)
-	now := time.Now()
-	for i := 1; i <= num; i++ {
-		stores = append(stores, core.NewStoreInfo(&metapb.Store{Id: uint64(i)},
-			core.SetLastHeartbeatTS(now)))
-	}
-	return stores
-}
-
-func mockStoresNoHeartbeat(num int) []*core.StoreInfo {
 	stores := make([]*core.StoreInfo, 0, num)
 	for i := 1; i <= num; i++ {
 		stores = append(stores, core.NewStoreInfo(&metapb.Store{Id: uint64(i)}))

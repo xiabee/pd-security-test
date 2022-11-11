@@ -15,7 +15,9 @@
 package storelimit
 
 import (
-	"github.com/tikv/pd/pkg/ratelimit"
+	"time"
+
+	"github.com/juju/ratelimit"
 )
 
 const (
@@ -66,7 +68,7 @@ func (t Type) String() string {
 
 // StoreLimit limits the operators of a store
 type StoreLimit struct {
-	limiter         *ratelimit.RateLimiter
+	bucket          *ratelimit.Bucket
 	regionInfluence int64
 	ratePerSec      float64
 }
@@ -85,16 +87,15 @@ func NewStoreLimit(ratePerSec float64, regionInfluence int64) *StoreLimit {
 		ratePerSec *= float64(regionInfluence)
 	}
 	return &StoreLimit{
-		limiter:         ratelimit.NewRateLimiter(ratePerSec, int(capacity)),
+		bucket:          ratelimit.NewBucketWithRate(ratePerSec, capacity),
 		regionInfluence: regionInfluence,
 		ratePerSec:      rate,
 	}
 }
 
 // Available returns the number of available tokens
-func (l *StoreLimit) Available(n int64) bool {
-	// Unlimited = 1e8, so can convert int64 to int
-	return l.limiter.Available(int(n))
+func (l *StoreLimit) Available() int64 {
+	return l.bucket.Available()
 }
 
 // Rate returns the fill rate of the bucket, in tokens per second.
@@ -103,6 +104,6 @@ func (l *StoreLimit) Rate() float64 {
 }
 
 // Take takes count tokens from the bucket without blocking.
-func (l *StoreLimit) Take(count int64) {
-	l.limiter.AllowN(int(count))
+func (l *StoreLimit) Take(count int64) time.Duration {
+	return l.bucket.Take(count)
 }

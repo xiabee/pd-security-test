@@ -17,12 +17,11 @@ package simulator
 import (
 	"fmt"
 	"math"
-
-	"github.com/tikv/pd/pkg/syncutil"
+	"sync"
 )
 
 type taskStatistics struct {
-	syncutil.RWMutex
+	sync.RWMutex
 	addPeer        map[uint64]int
 	removePeer     map[uint64]int
 	addLearner     map[uint64]int
@@ -111,7 +110,7 @@ func (t *taskStatistics) incTransferLeader(fromPeerID, toPeerID uint64) {
 }
 
 type snapshotStatistics struct {
-	syncutil.RWMutex
+	sync.RWMutex
 	receive map[uint64]int
 	send    map[uint64]int
 }

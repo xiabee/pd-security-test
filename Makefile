@@ -1,21 +1,44 @@
-# Build pd-server, pd-ctl, pd-recover
-default: build
+PD_PKG := github.com/tikv/pd
 
-# Development validation.
-all: dev
-dev: build check tools test
+TEST_PKGS := $(shell find . -iname "*_test.go" -exec dirname {} \; | \
+                     sort -u | sed -e "s/^\./github.com\/tikv\/pd/")
+INTEGRATION_TEST_PKGS := $(shell find . -iname "*_test.go" -exec dirname {} \; | \
+                     sort -u | sed -e "s/^\./github.com\/tikv\/pd/" | grep -E "tests")
+TSO_INTEGRATION_TEST_PKGS := $(shell find . -iname "*_test.go" -exec dirname {} \; | \
+                     sort -u | sed -e "s/^\./github.com\/tikv\/pd/" | grep -E "server/tso")
+BASIC_TEST_PKGS := $(filter-out $(INTEGRATION_TEST_PKGS),$(TEST_PKGS))
 
-# Lightweight development validation.
-dev-basic: build check basic-test
+PACKAGES := go list ./...
+PACKAGE_DIRECTORIES := $(PACKAGES) | sed 's|$(PD_PKG)/||'
+GOCHECKER := awk '{ print } END { if (NR > 0) { exit 1 } }'
+OVERALLS := overalls
 
-.PHONY: default all dev dev-basic
+BUILD_BIN_PATH := $(shell pwd)/bin
+GO_TOOLS_BIN_PATH := $(shell pwd)/.tools/bin
+PATH := $(GO_TOOLS_BIN_PATH):$(PATH)
+SHELL := env PATH='$(PATH)' GOBIN='$(GO_TOOLS_BIN_PATH)' $(shell which bash)
 
-#### Build ####
+FAILPOINT_ENABLE  := $$(find $$PWD/ -type d | grep -vE "\.git" | xargs failpoint-ctl enable)
+FAILPOINT_DISABLE := $$(find $$PWD/ -type d | grep -vE "\.git" | xargs failpoint-ctl disable)
+
+DEADLOCK_ENABLE := $$(\
+						find . -name "*.go" \
+						| xargs -n 1 sed -i.bak 's/sync\.RWMutex/deadlock.RWMutex/;s/sync\.Mutex/deadlock.Mutex/' && \
+						find . -name "*.go" | xargs grep -lE "(deadlock\.RWMutex|deadlock\.Mutex)" \
+						| xargs goimports -w)
+DEADLOCK_DISABLE := $$(\
+						find . -name "*.go" \
+						| xargs -n 1 sed -i.bak 's/deadlock\.RWMutex/sync.RWMutex/;s/deadlock\.Mutex/sync.Mutex/' && \
+						find . -name "*.go" | xargs grep -lE "(sync\.RWMutex|sync\.Mutex)" \
+						| xargs goimports -w && \
+						find . -name "*.bak" | xargs rm && \
+						go mod tidy)
 
 BUILD_FLAGS ?=
 BUILD_TAGS ?=
 BUILD_CGO_ENABLED := 0
 PD_EDITION ?= Community
+
 # Ensure PD_EDITION is set to Community or Enterprise before running build process.
 ifneq "$(PD_EDITION)" "Community"
 ifneq "$(PD_EDITION)" "Enterprise"
@@ -53,11 +76,24 @@ ifneq ($(DASHBOARD), 0)
 	LDFLAGS += -X "github.com/pingcap/tidb-dashboard/pkg/utils/version.BuildGitHash=$(shell scripts/describe-dashboard.sh git-hash)"
 endif
 
-BUILD_BIN_PATH := $(shell pwd)/bin
+GOVER_MAJOR := $(shell go version | sed -E -e "s/.*go([0-9]+)[.]([0-9]+).*/\1/")
+GOVER_MINOR := $(shell go version | sed -E -e "s/.*go([0-9]+)[.]([0-9]+).*/\2/")
+GO111 := $(shell [ $(GOVER_MAJOR) -gt 1 ] || [ $(GOVER_MAJOR) -eq 1 ] && [ $(GOVER_MINOR) -ge 11 ]; echo $$?)
+ifeq ($(GO111), 1)
+  $(error "go below 1.11 does not support modules")
+endif
+
+default: build
+
+all: dev
+
+dev: build check tools test
+
+ci: build check basic-test
 
 build: pd-server pd-ctl pd-recover
 
-tools: pd-tso-bench pd-heartbeat-bench regions-dump stores-dump
+tools: pd-tso-bench pd-analysis pd-heartbeat-bench
 
 PD_SERVER_DEP :=
 ifeq ($(SWAGGER), 1)
@@ -69,52 +105,29 @@ ifneq ($(DASHBOARD_DISTRIBUTION_DIR),)
 endif
 PD_SERVER_DEP += dashboard-ui
 
+pd-server: export GO111MODULE=on
 pd-server: ${PD_SERVER_DEP}
 	CGO_ENABLED=$(BUILD_CGO_ENABLED) go build $(BUILD_FLAGS) -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -tags "$(BUILD_TAGS)" -o $(BUILD_BIN_PATH)/pd-server cmd/pd-server/main.go
 
+pd-server-basic: export GO111MODULE=on
 pd-server-basic:
 	SWAGGER=0 DASHBOARD=0 $(MAKE) pd-server
 
-.PHONY: build tools pd-server pd-server-basic
+# dependent
+install-go-tools: export GO111MODULE=on
+install-go-tools:
+	@mkdir -p $(GO_TOOLS_BIN_PATH)
+	@which golangci-lint >/dev/null 2>&1 || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GO_TOOLS_BIN_PATH) v1.38.0
+	@grep '_' tools.go | sed 's/"//g' | awk '{print $$2}' | xargs go install
 
-# Tools
+swagger-spec: export GO111MODULE=on
+swagger-spec: install-go-tools
+	go mod vendor
+	swag init --parseVendor -generalInfo server/api/router.go --exclude vendor/github.com/pingcap/tidb-dashboard --output docs/swagger
+	go mod tidy
+	rm -rf vendor
 
-pd-ctl:
-	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-ctl tools/pd-ctl/main.go
-pd-tso-bench:
-	cd tools/pd-tso-bench && CGO_ENABLED=0 go build -o $(BUILD_BIN_PATH)/pd-tso-bench main.go
-pd-recover:
-	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-recover tools/pd-recover/main.go
-pd-analysis:
-	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-analysis tools/pd-analysis/main.go
-pd-heartbeat-bench:
-	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-heartbeat-bench tools/pd-heartbeat-bench/main.go
-simulator:
-	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-simulator tools/pd-simulator/main.go
-regions-dump:
-	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/regions-dump tools/regions-dump/main.go
-stores-dump:
-	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/stores-dump tools/stores-dump/main.go
-
-.PHONY: pd-ctl pd-tso-bench pd-recover pd-analysis pd-heartbeat-bench simulator regions-dump stores-dump
-
-#### Docker image ####
-
-docker-image:
-	$(eval DOCKER_PS_EXIT_CODE=$(shell docker ps > /dev/null 2>&1 ; echo $$?))
-	@if [ $(DOCKER_PS_EXIT_CODE) -ne 0 ]; then \
-	echo "Encountered problem while invoking docker cli. Is the docker daemon running?"; \
-	fi
-	docker build --no-cache -t tikv/pd .
-
-.PHONY: docker-image
-
-#### Build utils ###
-
-swagger-spec: install-tools
-	swag init --parseDependency --parseInternal --parseDepth 1 --dir server --generalInfo api/router.go --output docs/swagger
-	swag fmt --dir server
-
+dashboard-ui: export GO111MODULE=on
 dashboard-ui:
 	./scripts/embed-dashboard-ui.sh
 
@@ -122,145 +135,112 @@ dashboard-replace-distro-info:
 	rm -f pkg/dashboard/distro/distro_info.go
 	cp $(DASHBOARD_DISTRIBUTION_DIR)/distro_info.go pkg/dashboard/distro/distro_info.go
 
-.PHONY: swagger-spec dashboard-ui dashboard-replace-distro-info
+# Tools
+pd-ctl: export GO111MODULE=on
+pd-ctl:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-ctl tools/pd-ctl/main.go
+pd-tso-bench: export GO111MODULE=on
+pd-tso-bench:
+	CGO_ENABLED=0 go build -o $(BUILD_BIN_PATH)/pd-tso-bench tools/pd-tso-bench/main.go
+pd-recover: export GO111MODULE=on
+pd-recover:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-recover tools/pd-recover/main.go
+pd-analysis: export GO111MODULE=on
+pd-analysis:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-analysis tools/pd-analysis/main.go
+pd-heartbeat-bench: export GO111MODULE=on
+pd-heartbeat-bench:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-heartbeat-bench tools/pd-heartbeat-bench/main.go
 
-#### Static tools ####
+test: install-go-tools
+	# testing all pkgs...
+	@$(DEADLOCK_ENABLE)
+	@$(FAILPOINT_ENABLE)
+	CGO_ENABLED=1 GO111MODULE=on go test -tags tso_function_test -timeout 20m -race -cover $(TEST_PKGS) || { $(FAILPOINT_DISABLE); $(DEADLOCK_DISABLE); exit 1; }
+	@$(FAILPOINT_DISABLE)
+	@$(DEADLOCK_DISABLE)
 
-PD_PKG := github.com/tikv/pd
-PACKAGES := $(shell go list ./...)
+basic-test:
+	# testing basic pkgs...
+	@$(FAILPOINT_ENABLE)
+	GO111MODULE=on go test $(BASIC_TEST_PKGS) || { $(FAILPOINT_DISABLE); exit 1; }
+	@$(FAILPOINT_DISABLE)
 
-GO_TOOLS_BIN_PATH := $(shell pwd)/.tools/bin
-PATH := $(GO_TOOLS_BIN_PATH):$(PATH)
-SHELL := env PATH='$(PATH)' GOBIN='$(GO_TOOLS_BIN_PATH)' $(shell which bash)
+test-with-cover: install-go-tools dashboard-ui
+	# testing all pkgs (expect TSO consistency test) with converage...
+	@$(FAILPOINT_ENABLE)
+	for PKG in $(TEST_PKGS); do\
+		set -euo pipefail;\
+		CGO_ENABLED=1 GO111MODULE=on go test -race -covermode=atomic -coverprofile=coverage.tmp -coverpkg=./... $$PKG  2>&1 | grep -v "no packages being tested" && tail -n +2 coverage.tmp >> covprofile || { $(FAILPOINT_DISABLE); rm coverage.tmp && exit 1;}; \
+		rm coverage.tmp;\
+	done
+	@$(FAILPOINT_DISABLE)
 
-install-tools:
-	@mkdir -p $(GO_TOOLS_BIN_PATH)
-	@which golangci-lint >/dev/null 2>&1 || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GO_TOOLS_BIN_PATH) v1.46.0
-	@grep '_' tools.go | sed 's/"//g' | awk '{print $$2}' | xargs go install
+test-tso-function: install-go-tools dashboard-ui
+	# testing TSO function...
+	@$(DEADLOCK_ENABLE)
+	@$(FAILPOINT_ENABLE)
+	CGO_ENABLED=1 GO111MODULE=on go test -race -tags tso_function_test $(TSO_INTEGRATION_TEST_PKGS) || { $(FAILPOINT_DISABLE); $(DEADLOCK_DISABLE); exit 1; }
+	@$(FAILPOINT_DISABLE)
+	@$(DEADLOCK_DISABLE)
 
-.PHONY: install-tools
+test-tso-consistency: install-go-tools dashboard-ui
+	# testing TSO consistency...
+	@$(DEADLOCK_ENABLE)
+	@$(FAILPOINT_ENABLE)
+	CGO_ENABLED=1 GO111MODULE=on go test -race -tags tso_consistency_test $(TSO_INTEGRATION_TEST_PKGS) || { $(FAILPOINT_DISABLE); $(DEADLOCK_DISABLE); exit 1; }
+	@$(FAILPOINT_DISABLE)
+	@$(DEADLOCK_DISABLE)
 
-#### Static checks ####
+check: install-go-tools check-all check-plugin errdoc check-testing-t docker-build-test
 
-check: install-tools static tidy check-plugin errdoc check-testing-t
-
-static: install-tools
-	@ echo "gofmt ..."
-	@ gofmt -s -l -d $(PACKAGE_DIRECTORIES) 2>&1 | awk '{ print } END { if (NR > 0) { exit 1 } }'
-	@ echo "golangci-lint ..."
-	@ golangci-lint run $(PACKAGE_DIRECTORIES)
-	@ echo "revive ..."
-	@ revive -formatter friendly -config revive.toml $(PACKAGES)
-
-	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) static && cd - > /dev/null; done
-
-tidy:
-	@ go mod tidy
-	git diff go.mod go.sum | cat
-	git diff --quiet go.mod go.sum
-	
-	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) tidy && cd - > /dev/null; done
+check-all: static lint tidy
+	@echo "checking"
 
 check-plugin:
 	@echo "checking plugin"
 	cd ./plugin/scheduler_example && $(MAKE) evictLeaderPlugin.so && rm evictLeaderPlugin.so
 
-errdoc: install-tools
+static: export GO111MODULE=on
+static: install-go-tools
+	@ # Not running vet and fmt through metalinter becauase it ends up looking at vendor
+	gofmt -s -l -d $$($(PACKAGE_DIRECTORIES)) 2>&1 | $(GOCHECKER)
+	golangci-lint run $$($(PACKAGE_DIRECTORIES))
+
+lint: install-go-tools
+	@echo "linting"
+	revive -formatter friendly -config revive.toml $$($(PACKAGES))
+
+tidy:
+	@echo "go mod tidy"
+	GO111MODULE=on go mod tidy
+	git diff --quiet go.mod go.sum
+
+errdoc: install-go-tools
 	@echo "generator errors.toml"
 	./scripts/check-errdoc.sh
+
+docker-build-test:
+	$(eval DOCKER_PS_EXIT_CODE=$(shell docker ps > /dev/null 2>&1 ; echo $$?))
+	@if [ $(DOCKER_PS_EXIT_CODE) -ne 0 ]; then \
+	echo "Encountered problem while invoking docker cli. Is the docker daemon running?"; \
+	fi
+	docker build --no-cache -t tikv/pd .
 
 check-testing-t:
 	./scripts/check-testing-t.sh
 
-.PHONY: check static tidy check-plugin errdoc docker-build-test check-testing-t
+simulator: export GO111MODULE=on
+simulator:
+	CGO_ENABLED=0 go build -o $(BUILD_BIN_PATH)/pd-simulator tools/pd-simulator/main.go
 
-#### Test utils ####
+regions-dump: export GO111MODULE=on
+regions-dump:
+	CGO_ENABLED=0 go build -o $(BUILD_BIN_PATH)/regions-dump tools/regions-dump/main.go
 
-FAILPOINT_ENABLE  := $$(find $$PWD/ -type d | grep -vE "\.git" | xargs failpoint-ctl enable)
-FAILPOINT_DISABLE := $$(find $$PWD/ -type d | grep -vE "\.git" | xargs failpoint-ctl disable)
-
-failpoint-enable: install-tools
-	# Converting failpoints...
-	@$(FAILPOINT_ENABLE)
-
-failpoint-disable: install-tools
-	# Restoring failpoints...
-	@$(FAILPOINT_DISABLE)
-
-.PHONY: failpoint-enable failpoint-disable
-
-#### Test ####
-
-PACKAGE_DIRECTORIES := $(subst $(PD_PKG)/,,$(PACKAGES))
-TEST_PKGS := $(filter $(shell find . -iname "*_test.go" -exec dirname {} \; | \
-                     sort -u | sed -e "s/^\./github.com\/tikv\/pd/"),$(PACKAGES))
-BASIC_TEST_PKGS := $(filter-out $(PD_PKG)/tests%,$(TEST_PKGS))
-
-SUBMODULES := $(filter $(shell find . -iname "go.mod" -exec dirname {} \;),\
-				$(filter-out .,$(shell find . -iname "Makefile" -exec dirname {} \;)))
-
-test: install-tools
-	# testing all pkgs...
-	@$(FAILPOINT_ENABLE)
-	CGO_ENABLED=1 go test -tags tso_function_test,deadlock -timeout 20m -race -cover $(TEST_PKGS) || { $(FAILPOINT_DISABLE); exit 1; }
-	@$(FAILPOINT_DISABLE)
-
-basic-test: install-tools
-	# testing basic pkgs...
-	@$(FAILPOINT_ENABLE)
-	go test $(BASIC_TEST_PKGS) || { $(FAILPOINT_DISABLE); exit 1; }
-	@$(FAILPOINT_DISABLE)
-
-ci-test-job: install-tools dashboard-ui
-	@$(FAILPOINT_ENABLE)
-	CGO_ENABLED=1 go test -timeout=15m -tags deadlock -race -covermode=atomic -coverprofile=covprofile -coverpkg=./... $(shell ./scripts/ci-subtask.sh $(JOB_COUNT) $(JOB_INDEX))
-	@$(FAILPOINT_DISABLE)
-
-ci-test-job-submod: install-tools dashboard-ui
-	@$(FAILPOINT_ENABLE)
-	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) ci-test-job && cd - > /dev/null && cat $$mod/covprofile >> covprofile; done
-	@$(FAILPOINT_DISABLE)
-
-TSO_INTEGRATION_TEST_PKGS := $(PD_PKG)/tests/server/tso
-
-test-tso-function: install-tools
-	# testing TSO function...
-	@$(FAILPOINT_ENABLE)
-	CGO_ENABLED=1 go test -race -tags without_dashboard,tso_function_test,deadlock $(TSO_INTEGRATION_TEST_PKGS) || { $(FAILPOINT_DISABLE); exit 1; }
-	@$(FAILPOINT_DISABLE)
-
-test-tso-consistency: install-tools
-	# testing TSO consistency...
-	@$(FAILPOINT_ENABLE)
-	CGO_ENABLED=1 go test -race -tags without_dashboard,tso_consistency_test,deadlock $(TSO_INTEGRATION_TEST_PKGS) || { $(FAILPOINT_DISABLE); exit 1; }
-	@$(FAILPOINT_DISABLE)
-
-.PHONY: test basic-test test-with-cover test-tso-function test-tso-consistency
-
-#### Daily CI coverage analyze  ####
-
-TASK_COUNT=1
-TASK_ID=1
-
-# The command should be used in daily CI，it will split some tasks to run parallel.
-# It should retain report.xml,coverage,coverage.xml and package.list to analyze.
-test-with-cover-parallel: install-tools dashboard-ui split
-	@$(FAILPOINT_ENABLE)
-	set -euo pipefail;\
-	CGO_ENABLED=1 GO111MODULE=on gotestsum --junitfile report.xml -- -v --race -covermode=atomic -coverprofile=coverage $(shell cat package.list)  2>&1 || { $(FAILPOINT_DISABLE); }; \
-	gocov convert coverage | gocov-xml >> coverage.xml;\
-	@$(FAILPOINT_DISABLE)
-
-split:
-# todo: it will remove server/api,/tests and tso packages after daily CI integrate all verify CI.
-	go list ./... | grep -v -E  "github.com/tikv/pd/server/api|github.com/tikv/pd/tests/client|github.com/tikv/pd/tests/server/tso" > packages.list;\
-	split packages.list -n r/${TASK_COUNT} packages_unit_ -a 1 --numeric-suffixes=1;\
-	cat packages_unit_${TASK_ID} |tr "\n" " " >package.list;\
-	rm packages*;
-
-#### Clean up ####
-
-clean: failpoint-disable clean-test clean-build
+stores-dump: export GO111MODULE=on
+stores-dump:
+	CGO_ENABLED=0 go build -o $(BUILD_BIN_PATH)/stores-dump tools/stores-dump/main.go
 
 clean-test:
 	# Cleaning test tmp...
@@ -271,8 +251,26 @@ clean-test:
 
 clean-build:
 	# Cleaning building files...
-	rm -rf .dashboard_download_cache/
+	rm -rf .dashboard_asset_cache/
 	rm -rf $(BUILD_BIN_PATH)
 	rm -rf $(GO_TOOLS_BIN_PATH)
 
-.PHONY: clean clean-test clean-build
+deadlock-enable: install-go-tools
+	# Enabling deadlock...
+	@$(DEADLOCK_ENABLE)
+
+deadlock-disable: install-go-tools
+	# Disabling deadlock...
+	@$(DEADLOCK_DISABLE)
+
+failpoint-enable: install-go-tools
+	# Converting failpoints...
+	@$(FAILPOINT_ENABLE)
+
+failpoint-disable: install-go-tools
+	# Restoring failpoints...
+	@$(FAILPOINT_DISABLE)
+
+clean: failpoint-disable deadlock-disable clean-test clean-build
+
+.PHONY: all ci vendor tidy clean-test clean-build clean

@@ -40,19 +40,21 @@ func (it *item) Less(k int, than TopNItem) bool {
 }
 
 func (s *testTopNSuite) TestPut(c *C) {
-	const Total, N = 10000, 50
-	tn := NewTopN(DimLen, N, 1*time.Hour)
+	const Total = 10000
+	const K = 3
+	const N = 50
+	tn := NewTopN(K, N, 1*time.Hour)
 
-	putPerm(c, tn, Total, func(x int) float64 {
+	putPerm(c, tn, K, Total, func(x int) float64 {
 		return float64(-x) + 1
 	}, false /*insert*/)
 
-	putPerm(c, tn, Total, func(x int) float64 {
+	putPerm(c, tn, K, Total, func(x int) float64 {
 		return float64(-x)
 	}, true /*update*/)
 
 	// check GetTopNMin
-	for k := 0; k < DimLen; k++ {
+	for k := 0; k < K; k++ {
 		c.Assert(tn.GetTopNMin(k).(*item).values[k], Equals, float64(1-N))
 	}
 
@@ -83,7 +85,7 @@ func (s *testTopNSuite) TestPut(c *C) {
 	}
 
 	{ // check all dimensions
-		for k := 1; k < DimLen; k++ {
+		for k := 1; k < K; k++ {
 			topn := make([]float64, 0, N)
 			for _, it := range tn.GetAllTopN(k) {
 				topn = append(topn, it.(*item).values[k])
@@ -108,18 +110,18 @@ func (s *testTopNSuite) TestPut(c *C) {
 	}
 }
 
-func putPerm(c *C, tn *TopN, total int, f func(x int) float64, isUpdate bool) {
+func putPerm(c *C, tn *TopN, dimNum, total int, f func(x int) float64, isUpdate bool) {
 	{ // insert
-		dims := make([][]int, DimLen)
-		for k := 0; k < DimLen; k++ {
+		dims := make([][]int, dimNum)
+		for k := 0; k < dimNum; k++ {
 			dims[k] = rand.Perm(total)
 		}
 		for i := 0; i < total; i++ {
 			item := &item{
 				id:     uint64(dims[0][i]),
-				values: make([]float64, DimLen),
+				values: make([]float64, dimNum),
 			}
-			for k := 0; k < DimLen; k++ {
+			for k := 0; k < dimNum; k++ {
 				item.values[k] = f(dims[k][i])
 			}
 			c.Assert(tn.Put(item), Equals, isUpdate)
@@ -128,10 +130,12 @@ func putPerm(c *C, tn *TopN, total int, f func(x int) float64, isUpdate bool) {
 }
 
 func (s *testTopNSuite) TestRemove(c *C) {
-	const Total, N = 10000, 50
-	tn := NewTopN(DimLen, N, 1*time.Hour)
+	const Total = 10000
+	const K = 3
+	const N = 50
+	tn := NewTopN(K, N, 1*time.Hour)
 
-	putPerm(c, tn, Total, func(x int) float64 {
+	putPerm(c, tn, K, Total, func(x int) float64 {
 		return float64(-x)
 	}, false /*insert*/)
 
@@ -177,7 +181,7 @@ func (s *testTopNSuite) TestRemove(c *C) {
 	}
 
 	{ // check all dimensions
-		for k := 1; k < DimLen; k++ {
+		for k := 1; k < K; k++ {
 			topn := make([]float64, 0, N)
 			for _, it := range tn.GetAllTopN(k) {
 				topn = append(topn, it.(*item).values[k])
@@ -202,24 +206,26 @@ func (s *testTopNSuite) TestRemove(c *C) {
 }
 
 func (s *testTopNSuite) TestTTL(c *C) {
-	const Total, N = 1000, 50
-	tn := NewTopN(DimLen, 50, 900*time.Millisecond)
+	const Total = 1000
+	const K = 3
+	const N = 50
+	tn := NewTopN(K, 50, 900*time.Millisecond)
 
-	putPerm(c, tn, Total, func(x int) float64 {
+	putPerm(c, tn, K, Total, func(x int) float64 {
 		return float64(-x)
 	}, false /*insert*/)
 
 	time.Sleep(900 * time.Millisecond)
 	{
 		item := &item{id: 0, values: []float64{100}}
-		for k := 1; k < DimLen; k++ {
+		for k := 1; k < K; k++ {
 			item.values = append(item.values, rand.NormFloat64())
 		}
 		c.Assert(tn.Put(item), IsTrue)
 	}
 	for i := 3; i < Total; i += 3 {
 		item := &item{id: uint64(i), values: []float64{float64(-i) + 100}}
-		for k := 1; k < DimLen; k++ {
+		for k := 1; k < K; k++ {
 			item.values = append(item.values, rand.NormFloat64())
 		}
 		c.Assert(tn.Put(item), IsFalse)
@@ -239,7 +245,7 @@ func (s *testTopNSuite) TestTTL(c *C) {
 	}
 
 	{ // check all dimensions
-		for k := 1; k < DimLen; k++ {
+		for k := 1; k < K; k++ {
 			topn := make([]float64, 0, N)
 			for _, it := range tn.GetAllTopN(k) {
 				topn = append(topn, it.(*item).values[k])

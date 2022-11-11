@@ -27,6 +27,7 @@ import (
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/versioninfo"
 )
 
@@ -55,7 +56,7 @@ func (s *testReplicaCheckerSuite) TearDownTest(c *C) {
 func (s *testReplicaCheckerSuite) SetUpTest(c *C) {
 	cfg := config.NewTestOptions()
 	s.cluster = mockcluster.NewCluster(s.ctx, cfg)
-	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	s.cluster.DisableFeature(versioninfo.JointConsensus)
 	s.rc = NewReplicaChecker(s.cluster, cache.NewDefaultCache(10))
 	stats := &pdpb.StoreStats{
 		Capacity:  100,
@@ -64,9 +65,8 @@ func (s *testReplicaCheckerSuite) SetUpTest(c *C) {
 	stores := []*core.StoreInfo{
 		core.NewStoreInfo(
 			&metapb.Store{
-				Id:        1,
-				State:     metapb.StoreState_Offline,
-				NodeState: metapb.NodeState_Removing,
+				Id:    1,
+				State: metapb.StoreState_Offline,
 			},
 			core.SetStoreStats(stats),
 			core.SetLastHeartbeatTS(time.Now()),
@@ -119,7 +119,7 @@ func (s *testReplicaCheckerSuite) TestReplacePendingPeer(c *C) {
 
 func (s *testReplicaCheckerSuite) TestReplaceOfflinePeer(c *C) {
 	s.cluster.SetLabelPropertyConfig(config.LabelPropertyConfig{
-		config.RejectLeader: {{Key: "noleader", Value: "true"}},
+		opt.RejectLeader: {{Key: "noleader", Value: "true"}},
 	})
 	peers := []*metapb.Peer{
 		{
@@ -210,7 +210,7 @@ func (s *testReplicaCheckerSuite) TestBasic(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
 	tc.SetMaxSnapshotCount(2)
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.DisableFeature(versioninfo.JointConsensus)
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 
 	// Add stores 1,2,3,4.
@@ -283,7 +283,7 @@ func (s *testReplicaCheckerSuite) TestLostStore(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
 
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.DisableFeature(versioninfo.JointConsensus)
 	tc.AddRegionStore(1, 1)
 	tc.AddRegionStore(2, 1)
 
@@ -301,7 +301,7 @@ func (s *testReplicaCheckerSuite) TestLostStore(c *C) {
 func (s *testReplicaCheckerSuite) TestOffline(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.DisableFeature(versioninfo.JointConsensus)
 	tc.SetMaxReplicas(3)
 	tc.SetLocationLabels([]string{"zone", "rack", "host"})
 
@@ -353,7 +353,7 @@ func (s *testReplicaCheckerSuite) TestOffline(c *C) {
 func (s *testReplicaCheckerSuite) TestDistinctScore(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.DisableFeature(versioninfo.JointConsensus)
 	tc.SetMaxReplicas(3)
 	tc.SetLocationLabels([]string{"zone", "rack", "host"})
 
@@ -432,7 +432,7 @@ func (s *testReplicaCheckerSuite) TestDistinctScore(c *C) {
 func (s *testReplicaCheckerSuite) TestDistinctScore2(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.DisableFeature(versioninfo.JointConsensus)
 	tc.SetMaxReplicas(5)
 	tc.SetLocationLabels([]string{"zone", "host"})
 
@@ -463,7 +463,7 @@ func (s *testReplicaCheckerSuite) TestStorageThreshold(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
 	tc.SetLocationLabels([]string{"zone"})
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.DisableFeature(versioninfo.JointConsensus)
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 
 	tc.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
@@ -498,7 +498,7 @@ func (s *testReplicaCheckerSuite) TestStorageThreshold(c *C) {
 func (s *testReplicaCheckerSuite) TestOpts(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.DisableFeature(versioninfo.JointConsensus)
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 
 	tc.AddRegionStore(1, 100)
@@ -529,7 +529,7 @@ func (s *testReplicaCheckerSuite) TestOpts(c *C) {
 func (s *testReplicaCheckerSuite) TestFixDownPeer(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.DisableFeature(versioninfo.JointConsensus)
 	tc.SetLocationLabels([]string{"zone"})
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 
@@ -560,7 +560,7 @@ func (s *testReplicaCheckerSuite) TestFixDownPeer(c *C) {
 func (s *testReplicaCheckerSuite) TestFixOfflinePeer(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.DisableFeature(versioninfo.JointConsensus)
 	tc.SetLocationLabels([]string{"zone"})
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 

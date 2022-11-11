@@ -130,7 +130,7 @@ func (s *testRegionSuite) TestRegionTreeStat(c *C) {
 	c.Assert(tree.totalSize, Equals, int64(4))
 	updateNewItem(tree, s.newRegionWithStat("b", "e", 5, 6))
 	c.Assert(tree.totalSize, Equals, int64(6))
-	tree.remove(s.newRegionWithStat("a", "b", 2, 2))
+	tree.remove(s.newRegionWithStat("a", "b", 1, 2))
 	c.Assert(tree.totalSize, Equals, int64(5))
 	tree.remove(s.newRegionWithStat("f", "g", 1, 2))
 	c.Assert(tree.totalSize, Equals, int64(5))
@@ -378,37 +378,7 @@ func newRegionItem(start, end []byte) *regionItem {
 	return &regionItem{region: NewTestRegionInfo(start, end)}
 }
 
-type mockRegionTreeData struct {
-	tree  *regionTree
-	items []*RegionInfo
-}
-
-func (m *mockRegionTreeData) clearTree() *mockRegionTreeData {
-	m.tree = newRegionTree()
-	return m
-}
-
-func (m *mockRegionTreeData) shuffleItems() *mockRegionTreeData {
-	for i := 0; i < len(m.items); i++ {
-		j := rand.Intn(i + 1)
-		m.items[i], m.items[j] = m.items[j], m.items[i]
-	}
-	return m
-}
-
-func mock1MRegionTree() *mockRegionTreeData {
-	data := &mockRegionTreeData{newRegionTree(), make([]*RegionInfo, 1000000)}
-	for i := 0; i < 1_000_000; i++ {
-		region := &RegionInfo{meta: &metapb.Region{Id: uint64(i), StartKey: []byte(fmt.Sprintf("%20d", i)), EndKey: []byte(fmt.Sprintf("%20d", i+1))}}
-		updateNewItem(data.tree, region)
-		data.items[i] = region
-	}
-	return data
-}
-
-const MaxCount = 1_000_000
-
-func BenchmarkRegionTreeSequentialInsert(b *testing.B) {
+func BenchmarkRegionTreeUpdate(b *testing.B) {
 	tree := newRegionTree()
 	for i := 0; i < b.N; i++ {
 		item := &RegionInfo{meta: &metapb.Region{StartKey: []byte(fmt.Sprintf("%20d", i)), EndKey: []byte(fmt.Sprintf("%20d", i+1))}}
@@ -416,22 +386,15 @@ func BenchmarkRegionTreeSequentialInsert(b *testing.B) {
 	}
 }
 
-func BenchmarkRegionTreeRandomInsert(b *testing.B) {
-	data := mock1MRegionTree().clearTree().shuffleItems()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		index := i % MaxCount
-		updateNewItem(data.tree, data.items[index])
-	}
-}
+const MaxKey = 10000000
 
-func BenchmarkRegionTreeRandomOverlapsInsert(b *testing.B) {
+func BenchmarkRegionTreeUpdateUnordered(b *testing.B) {
 	tree := newRegionTree()
 	var items []*RegionInfo
-	for i := 0; i < MaxCount; i++ {
+	for i := 0; i < MaxKey; i++ {
 		var startKey, endKey int
-		key1 := rand.Intn(MaxCount)
-		key2 := rand.Intn(MaxCount)
+		key1 := rand.Intn(MaxKey)
+		key2 := rand.Intn(MaxKey)
 		if key1 < key2 {
 			startKey = key1
 			endKey = key2
@@ -441,44 +404,9 @@ func BenchmarkRegionTreeRandomOverlapsInsert(b *testing.B) {
 		}
 		items = append(items, &RegionInfo{meta: &metapb.Region{StartKey: []byte(fmt.Sprintf("%20d", startKey)), EndKey: []byte(fmt.Sprintf("%20d", endKey))}})
 	}
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		index := i % MaxCount
-		updateNewItem(tree, items[index])
-	}
-}
-
-func BenchmarkRegionTreeRandomUpdate(b *testing.B) {
-	data := mock1MRegionTree().shuffleItems()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		index := i % MaxCount
-		updateNewItem(data.tree, data.items[index])
-	}
-}
-
-func BenchmarkRegionTreeSequentialLookUpRegion(b *testing.B) {
-	data := mock1MRegionTree()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		index := i % MaxCount
-		data.tree.find(data.items[index])
-	}
-}
-
-func BenchmarkRegionTreeRandomLookUpRegion(b *testing.B) {
-	data := mock1MRegionTree().shuffleItems()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		index := i % MaxCount
-		data.tree.find(data.items[index])
-	}
-}
-
-func BenchmarkRegionTreeScan(b *testing.B) {
-	data := mock1MRegionTree().shuffleItems()
-	b.ResetTimer()
-	for i := 0; i < 1; i++ {
-		data.tree.scanRanges()
+		updateNewItem(tree, items[i])
 	}
 }

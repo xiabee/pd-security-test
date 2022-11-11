@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build tso_full_test || tso_consistency_test || tso_function_test
-// +build tso_full_test tso_consistency_test tso_function_test
-
 package tso_test
 
 import (
@@ -27,12 +24,18 @@ import (
 	"go.uber.org/goleak"
 )
 
+// Because we classify TSO integration tests into two parts: tso_function_test and tso_consistency_test,
+// the build constraints will make both golangci-lint and gopls have false positives, which is inevitable.
+// So `nolint` tag is added here to prevent golangci-lint from reporting the error wrongly.
+
+//nolint:deadcode,unused,varcheck
 const (
 	tsoRequestConcurrencyNumber = 5
 	tsoRequestRound             = 30
 	tsoCount                    = 10
 )
 
+//nolint:deadcode,unused
 func checkAndReturnTimestampResponse(c *C, req *pdpb.TsoRequest, resp *pdpb.TsoResponse) *pdpb.Timestamp {
 	c.Assert(resp.GetCount(), Equals, req.GetCount())
 	timestamp := resp.GetTimestamp()
@@ -41,6 +44,7 @@ func checkAndReturnTimestampResponse(c *C, req *pdpb.TsoRequest, resp *pdpb.TsoR
 	return timestamp
 }
 
+//nolint:deadcode,unused
 func testGetTimestamp(c *C, ctx context.Context, pdCli pdpb.PDClient, req *pdpb.TsoRequest) *pdpb.Timestamp {
 	tsoClient, err := pdCli.Tso(ctx)
 	c.Assert(err, IsNil)

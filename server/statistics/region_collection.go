@@ -15,7 +15,6 @@
 package statistics
 
 import (
-	"sync"
 	"time"
 
 	"github.com/pingcap/log"
@@ -36,8 +35,6 @@ const (
 	OfflinePeer
 	LearnerPeer
 	EmptyRegion
-	OversizedRegion
-	UndersizedRegion
 )
 
 const nonIsolation = "none"
@@ -51,26 +48,22 @@ type RegionInfo struct {
 
 // RegionStatistics is used to record the status of regions.
 type RegionStatistics struct {
-	sync.RWMutex
-	opt                *config.PersistOptions
-	stats              map[RegionStatisticType]map[uint64]*RegionInfo
-	offlineStats       map[RegionStatisticType]map[uint64]*core.RegionInfo
-	index              map[uint64]RegionStatisticType
-	offlineIndex       map[uint64]RegionStatisticType
-	ruleManager        *placement.RuleManager
-	storeConfigManager *config.StoreConfigManager
+	opt          *config.PersistOptions
+	stats        map[RegionStatisticType]map[uint64]*RegionInfo
+	offlineStats map[RegionStatisticType]map[uint64]*core.RegionInfo
+	index        map[uint64]RegionStatisticType
+	offlineIndex map[uint64]RegionStatisticType
+	ruleManager  *placement.RuleManager
 }
 
 // NewRegionStatistics creates a new RegionStatistics.
-func NewRegionStatistics(opt *config.PersistOptions, ruleManager *placement.RuleManager, storeConfigManager *config.StoreConfigManager) *RegionStatistics {
+func NewRegionStatistics(opt *config.PersistOptions, ruleManager *placement.RuleManager) *RegionStatistics {
 	r := &RegionStatistics{
-		opt:                opt,
-		ruleManager:        ruleManager,
-		storeConfigManager: storeConfigManager,
-		stats:              make(map[RegionStatisticType]map[uint64]*RegionInfo),
-		offlineStats:       make(map[RegionStatisticType]map[uint64]*core.RegionInfo),
-		index:              make(map[uint64]RegionStatisticType),
-		offlineIndex:       make(map[uint64]RegionStatisticType),
+		opt:          opt,
+		stats:        make(map[RegionStatisticType]map[uint64]*RegionInfo),
+		offlineStats: make(map[RegionStatisticType]map[uint64]*core.RegionInfo),
+		index:        make(map[uint64]RegionStatisticType),
+		offlineIndex: make(map[uint64]RegionStatisticType),
 	}
 	r.stats[MissPeer] = make(map[uint64]*RegionInfo)
 	r.stats[ExtraPeer] = make(map[uint64]*RegionInfo)
@@ -78,44 +71,32 @@ func NewRegionStatistics(opt *config.PersistOptions, ruleManager *placement.Rule
 	r.stats[PendingPeer] = make(map[uint64]*RegionInfo)
 	r.stats[LearnerPeer] = make(map[uint64]*RegionInfo)
 	r.stats[EmptyRegion] = make(map[uint64]*RegionInfo)
-	r.stats[OversizedRegion] = make(map[uint64]*RegionInfo)
-	r.stats[UndersizedRegion] = make(map[uint64]*RegionInfo)
 
 	r.offlineStats[MissPeer] = make(map[uint64]*core.RegionInfo)
 	r.offlineStats[ExtraPeer] = make(map[uint64]*core.RegionInfo)
 	r.offlineStats[DownPeer] = make(map[uint64]*core.RegionInfo)
 	r.offlineStats[PendingPeer] = make(map[uint64]*core.RegionInfo)
 	r.offlineStats[LearnerPeer] = make(map[uint64]*core.RegionInfo)
+	r.offlineStats[EmptyRegion] = make(map[uint64]*core.RegionInfo)
 	r.offlineStats[OfflinePeer] = make(map[uint64]*core.RegionInfo)
+	r.ruleManager = ruleManager
 	return r
 }
 
-// GetRegionStatsByType gets the status of the region by types. The regions here need to be cloned, otherwise, it may cause data race problems.
+// GetRegionStatsByType gets the status of the region by types.
 func (r *RegionStatistics) GetRegionStatsByType(typ RegionStatisticType) []*core.RegionInfo {
-	r.RLock()
-	defer r.RUnlock()
 	res := make([]*core.RegionInfo, 0, len(r.stats[typ]))
 	for _, r := range r.stats[typ] {
-		res = append(res, r.RegionInfo.Clone())
+		res = append(res, r.RegionInfo)
 	}
 	return res
 }
 
-// IsRegionStatsType returns whether the status of the region is the given type.
-func (r *RegionStatistics) IsRegionStatsType(regionID uint64, typ RegionStatisticType) bool {
-	r.RLock()
-	defer r.RUnlock()
-	_, exist := r.stats[typ][regionID]
-	return exist
-}
-
-// GetOfflineRegionStatsByType gets the status of the offline region by types. The regions here need to be cloned, otherwise, it may cause data race problems.
+// GetOfflineRegionStatsByType gets the status of the offline region by types.
 func (r *RegionStatistics) GetOfflineRegionStatsByType(typ RegionStatisticType) []*core.RegionInfo {
-	r.RLock()
-	defer r.RUnlock()
 	res := make([]*core.RegionInfo, 0, len(r.stats[typ]))
 	for _, r := range r.offlineStats[typ] {
-		res = append(res, r.Clone())
+		res = append(res, r)
 	}
 	return res
 }
@@ -136,22 +117,8 @@ func (r *RegionStatistics) deleteOfflineEntry(deleteIndex RegionStatisticType, r
 	}
 }
 
-// RegionStatsNeedUpdate checks whether the region's status need to be updated
-// due to some special state types.
-func (r *RegionStatistics) RegionStatsNeedUpdate(region *core.RegionInfo) bool {
-	regionID := region.GetID()
-	if r.IsRegionStatsType(regionID, OversizedRegion) !=
-		region.IsOversized(int64(r.storeConfigManager.GetStoreConfig().GetRegionMaxSize()), int64(r.storeConfigManager.GetStoreConfig().GetRegionMaxKeys())) {
-		return true
-	}
-	return r.IsRegionStatsType(regionID, UndersizedRegion) !=
-		region.NeedMerge(int64(r.opt.GetMaxMergeRegionSize()), int64(r.opt.GetMaxMergeRegionKeys()))
-}
-
 // Observe records the current regions' status.
 func (r *RegionStatistics) Observe(region *core.RegionInfo, stores []*core.StoreInfo) {
-	r.Lock()
-	defer r.Unlock()
 	// Region state.
 	regionID := region.GetID()
 	var (
@@ -177,21 +144,18 @@ func (r *RegionStatistics) Observe(region *core.RegionInfo, stores []*core.Store
 		}
 	}
 
-	var isRemoving bool
+	var isOffline bool
 
 	for _, store := range stores {
-		if store.IsRemoving() {
+		if store.IsOffline() {
 			peer := region.GetStorePeer(store.GetID())
 			if peer != nil {
-				isRemoving = true
+				isOffline = true
 				break
 			}
 		}
 	}
 
-	// Better to make sure once any of these conditions changes, it will trigger the heartbeat `save_cache`.
-	// Otherwise, the state may be out-of-date for a long time, which needs another way to apply the change ASAP.
-	// For example, see `RegionStatsNeedUpdate` above to know how `OversizedRegion` and ``UndersizedRegion` are updated.
 	conditions := map[RegionStatisticType]bool{
 		MissPeer:    len(region.GetPeers()) < desiredReplicas,
 		ExtraPeer:   len(region.GetPeers()) > desiredReplicas,
@@ -199,19 +163,11 @@ func (r *RegionStatistics) Observe(region *core.RegionInfo, stores []*core.Store
 		PendingPeer: len(region.GetPendingPeers()) > 0,
 		LearnerPeer: len(region.GetLearners()) > 0,
 		EmptyRegion: region.GetApproximateSize() <= core.EmptyRegionApproximateSize,
-		OversizedRegion: region.IsOversized(
-			int64(r.storeConfigManager.GetStoreConfig().GetRegionMaxSize()),
-			int64(r.storeConfigManager.GetStoreConfig().GetRegionMaxKeys()),
-		),
-		UndersizedRegion: region.NeedMerge(
-			int64(r.opt.GetMaxMergeRegionSize()),
-			int64(r.opt.GetMaxMergeRegionKeys()),
-		),
 	}
 
 	for typ, c := range conditions {
 		if c {
-			if isRemoving && typ < EmptyRegion {
+			if isOffline {
 				r.offlineStats[typ][regionID] = region
 				offlinePeerTypeIndex |= typ
 			}
@@ -240,7 +196,7 @@ func (r *RegionStatistics) Observe(region *core.RegionInfo, stores []*core.Store
 		}
 	}
 
-	if isRemoving {
+	if isOffline {
 		r.offlineStats[OfflinePeer][regionID] = region
 		offlinePeerTypeIndex |= OfflinePeer
 	}
@@ -260,8 +216,6 @@ func (r *RegionStatistics) Observe(region *core.RegionInfo, stores []*core.Store
 
 // ClearDefunctRegion is used to handle the overlap region.
 func (r *RegionStatistics) ClearDefunctRegion(regionID uint64) {
-	r.Lock()
-	defer r.Unlock()
 	if oldIndex, ok := r.index[regionID]; ok {
 		r.deleteEntry(oldIndex, regionID)
 	}
@@ -272,22 +226,19 @@ func (r *RegionStatistics) ClearDefunctRegion(regionID uint64) {
 
 // Collect collects the metrics of the regions' status.
 func (r *RegionStatistics) Collect() {
-	r.RLock()
-	defer r.RUnlock()
 	regionStatusGauge.WithLabelValues("miss-peer-region-count").Set(float64(len(r.stats[MissPeer])))
 	regionStatusGauge.WithLabelValues("extra-peer-region-count").Set(float64(len(r.stats[ExtraPeer])))
 	regionStatusGauge.WithLabelValues("down-peer-region-count").Set(float64(len(r.stats[DownPeer])))
 	regionStatusGauge.WithLabelValues("pending-peer-region-count").Set(float64(len(r.stats[PendingPeer])))
 	regionStatusGauge.WithLabelValues("learner-peer-region-count").Set(float64(len(r.stats[LearnerPeer])))
 	regionStatusGauge.WithLabelValues("empty-region-count").Set(float64(len(r.stats[EmptyRegion])))
-	regionStatusGauge.WithLabelValues("oversized-region-count").Set(float64(len(r.stats[OversizedRegion])))
-	regionStatusGauge.WithLabelValues("undersized-region-count").Set(float64(len(r.stats[UndersizedRegion])))
 
 	offlineRegionStatusGauge.WithLabelValues("miss-peer-region-count").Set(float64(len(r.offlineStats[MissPeer])))
 	offlineRegionStatusGauge.WithLabelValues("extra-peer-region-count").Set(float64(len(r.offlineStats[ExtraPeer])))
 	offlineRegionStatusGauge.WithLabelValues("down-peer-region-count").Set(float64(len(r.offlineStats[DownPeer])))
 	offlineRegionStatusGauge.WithLabelValues("pending-peer-region-count").Set(float64(len(r.offlineStats[PendingPeer])))
 	offlineRegionStatusGauge.WithLabelValues("learner-peer-region-count").Set(float64(len(r.offlineStats[LearnerPeer])))
+	offlineRegionStatusGauge.WithLabelValues("empty-region-count").Set(float64(len(r.offlineStats[EmptyRegion])))
 	offlineRegionStatusGauge.WithLabelValues("offline-peer-region-count").Set(float64(len(r.offlineStats[OfflinePeer])))
 }
 
@@ -299,7 +250,6 @@ func (r *RegionStatistics) Reset() {
 
 // LabelStatistics is the statistics of the level of labels.
 type LabelStatistics struct {
-	sync.RWMutex
 	regionLabelStats map[uint64]string
 	labelCounter     map[string]int
 }
@@ -315,9 +265,7 @@ func NewLabelStatistics() *LabelStatistics {
 // Observe records the current label status.
 func (l *LabelStatistics) Observe(region *core.RegionInfo, stores []*core.StoreInfo, labels []string) {
 	regionID := region.GetID()
-	regionIsolation := GetRegionLabelIsolation(stores, labels)
-	l.Lock()
-	defer l.Unlock()
+	regionIsolation := getRegionLabelIsolation(stores, labels)
 	if label, ok := l.regionLabelStats[regionID]; ok {
 		if label == regionIsolation {
 			return
@@ -330,8 +278,6 @@ func (l *LabelStatistics) Observe(region *core.RegionInfo, stores []*core.StoreI
 
 // Collect collects the metrics of the label status.
 func (l *LabelStatistics) Collect() {
-	l.RLock()
-	defer l.RUnlock()
 	for level, count := range l.labelCounter {
 		regionLabelLevelGauge.WithLabelValues(level).Set(float64(count))
 	}
@@ -344,8 +290,6 @@ func (l *LabelStatistics) Reset() {
 
 // ClearDefunctRegion is used to handle the overlap region.
 func (l *LabelStatistics) ClearDefunctRegion(regionID uint64) {
-	l.Lock()
-	defer l.Unlock()
 	if label, ok := l.regionLabelStats[regionID]; ok {
 		l.labelCounter[label]--
 		delete(l.regionLabelStats, regionID)
@@ -354,17 +298,10 @@ func (l *LabelStatistics) ClearDefunctRegion(regionID uint64) {
 
 // GetLabelCounter is only used for tests.
 func (l *LabelStatistics) GetLabelCounter() map[string]int {
-	l.RLock()
-	defer l.RUnlock()
-	clonedLabelCounter := make(map[string]int, len(l.labelCounter))
-	for k, v := range l.labelCounter {
-		clonedLabelCounter[k] = v
-	}
-	return clonedLabelCounter
+	return l.labelCounter
 }
 
-// GetRegionLabelIsolation returns the isolation level of the region.
-func GetRegionLabelIsolation(stores []*core.StoreInfo, labels []string) string {
+func getRegionLabelIsolation(stores []*core.StoreInfo, labels []string) string {
 	if len(stores) == 0 || len(labels) == 0 {
 		return nonIsolation
 	}

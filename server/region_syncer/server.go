@@ -20,19 +20,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juju/ratelimit"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/grpcutil"
-	"github.com/tikv/pd/pkg/ratelimit"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage"
-	"github.com/tikv/pd/server/storage/endpoint"
-	"github.com/tikv/pd/server/storage/kv"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -64,7 +59,7 @@ type Server interface {
 	ClusterID() uint64
 	GetMemberInfo() *pdpb.Member
 	GetLeader() *pdpb.Member
-	GetStorage() storage.Storage
+	GetStorage() *core.Storage
 	Name() string
 	GetRegions() []*core.RegionInfo
 	GetTLSConfig() *grpcutil.TLSConfig
@@ -74,7 +69,7 @@ type Server interface {
 // RegionSyncer is used to sync the region information without raft.
 type RegionSyncer struct {
 	mu struct {
-		syncutil.RWMutex
+		sync.RWMutex
 		streams      map[string]ServerStream
 		clientCtx    context.Context
 		clientCancel context.CancelFunc
@@ -82,7 +77,7 @@ type RegionSyncer struct {
 	server    Server
 	wg        sync.WaitGroup
 	history   *historyBuffer
-	limit     *ratelimit.RateLimiter
+	limit     *ratelimit.Bucket
 	tlsConfig *grpcutil.TLSConfig
 }
 
@@ -92,16 +87,10 @@ type RegionSyncer struct {
 // Usually open the region syncer in huge cluster and the server
 // no longer etcd but go-leveldb.
 func NewRegionSyncer(s Server) *RegionSyncer {
-	regionStorageGetter, ok := s.GetStorage().(interface {
-		GetRegionStorage() endpoint.RegionStorage
-	})
-	if !ok {
-		return nil
-	}
 	syncer := &RegionSyncer{
 		server:    s,
-		history:   newHistoryBuffer(defaultHistoryBufferSize, regionStorageGetter.GetRegionStorage().(kv.Base)),
-		limit:     ratelimit.NewRateLimiter(defaultBucketRate, defaultBucketCapacity),
+		history:   newHistoryBuffer(defaultHistoryBufferSize, s.GetStorage().GetRegionStorage()),
+		limit:     ratelimit.NewBucketWithRate(defaultBucketRate, defaultBucketCapacity),
 		tlsConfig: s.GetTLSConfig(),
 	}
 	syncer.mu.streams = make(map[string]ServerStream)
@@ -110,34 +99,20 @@ func NewRegionSyncer(s Server) *RegionSyncer {
 
 // RunServer runs the server of the region syncer.
 // regionNotifier is used to get the changed regions.
-func (s *RegionSyncer) RunServer(ctx context.Context, regionNotifier <-chan *core.RegionInfo) {
+func (s *RegionSyncer) RunServer(regionNotifier <-chan *core.RegionInfo, quit chan struct{}) {
 	var requests []*metapb.Region
 	var stats []*pdpb.RegionStat
 	var leaders []*metapb.Peer
-	var buckets []*metapb.Buckets
 	ticker := time.NewTicker(syncerKeepAliveInterval)
-
-	defer func() {
-		ticker.Stop()
-		s.mu.Lock()
-		s.mu.streams = make(map[string]ServerStream)
-		s.mu.Unlock()
-	}()
-
+	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-quit:
 			log.Info("region syncer has been stopped")
 			return
 		case first := <-regionNotifier:
 			requests = append(requests, first.GetMeta())
 			stats = append(stats, first.GetStat())
-			// bucket should not be nil to avoid grpc marshal panic.
-			bucket := &metapb.Buckets{}
-			if b := first.GetBuckets(); b != nil {
-				bucket = b
-			}
-			buckets = append(buckets, bucket)
 			leaders = append(leaders, first.GetLeader())
 			startIndex := s.history.GetNextIndex()
 			s.history.Record(first)
@@ -146,12 +121,6 @@ func (s *RegionSyncer) RunServer(ctx context.Context, regionNotifier <-chan *cor
 				region := <-regionNotifier
 				requests = append(requests, region.GetMeta())
 				stats = append(stats, region.GetStat())
-				// bucket should not be nil to avoid grpc marshal panic.
-				bucket := &metapb.Buckets{}
-				if b := region.GetBuckets(); b != nil {
-					bucket = b
-				}
-				buckets = append(buckets, bucket)
 				leaders = append(leaders, region.GetLeader())
 				s.history.Record(region)
 			}
@@ -161,7 +130,6 @@ func (s *RegionSyncer) RunServer(ctx context.Context, regionNotifier <-chan *cor
 				StartIndex:    startIndex,
 				RegionStats:   stats,
 				RegionLeaders: leaders,
-				Buckets:       buckets,
 			}
 			s.broadcast(regions)
 		case <-ticker.C:
@@ -174,32 +142,13 @@ func (s *RegionSyncer) RunServer(ctx context.Context, regionNotifier <-chan *cor
 		requests = requests[:0]
 		stats = stats[:0]
 		leaders = leaders[:0]
-		buckets = buckets[:0]
 	}
-}
-
-// GetAllDownstreamNames tries to get the all bind stream's name.
-// Only for test
-func (s *RegionSyncer) GetAllDownstreamNames() []string {
-	s.mu.RLock()
-	names := make([]string, 0, len(s.mu.streams))
-	for name := range s.mu.streams {
-		names = append(names, name)
-	}
-	s.mu.RUnlock()
-	return names
 }
 
 // Sync firstly tries to sync the history records to client.
 // then to sync the latest records.
-func (s *RegionSyncer) Sync(ctx context.Context, stream pdpb.PD_SyncRegionsServer) error {
+func (s *RegionSyncer) Sync(stream pdpb.PD_SyncRegionsServer) error {
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-
 		request, err := stream.Recv()
 		if err == io.EOF {
 			return nil
@@ -215,7 +164,7 @@ func (s *RegionSyncer) Sync(ctx context.Context, stream pdpb.PD_SyncRegionsServe
 			zap.String("requested-server", request.GetMember().GetName()),
 			zap.String("url", request.GetMember().GetClientUrls()[0]))
 
-		err = s.syncHistoryRegion(ctx, request, stream)
+		err = s.syncHistoryRegion(request, stream)
 		if err != nil {
 			return err
 		}
@@ -223,7 +172,7 @@ func (s *RegionSyncer) Sync(ctx context.Context, stream pdpb.PD_SyncRegionsServe
 	}
 }
 
-func (s *RegionSyncer) syncHistoryRegion(ctx context.Context, request *pdpb.SyncRegionRequest, stream pdpb.PD_SyncRegionsServer) error {
+func (s *RegionSyncer) syncHistoryRegion(request *pdpb.SyncRegionRequest, stream pdpb.PD_SyncRegionsServer) error {
 	startIndex := request.GetStartIndex()
 	name := request.GetMember().GetName()
 	records := s.history.RecordsFrom(startIndex)
@@ -241,18 +190,7 @@ func (s *RegionSyncer) syncHistoryRegion(ctx context.Context, request *pdpb.Sync
 			metas := make([]*metapb.Region, 0, maxSyncRegionBatchSize)
 			stats := make([]*pdpb.RegionStat, 0, maxSyncRegionBatchSize)
 			leaders := make([]*metapb.Peer, 0, maxSyncRegionBatchSize)
-			buckets := make([]*metapb.Buckets, 0, maxSyncRegionBatchSize)
 			for syncedIndex, r := range regions {
-				select {
-				case <-ctx.Done():
-					log.Info("discontinue sending sync region response")
-					failpoint.Inject("noFastExitSync", func() {
-						failpoint.Goto("doSync")
-					})
-					return nil
-				default:
-				}
-				failpoint.Label("doSync")
 				metas = append(metas, r.GetMeta())
 				stats = append(stats, r.GetStat())
 				leader := &metapb.Peer{}
@@ -260,11 +198,6 @@ func (s *RegionSyncer) syncHistoryRegion(ctx context.Context, request *pdpb.Sync
 					leader = r.GetLeader()
 				}
 				leaders = append(leaders, leader)
-				bucket := &metapb.Buckets{}
-				if r.GetBuckets() != nil {
-					bucket = r.GetBuckets()
-				}
-				buckets = append(buckets, bucket)
 				if len(metas) < maxSyncRegionBatchSize && syncedIndex < len(regions)-1 {
 					continue
 				}
@@ -274,9 +207,8 @@ func (s *RegionSyncer) syncHistoryRegion(ctx context.Context, request *pdpb.Sync
 					StartIndex:    uint64(lastIndex),
 					RegionStats:   stats,
 					RegionLeaders: leaders,
-					Buckets:       buckets,
 				}
-				s.limit.WaitN(ctx, resp.Size())
+				s.limit.Wait(int64(resp.Size()))
 				lastIndex += len(metas)
 				if err := stream.Send(resp); err != nil {
 					log.Error("failed to send sync region response", errs.ZapError(errs.ErrGRPCSend, err))
@@ -285,7 +217,6 @@ func (s *RegionSyncer) syncHistoryRegion(ctx context.Context, request *pdpb.Sync
 				metas = metas[:0]
 				stats = stats[:0]
 				leaders = leaders[:0]
-				buckets = buckets[:0]
 			}
 			log.Info("requested server has completed full synchronization with server",
 				zap.String("requested-server", name), zap.String("server", s.server.Name()), zap.Duration("cost", time.Since(start)))
@@ -302,7 +233,6 @@ func (s *RegionSyncer) syncHistoryRegion(ctx context.Context, request *pdpb.Sync
 	regions := make([]*metapb.Region, len(records))
 	stats := make([]*pdpb.RegionStat, len(records))
 	leaders := make([]*metapb.Peer, len(records))
-	buckets := make([]*metapb.Buckets, len(records))
 	for i, r := range records {
 		regions[i] = r.GetMeta()
 		stats[i] = r.GetStat()
@@ -311,11 +241,6 @@ func (s *RegionSyncer) syncHistoryRegion(ctx context.Context, request *pdpb.Sync
 			leader = r.GetLeader()
 		}
 		leaders[i] = leader
-		// bucket should not be nil to avoid grpc marshal panic.
-		buckets[i] = &metapb.Buckets{}
-		if r.GetBuckets() != nil {
-			buckets[i] = r.GetBuckets()
-		}
 	}
 	resp := &pdpb.SyncRegionResponse{
 		Header:        &pdpb.ResponseHeader{ClusterId: s.server.ClusterID()},
@@ -323,7 +248,6 @@ func (s *RegionSyncer) syncHistoryRegion(ctx context.Context, request *pdpb.Sync
 		StartIndex:    startIndex,
 		RegionStats:   stats,
 		RegionLeaders: leaders,
-		Buckets:       buckets,
 	}
 	return stream.Send(resp)
 }

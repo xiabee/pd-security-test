@@ -29,22 +29,20 @@ import (
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/core/storelimit"
-	"github.com/tikv/pd/server/id"
+	"github.com/tikv/pd/server/kv"
 	"github.com/tikv/pd/server/schedule/labeler"
 	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/server/statistics"
-	"github.com/tikv/pd/server/statistics/buckets"
-	"github.com/tikv/pd/server/storage"
 	"github.com/tikv/pd/server/versioninfo"
 )
 
 const (
 	defaultStoreCapacity = 100 * (1 << 30) // 100GiB
 	defaultRegionSize    = 96 * (1 << 20)  // 96MiB
-	mb                   = 1 << 20         // 1MiB
+	mb                   = (1 << 20)       // 1MiB
 )
 
-// Cluster is used to mock a cluster for test purpose.
+// Cluster is used to mock clusterInfo for test use.
 type Cluster struct {
 	*core.BasicCluster
 	*mockid.IDAllocator
@@ -52,37 +50,27 @@ type Cluster struct {
 	*labeler.RegionLabeler
 	*statistics.HotStat
 	*config.PersistOptions
-	ID             uint64
-	suspectRegions map[uint64]struct{}
-	*config.StoreConfigManager
-	*buckets.HotBucketCache
-	ctx context.Context
+	ID               uint64
+	suspectRegions   map[uint64]struct{}
+	disabledFeatures map[versioninfo.Feature]struct{}
 }
 
 // NewCluster creates a new Cluster
 func NewCluster(ctx context.Context, opts *config.PersistOptions) *Cluster {
+	mockQuit := make(chan struct{})
 	clus := &Cluster{
-		BasicCluster:       core.NewBasicCluster(),
-		IDAllocator:        mockid.NewIDAllocator(),
-		HotStat:            statistics.NewHotStat(ctx),
-		HotBucketCache:     buckets.NewBucketsCache(ctx),
-		PersistOptions:     opts,
-		suspectRegions:     map[uint64]struct{}{},
-		StoreConfigManager: config.NewTestStoreConfigManager(nil),
-		ctx:                ctx,
+		BasicCluster:     core.NewBasicCluster(),
+		IDAllocator:      mockid.NewIDAllocator(),
+		HotStat:          statistics.NewHotStat(ctx, mockQuit),
+		PersistOptions:   opts,
+		suspectRegions:   map[uint64]struct{}{},
+		disabledFeatures: make(map[versioninfo.Feature]struct{}),
 	}
 	if clus.PersistOptions.GetReplicationConfig().EnablePlacementRules {
 		clus.initRuleManager()
 	}
-	// It should be updated to the latest feature version.
-	clus.PersistOptions.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.HotScheduleWithQuery))
-	clus.RegionLabeler, _ = labeler.NewRegionLabeler(ctx, storage.NewStorageWithMemoryBackend(), time.Second*5)
+	clus.RegionLabeler, _ = labeler.NewRegionLabeler(core.NewStorage(kv.NewMemoryKV()))
 	return clus
-}
-
-// GetStoreConfig returns the store config.
-func (mc *Cluster) GetStoreConfig() *config.StoreConfig {
-	return mc.StoreConfigManager.GetStoreConfig()
 }
 
 // GetOpts returns the cluster configuration.
@@ -90,9 +78,9 @@ func (mc *Cluster) GetOpts() *config.PersistOptions {
 	return mc.PersistOptions
 }
 
-// GetAllocator returns the ID allocator.
-func (mc *Cluster) GetAllocator() id.Allocator {
-	return mc.IDAllocator
+// AllocID allocs a new unique ID.
+func (mc *Cluster) AllocID() (uint64, error) {
+	return mc.Alloc()
 }
 
 // ScanRegions scans region with start key, until number greater than limit.
@@ -132,27 +120,18 @@ func (mc *Cluster) IsRegionHot(region *core.RegionInfo) bool {
 // The result only includes peers that are hot enough.
 func (mc *Cluster) RegionReadStats() map[uint64][]*statistics.HotPeerStat {
 	// We directly use threshold for read stats for mockCluster
-	return mc.HotCache.RegionStats(statistics.Read, mc.GetHotRegionCacheHitsThreshold())
-}
-
-// BucketsStats returns hot region's buckets stats.
-func (mc *Cluster) BucketsStats(degree int) map[uint64][]*buckets.BucketStat {
-	task := buckets.NewCollectBucketStatsTask(degree)
-	if !mc.HotBucketCache.CheckAsync(task) {
-		return nil
-	}
-	return task.WaitRet(mc.ctx)
+	return mc.HotCache.RegionStats(statistics.ReadFlow, mc.GetHotRegionCacheHitsThreshold())
 }
 
 // RegionWriteStats returns hot region's write stats.
 // The result only includes peers that are hot enough.
 func (mc *Cluster) RegionWriteStats() map[uint64][]*statistics.HotPeerStat {
-	return mc.HotCache.RegionStats(statistics.Write, mc.GetHotRegionCacheHitsThreshold())
+	return mc.HotCache.RegionStats(statistics.WriteFlow, mc.GetHotRegionCacheHitsThreshold())
 }
 
 // HotRegionsFromStore picks hot regions in specify store.
-func (mc *Cluster) HotRegionsFromStore(store uint64, kind statistics.RWType) []*core.RegionInfo {
-	stats := hotRegionsFromStore(mc.HotCache, store, kind, mc.GetHotRegionCacheHitsThreshold())
+func (mc *Cluster) HotRegionsFromStore(store uint64, kind statistics.FlowKind) []*core.RegionInfo {
+	stats := mc.HotCache.HotRegionsFromStore(store, kind, mc.GetHotRegionCacheHitsThreshold())
 	regions := make([]*core.RegionInfo, 0, len(stats))
 	for _, stat := range stats {
 		region := mc.GetRegion(stat.RegionID)
@@ -163,17 +142,9 @@ func (mc *Cluster) HotRegionsFromStore(store uint64, kind statistics.RWType) []*
 	return regions
 }
 
-// hotRegionsFromStore picks hot region in specify store.
-func hotRegionsFromStore(w *statistics.HotCache, storeID uint64, kind statistics.RWType, minHotDegree int) []*statistics.HotPeerStat {
-	if stats, ok := w.RegionStats(kind, minHotDegree)[storeID]; ok && len(stats) > 0 {
-		return stats
-	}
-	return nil
-}
-
 // AllocPeer allocs a new peer on a store.
 func (mc *Cluster) AllocPeer(storeID uint64) (*metapb.Peer, error) {
-	peerID, err := mc.GetAllocator().Alloc()
+	peerID, err := mc.AllocID()
 	if err != nil {
 		log.Error("failed to alloc peer", errs.ZapError(err))
 		return nil, err
@@ -187,7 +158,7 @@ func (mc *Cluster) AllocPeer(storeID uint64) (*metapb.Peer, error) {
 
 func (mc *Cluster) initRuleManager() {
 	if mc.RuleManager == nil {
-		mc.RuleManager = placement.NewRuleManager(storage.NewStorageWithMemoryBackend(), mc, mc.GetOpts())
+		mc.RuleManager = placement.NewRuleManager(core.NewStorage(kv.NewMemoryKV()), mc, mc.GetOpts())
 		mc.RuleManager.Initialize(int(mc.GetReplicationConfig().MaxReplicas), mc.GetReplicationConfig().LocationLabels)
 	}
 }
@@ -307,7 +278,7 @@ func (mc *Cluster) AddRegionStoreWithLeader(storeID uint64, regionCount int, lea
 	}
 	mc.AddRegionStore(storeID, regionCount)
 	for i := 0; i < leaderCount; i++ {
-		id, _ := mc.GetAllocator().Alloc()
+		id, _ := mc.AllocID()
 		mc.AddLeaderRegion(id, storeID)
 	}
 }
@@ -345,21 +316,6 @@ func (mc *Cluster) AddLeaderRegion(regionID uint64, leaderStoreID uint64, otherP
 	return region
 }
 
-// AddLightWeightLeaderRegion adds a light-wight region with specified leader and followers.
-func (mc *Cluster) AddLightWeightLeaderRegion(regionID uint64, leaderStoreID uint64, otherPeerStoreIDs ...uint64) *core.RegionInfo {
-	region := mc.newMockRegionInfo(regionID, leaderStoreID, otherPeerStoreIDs...)
-	mc.PutRegion(region)
-	return region
-}
-
-// AddNoLeaderRegion adds region with specified replicas, no leader.
-func (mc *Cluster) AddNoLeaderRegion(regionID uint64, otherPeerStoreIDs ...uint64) *core.RegionInfo {
-	origin := mc.newMockRegionInfo(regionID, 0, otherPeerStoreIDs...)
-	region := origin.Clone(core.SetApproximateSize(defaultRegionSize/mb), core.SetApproximateKeys(10))
-	mc.PutRegion(region)
-	return region
-}
-
 // AddRegionWithLearner adds region with specified leader, followers and learners.
 func (mc *Cluster) AddRegionWithLearner(regionID uint64, leaderStoreID uint64, followerStoreIDs, learnerStoreIDs []uint64) *core.RegionInfo {
 	origin := mc.MockRegionInfo(regionID, leaderStoreID, followerStoreIDs, learnerStoreIDs, nil)
@@ -389,7 +345,7 @@ func (mc *Cluster) AddRegionWithReadInfo(
 	r = r.Clone(core.SetReadKeys(readKeys))
 	r = r.Clone(core.SetReportInterval(reportInterval))
 	r = r.Clone(core.SetReadQuery(readQuery))
-	filledNum := mc.HotCache.GetFilledPeriod(statistics.Read)
+	filledNum := mc.HotCache.GetFilledPeriod(statistics.ReadFlow)
 	if len(filledNums) > 0 {
 		filledNum = filledNums[0]
 	}
@@ -410,7 +366,7 @@ func (mc *Cluster) AddRegionWithPeerReadInfo(regionID, leaderStoreID, targetStor
 	otherPeerStoreIDs []uint64, filledNums ...int) []*statistics.HotPeerStat {
 	r := mc.newMockRegionInfo(regionID, leaderStoreID, otherPeerStoreIDs...)
 	r = r.Clone(core.SetReadBytes(readBytes), core.SetReadKeys(readKeys), core.SetReportInterval(reportInterval))
-	filledNum := mc.HotCache.GetFilledPeriod(statistics.Read)
+	filledNum := mc.HotCache.GetFilledPeriod(statistics.ReadFlow)
 	if len(filledNums) > 0 {
 		filledNum = filledNums[0]
 	}
@@ -438,7 +394,7 @@ func (mc *Cluster) AddRegionLeaderWithReadInfo(
 	r = r.Clone(core.SetReadKeys(readKeys))
 	r = r.Clone(core.SetReadQuery(readQuery))
 	r = r.Clone(core.SetReportInterval(reportInterval))
-	filledNum := mc.HotCache.GetFilledPeriod(statistics.Read)
+	filledNum := mc.HotCache.GetFilledPeriod(statistics.ReadFlow)
 	if len(filledNums) > 0 {
 		filledNum = filledNums[0]
 	}
@@ -466,7 +422,7 @@ func (mc *Cluster) AddLeaderRegionWithWriteInfo(
 	r = r.Clone(core.SetReportInterval(reportInterval))
 	r = r.Clone(core.SetWrittenQuery(writtenQuery))
 
-	filledNum := mc.HotCache.GetFilledPeriod(statistics.Write)
+	filledNum := mc.HotCache.GetFilledPeriod(statistics.WriteFlow)
 	if len(filledNums) > 0 {
 		filledNum = filledNums[0]
 	}
@@ -680,7 +636,7 @@ func (mc *Cluster) newMockRegionInfo(regionID uint64, leaderStoreID uint64, othe
 	var followerStoreIDs []uint64
 	var learnerStoreIDs []uint64
 	for _, storeID := range otherPeerStoreIDs {
-		if store := mc.GetStore(storeID); store != nil && store.IsTiFlash() {
+		if store := mc.GetStore(storeID); store != nil && core.IsStoreContainLabel(store.GetMeta(), core.EngineKey, core.EngineTiFlash) {
 			learnerStoreIDs = append(learnerStoreIDs, storeID)
 		} else {
 			followerStoreIDs = append(followerStoreIDs, storeID)
@@ -766,6 +722,26 @@ func (mc *Cluster) SetStoreLabel(storeID uint64, labels map[string]string) {
 	mc.PutStore(newStore)
 }
 
+// DisableFeature marks that these features are not supported in the cluster.
+func (mc *Cluster) DisableFeature(fs ...versioninfo.Feature) {
+	for _, f := range fs {
+		mc.disabledFeatures[f] = struct{}{}
+	}
+}
+
+// EnableFeature marks that these features are supported in the cluster.
+func (mc *Cluster) EnableFeature(fs ...versioninfo.Feature) {
+	for _, f := range fs {
+		delete(mc.disabledFeatures, f)
+	}
+}
+
+// IsFeatureSupported checks if the feature is supported by current cluster.
+func (mc *Cluster) IsFeatureSupported(f versioninfo.Feature) bool {
+	_, ok := mc.disabledFeatures[f]
+	return !ok
+}
+
 // AddSuspectRegions mock method
 func (mc *Cluster) AddSuspectRegions(ids ...uint64) {
 	for _, id := range ids {
@@ -791,7 +767,7 @@ func (mc *Cluster) ResetSuspectRegions() {
 
 // GetRegionByKey get region by key
 func (mc *Cluster) GetRegionByKey(regionKey []byte) *core.RegionInfo {
-	return mc.BasicCluster.GetRegionByKey(regionKey)
+	return mc.SearchRegion(regionKey)
 }
 
 // SetStoreLastHeartbeatInterval set the last heartbeat to the target store

@@ -148,6 +148,7 @@ func (s *joinTestSuite) TestDeletedPDJoinsPreviousCluster(c *C) {
 	c.Assert(err, IsNil)
 
 	// The server should not successfully start.
+	//ctx, cancel := context.WithCancel(context.Background())
 	res := cluster.RunServer(pd3)
 	c.Assert(<-res, NotNil)
 

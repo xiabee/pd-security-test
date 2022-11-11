@@ -17,32 +17,30 @@ package server
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/core/storelimit"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/server/schedulers"
 	"github.com/tikv/pd/server/statistics"
-	"github.com/tikv/pd/server/storage"
 	"github.com/tikv/pd/server/tso"
 	"go.uber.org/zap"
 )
@@ -75,8 +73,6 @@ var (
 	ErrPluginNotFound = func(pluginPath string) error {
 		return errors.Errorf("plugin is not found: %s", pluginPath)
 	}
-
-	schedulerConfigPrefix = "pd/api/v1/scheduler-config"
 )
 
 // Handler is a helper to export methods to handle API/RPC requests.
@@ -84,11 +80,11 @@ type Handler struct {
 	s               *Server
 	opt             *config.PersistOptions
 	pluginChMap     map[string]chan string
-	pluginChMapLock syncutil.RWMutex
+	pluginChMapLock sync.RWMutex
 }
 
 func newHandler(s *Server) *Handler {
-	return &Handler{s: s, opt: s.persistOptions, pluginChMap: make(map[string]chan string), pluginChMapLock: syncutil.RWMutex{}}
+	return &Handler{s: s, opt: s.persistOptions, pluginChMap: make(map[string]chan string), pluginChMapLock: sync.RWMutex{}}
 }
 
 // GetRaftCluster returns RaftCluster.
@@ -196,16 +192,6 @@ func (h *Handler) GetHotReadRegions() *statistics.StoreHotPeersInfos {
 	return c.GetHotReadRegions()
 }
 
-// GetHotRegionsWriteInterval gets interval for PD to store Hot Region information..
-func (h *Handler) GetHotRegionsWriteInterval() time.Duration {
-	return h.opt.GetHotRegionsWriteInterval()
-}
-
-//  GetHotRegionsReservedDays gets days hot region information is kept.
-func (h *Handler) GetHotRegionsReservedDays() uint64 {
-	return h.opt.GetHotRegionsReservedDays()
-}
-
 // GetStoresLoads gets all hot write stores stats.
 func (h *Handler) GetStoresLoads() map[uint64][]float64 {
 	rc := h.s.GetRaftCluster()
@@ -231,8 +217,6 @@ func (h *Handler) AddScheduler(name string, args ...string) error {
 		log.Error("can not add scheduler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", args), errs.ZapError(err))
 	} else if err = h.opt.Persist(c.GetStorage()); err != nil {
 		log.Error("can not persist scheduler config", errs.ZapError(err))
-	} else {
-		log.Info("add scheduler successfully", zap.String("scheduler-name", name), zap.Strings("scheduler-args", args))
 	}
 	return err
 }
@@ -245,8 +229,6 @@ func (h *Handler) RemoveScheduler(name string) error {
 	}
 	if err = c.RemoveScheduler(name); err != nil {
 		log.Error("can not remove scheduler", zap.String("scheduler-name", name), errs.ZapError(err))
-	} else {
-		log.Info("remove scheduler successfully", zap.String("scheduler-name", name))
 	}
 	return err
 }
@@ -264,12 +246,6 @@ func (h *Handler) PauseOrResumeScheduler(name string, t int64) error {
 			log.Error("can not resume scheduler", zap.String("scheduler-name", name), errs.ZapError(err))
 		} else {
 			log.Error("can not pause scheduler", zap.String("scheduler-name", name), errs.ZapError(err))
-		}
-	} else {
-		if t == 0 {
-			log.Info("resume scheduler successfully", zap.String("scheduler-name", name))
-		} else {
-			log.Info("pause scheduler successfully", zap.String("scheduler-name", name), zap.Int64("pause-seconds", t))
 		}
 	}
 	return err
@@ -348,19 +324,9 @@ func (h *Handler) AddEvictSlowStoreScheduler() error {
 	return h.AddScheduler(schedulers.EvictSlowStoreType)
 }
 
-// AddSplitBucketScheduler adds a split-bucket-scheduler.
-func (h *Handler) AddSplitBucketScheduler() error {
-	return h.AddScheduler(schedulers.SplitBucketType)
-}
-
 // AddRandomMergeScheduler adds a random-merge-scheduler.
 func (h *Handler) AddRandomMergeScheduler() error {
 	return h.AddScheduler(schedulers.RandomMergeType)
-}
-
-// AddGrantHotRegionScheduler adds a grant-hot-region-scheduler
-func (h *Handler) AddGrantHotRegionScheduler(leaderID, peers string) error {
-	return h.AddScheduler(schedulers.GrantHotRegionType, leaderID, peers)
 }
 
 // GetOperator returns the region operator.
@@ -466,19 +432,6 @@ func (h *Handler) GetHistory(start time.Time) ([]operator.OpHistory, error) {
 	return c.GetHistory(start), nil
 }
 
-// GetRecords returns finished operators since start.
-func (h *Handler) GetRecords(from time.Time) ([]*operator.OpRecord, error) {
-	c, err := h.GetOperatorController()
-	if err != nil {
-		return nil, err
-	}
-	records := c.GetRecords(from)
-	if len(records) == 0 {
-		return nil, ErrOperatorNotFound
-	}
-	return records, nil
-}
-
 // SetAllStoresLimit is used to set limit of all stores.
 func (h *Handler) SetAllStoresLimit(ratePerMin float64, limitType storelimit.Type) error {
 	c, err := h.GetRaftCluster()
@@ -552,7 +505,7 @@ func (h *Handler) AddTransferLeaderOperator(regionID uint64, storeID uint64) err
 		return errors.Errorf("region has no voter in store %v", storeID)
 	}
 
-	op, err := operator.CreateTransferLeaderOperator("admin-transfer-leader", c, region, region.GetLeader().GetStoreId(), newLeader.GetStoreId(), []uint64{}, operator.OpAdmin)
+	op, err := operator.CreateTransferLeaderOperator("admin-transfer-leader", c, region, region.GetLeader().GetStoreId(), newLeader.GetStoreId(), operator.OpAdmin)
 	if err != nil {
 		log.Debug("fail to create transfer leader operator", errs.ZapError(err))
 		return err
@@ -749,11 +702,11 @@ func (h *Handler) AddMergeRegionOperator(regionID uint64, targetID uint64) error
 		return ErrRegionNotFound(targetID)
 	}
 
-	if !schedule.IsRegionHealthy(region) || !schedule.IsRegionReplicated(c, region) {
+	if !opt.IsRegionHealthy(c, region) || !opt.IsRegionReplicated(c, region) {
 		return ErrRegionAbnormalPeer(regionID)
 	}
 
-	if !schedule.IsRegionHealthy(target) || !schedule.IsRegionReplicated(c, target) {
+	if !opt.IsRegionHealthy(c, target) || !opt.IsRegionReplicated(c, target) {
 		return ErrRegionAbnormalPeer(targetID)
 	}
 
@@ -849,7 +802,7 @@ func (h *Handler) AddScatterRegionsOperators(regionIDs []uint64, startRawKey, en
 	if err != nil {
 		return 0, err
 	}
-	opsCount := 0
+	var ops []*operator.Operator
 	var failures map[uint64]error
 	// If startKey and endKey are both defined, use them first.
 	if len(startRawKey) > 0 && len(endRawKey) > 0 {
@@ -861,19 +814,25 @@ func (h *Handler) AddScatterRegionsOperators(regionIDs []uint64, startRawKey, en
 		if err != nil {
 			return 0, err
 		}
-		opsCount, failures, err = c.GetRegionScatter().ScatterRegionsByRange(startKey, endKey, group, retryLimit)
+		ops, failures, err = c.GetRegionScatter().ScatterRegionsByRange(startKey, endKey, group, retryLimit)
 		if err != nil {
 			return 0, err
 		}
 	} else {
-		opsCount, failures, err = c.GetRegionScatter().ScatterRegionsByID(regionIDs, group, retryLimit)
+		ops, failures, err = c.GetRegionScatter().ScatterRegionsByID(regionIDs, group, retryLimit)
 		if err != nil {
 			return 0, err
 		}
 	}
+	// If there existed any operator failed to be added into Operator Controller, add its regions into unProcessedRegions
+	for _, op := range ops {
+		if ok := c.GetOperatorController().AddOperator(op); !ok {
+			failures[op.RegionID()] = fmt.Errorf("region %v failed to add operator", op.RegionID())
+		}
+	}
 	percentage := 100
 	if len(failures) > 0 {
-		percentage = 100 - 100*len(failures)/(opsCount+len(failures))
+		percentage = 100 - 100*len(failures)/(len(ops)+len(failures))
 	}
 	return percentage, nil
 }
@@ -888,10 +847,10 @@ func (h *Handler) GetRegionsByType(typ statistics.RegionStatisticType) ([]*core.
 }
 
 // GetSchedulerConfigHandler gets the handler of schedulers.
-func (h *Handler) GetSchedulerConfigHandler() (http.Handler, error) {
+func (h *Handler) GetSchedulerConfigHandler() http.Handler {
 	c, err := h.GetRaftCluster()
 	if err != nil {
-		return nil, err
+		return nil
 	}
 	mux := http.NewServeMux()
 	for name, handler := range c.GetSchedulerHandlers() {
@@ -899,7 +858,7 @@ func (h *Handler) GetSchedulerConfigHandler() (http.Handler, error) {
 		urlPath := prefix + "/"
 		mux.Handle(urlPath, http.StripPrefix(prefix, handler))
 	}
-	return mux, nil
+	return mux
 }
 
 // GetOfflinePeer gets the region with offline peer.
@@ -933,16 +892,6 @@ func (h *Handler) SetStoreLimitScene(scene *storelimit.Scene, limitType storelim
 func (h *Handler) GetStoreLimitScene(limitType storelimit.Type) *storelimit.Scene {
 	cluster := h.s.GetRaftCluster()
 	return cluster.GetStoreLimiter().StoreLimitScene(limitType)
-}
-
-// GetProgressByID returns the progress details for a given store ID.
-func (h *Handler) GetProgressByID(storeID string) (action string, p, ls, cs float64, err error) {
-	return h.s.GetRaftCluster().GetProgressByID(storeID)
-}
-
-// GetProgressByAction returns the progress details for a given action.
-func (h *Handler) GetProgressByAction(action string) (p, ls, cs float64, err error) {
-	return h.s.GetRaftCluster().GetProgressByAction(action)
 }
 
 // PluginLoad loads the plugin referenced by the pluginPath
@@ -989,26 +938,27 @@ func (h *Handler) IsLeader() bool {
 }
 
 // PackHistoryHotReadRegions get read hot region info in HistoryHotRegion form.
-func (h *Handler) PackHistoryHotReadRegions() ([]storage.HistoryHotRegion, error) {
+func (h *Handler) PackHistoryHotReadRegions() ([]core.HistoryHotRegion, error) {
 	hotReadRegions := h.GetHotReadRegions()
 	if hotReadRegions == nil {
 		return nil, nil
 	}
 	hotReadPeerRegions := hotReadRegions.AsPeer
-	return h.packHotRegions(hotReadPeerRegions, storage.ReadType.String())
+	return h.packHotRegions(hotReadPeerRegions, core.ReadType.String())
+
 }
 
 // PackHistoryHotWriteRegions get write hot region info in HistoryHotRegion from
-func (h *Handler) PackHistoryHotWriteRegions() ([]storage.HistoryHotRegion, error) {
+func (h *Handler) PackHistoryHotWriteRegions() ([]core.HistoryHotRegion, error) {
 	hotWriteRegions := h.GetHotWriteRegions()
 	if hotWriteRegions == nil {
 		return nil, nil
 	}
 	hotWritePeerRegions := hotWriteRegions.AsPeer
-	return h.packHotRegions(hotWritePeerRegions, storage.WriteType.String())
+	return h.packHotRegions(hotWritePeerRegions, core.WriteType.String())
 }
 
-func (h *Handler) packHotRegions(hotPeersStat statistics.StoreHotPeersStat, hotRegionType string) (historyHotRegions []storage.HistoryHotRegion, err error) {
+func (h *Handler) packHotRegions(hotPeersStat statistics.StoreHotPeersStat, hotRegionType string) (historyHotRegions []core.HistoryHotRegion, err error) {
 	c, err := h.GetRaftCluster()
 	if err != nil {
 		return nil, err
@@ -1030,25 +980,24 @@ func (h *Handler) packHotRegions(hotPeersStat statistics.StoreHotPeersStat, hotR
 			for _, peer := range meta.Peers {
 				if peer.StoreId == hotPeerStat.StoreID {
 					peerID = peer.Id
-					isLearner = core.IsLearner(peer)
-					break
+					isLearner = peer.Role == metapb.PeerRole_Learner
 				}
 			}
-			stat := storage.HistoryHotRegion{
-				// store in ms.
+			stat := core.HistoryHotRegion{
+				// store in  ms.
 				UpdateTime:     hotPeerStat.LastUpdateTime.UnixNano() / int64(time.Millisecond),
 				RegionID:       hotPeerStat.RegionID,
 				StoreID:        hotPeerStat.StoreID,
 				PeerID:         peerID,
-				IsLeader:       peerID == region.GetLeader().Id,
+				IsLeader:       meta.Id == region.GetLeader().Id,
 				IsLearner:      isLearner,
 				HotDegree:      int64(hotPeerStat.HotDegree),
 				FlowBytes:      hotPeerStat.ByteRate,
 				KeyRate:        hotPeerStat.KeyRate,
 				QueryRate:      hotPeerStat.QueryRate,
-				StartKey:       string(region.GetStartKey()),
-				EndKey:         string(region.GetEndKey()),
-				EncryptionMeta: meta.GetEncryptionMeta(),
+				StartKey:       meta.StartKey,
+				EndKey:         meta.EndKey,
+				EncryptionMeta: meta.EncryptionMeta,
 				HotRegionType:  hotRegionType,
 			}
 			historyHotRegions = append(historyHotRegions, stat)
@@ -1058,11 +1007,9 @@ func (h *Handler) packHotRegions(hotPeersStat statistics.StoreHotPeersStat, hotR
 }
 
 // GetHistoryHotRegionIter return a iter which iter all qualified item .
-func (h *Handler) GetHistoryHotRegionIter(
-	hotRegionTypes []string,
-	startTime, endTime int64,
-) storage.HotRegionStorageIterator {
-	iter := h.s.hotRegionStorage.NewIterator(hotRegionTypes, startTime, endTime)
+func (h *Handler) GetHistoryHotRegionIter(hotRegionTypes []string,
+	StartTime, EndTime int64) core.HotRegionStorageIterator {
+	iter := h.s.hotRegionStorage.NewIterator(hotRegionTypes, StartTime, EndTime)
 	return iter
 }
 
@@ -1071,48 +1018,11 @@ func checkStoreState(rc *cluster.RaftCluster, storeID uint64) error {
 	if store == nil {
 		return errs.ErrStoreNotFound.FastGenByArgs(storeID)
 	}
-	if store.IsRemoved() {
-		return errs.ErrStoreRemoved.FastGenByArgs(storeID)
+	if store.IsTombstone() {
+		return errs.ErrStoreTombstone.FastGenByArgs(storeID)
 	}
 	if store.IsUnhealthy() {
 		return errs.ErrStoreUnhealthy.FastGenByArgs(storeID)
-	}
-	return nil
-}
-
-// RedirectSchedulerUpdate update scheduler config. Export this func to help handle damaged store.
-func (h *Handler) redirectSchedulerUpdate(name string, storeID float64) error {
-	input := make(map[string]interface{})
-	input["name"] = name
-	input["store_id"] = storeID
-	updateURL := fmt.Sprintf("%s/%s/%s/config", h.GetAddr(), schedulerConfigPrefix, name)
-	body, err := json.Marshal(input)
-	if err != nil {
-		return err
-	}
-	return apiutil.PostJSONIgnoreResp(h.s.GetHTTPClient(), updateURL, body)
-}
-
-// AddEvictOrGrant add evict leader scheduler or grant leader scheduler.
-func (h *Handler) AddEvictOrGrant(storeID float64, name string) error {
-	if exist, err := h.IsSchedulerExisted(name); !exist {
-		if err != nil && !errors.ErrorEqual(err, errs.ErrSchedulerNotFound.FastGenByArgs()) {
-			return err
-		}
-		switch name {
-		case schedulers.EvictLeaderName:
-			err = h.AddEvictLeaderScheduler(uint64(storeID))
-		case schedulers.GrantLeaderName:
-			err = h.AddGrantLeaderScheduler(uint64(storeID))
-		}
-		if err != nil {
-			return err
-		}
-	} else {
-		if err := h.redirectSchedulerUpdate(name, storeID); err != nil {
-			return err
-		}
-		log.Info("update scheduler", zap.String("scheduler-name", name), zap.Uint64("store-id", uint64(storeID)))
 	}
 	return nil
 }

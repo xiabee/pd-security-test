@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,7 +27,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/pkg/tsoutil"
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/election"
@@ -48,7 +48,7 @@ const (
 
 // tsoObject is used to store the current TSO in memory with a RWMutex lock.
 type tsoObject struct {
-	syncutil.RWMutex
+	sync.RWMutex
 	physical   time.Time
 	logical    int64
 	updateTime time.Time
@@ -87,6 +87,7 @@ func (t *timestampOracle) setTSOPhysical(next time.Time, force bool) {
 
 func (t *timestampOracle) setTSOUpdateTimeLocked(updateTime time.Time) {
 	t.tsoMux.updateTime = updateTime
+	tsoGauge.WithLabelValues("tso_update_time", t.dcLocation).Set(float64(updateTime.UnixNano() / int64(time.Millisecond)))
 }
 
 func (t *timestampOracle) getTSO() (time.Time, int64) {

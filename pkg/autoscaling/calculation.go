@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	promClient "github.com/prometheus/client_golang/api"
 	"github.com/tikv/pd/pkg/errs"
@@ -136,7 +137,7 @@ func filterTiKVInstances(informer core.StoreSetInformer) []instance {
 	var instances []instance
 	stores := informer.GetStores()
 	for _, store := range stores {
-		if store.IsUp() {
+		if store.GetState() == metapb.StoreState_Up {
 			instances = append(instances, instance{id: store.GetID(), address: store.GetAddress()})
 		}
 	}

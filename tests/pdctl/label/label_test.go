@@ -54,61 +54,47 @@ func (s *labelTestSuite) TestLabel(c *C) {
 	pdAddr := cluster.GetConfig().GetClientURL()
 	cmd := pdctlCmd.GetRootCmd()
 
-	stores := []*api.StoreInfo{
+	stores := []*metapb.Store{
 		{
-			Store: &api.MetaStore{
-				Store: &metapb.Store{
-					Id:    1,
-					State: metapb.StoreState_Up,
-					Labels: []*metapb.StoreLabel{
-						{
-							Key:   "zone",
-							Value: "us-west",
-						},
-					},
-					LastHeartbeat: time.Now().UnixNano(),
+			Id:    1,
+			State: metapb.StoreState_Up,
+			Labels: []*metapb.StoreLabel{
+				{
+					Key:   "zone",
+					Value: "us-west",
 				},
-				StateName: metapb.StoreState_Up.String(),
 			},
+			LastHeartbeat: time.Now().UnixNano(),
 		},
 		{
-			Store: &api.MetaStore{
-				Store: &metapb.Store{
-					Id:    2,
-					State: metapb.StoreState_Up,
-					Labels: []*metapb.StoreLabel{
-						{
-							Key:   "zone",
-							Value: "us-east",
-						},
-					},
-					LastHeartbeat: time.Now().UnixNano(),
+			Id:    2,
+			State: metapb.StoreState_Up,
+			Labels: []*metapb.StoreLabel{
+				{
+					Key:   "zone",
+					Value: "us-east",
 				},
-				StateName: metapb.StoreState_Up.String(),
 			},
+			LastHeartbeat: time.Now().UnixNano(),
 		},
 		{
-			Store: &api.MetaStore{
-				Store: &metapb.Store{
-					Id:    3,
-					State: metapb.StoreState_Up,
-					Labels: []*metapb.StoreLabel{
-						{
-							Key:   "zone",
-							Value: "us-west",
-						},
-					},
-					LastHeartbeat: time.Now().UnixNano(),
+			Id:    3,
+			State: metapb.StoreState_Up,
+			Labels: []*metapb.StoreLabel{
+				{
+					Key:   "zone",
+					Value: "us-west",
 				},
-				StateName: metapb.StoreState_Up.String(),
 			},
+			LastHeartbeat: time.Now().UnixNano(),
 		},
 	}
+
 	leaderServer := cluster.GetServer(cluster.GetLeader())
 	c.Assert(leaderServer.BootstrapCluster(), IsNil)
 
 	for _, store := range stores {
-		pdctl.MustPutStore(c, leaderServer.GetServer(), store.Store.Store)
+		pdctl.MustPutStore(c, leaderServer.GetServer(), store)
 	}
 	defer cluster.Destroy()
 
@@ -142,13 +128,6 @@ func (s *labelTestSuite) TestLabel(c *C) {
 	c.Assert(err, IsNil)
 	storesInfo := new(api.StoresInfo)
 	c.Assert(json.Unmarshal(output, &storesInfo), IsNil)
-	sss := []*api.StoreInfo{stores[0], stores[2]}
-	pdctl.CheckStoresInfo(c, storesInfo.Stores, sss)
-
-	// label isolation [label]
-	args = []string{"-u", pdAddr, "label", "isolation"}
-	output, err = pdctl.ExecuteCommand(cmd, args...)
-	c.Assert(err, IsNil)
-	c.Assert(strings.Contains(string(output), "none"), IsTrue)
-	c.Assert(strings.Contains(string(output), "2"), IsTrue)
+	ss = []*metapb.Store{stores[0], stores[2]}
+	pdctl.CheckStoresInfo(c, storesInfo.Stores, ss)
 }

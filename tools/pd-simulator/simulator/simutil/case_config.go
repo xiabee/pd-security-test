@@ -25,10 +25,10 @@ type CaseConfig struct {
 var CaseConfigure *CaseConfig
 
 // InitCaseConfig is to init caseConfigure
-func InitCaseConfig(storeNum, regionNum int, enableTransferRegionCounter bool) {
+func InitCaseConfig(StoreNum, RegionNum int, EnableTransferRegionCounter bool) {
 	CaseConfigure = &CaseConfig{
-		StoreNum:                    storeNum,
-		RegionNum:                   regionNum,
-		EnableTransferRegionCounter: enableTransferRegionCounter,
+		StoreNum:                    StoreNum,
+		RegionNum:                   RegionNum,
+		EnableTransferRegionCounter: EnableTransferRegionCounter,
 	}
 }

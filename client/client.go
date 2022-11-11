@@ -29,8 +29,8 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/client/errs"
-	"github.com/tikv/pd/client/grpcutil"
+	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/grpcutil"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -44,14 +44,6 @@ type Region struct {
 	Leader       *metapb.Peer
 	DownPeers    []*metapb.Peer
 	PendingPeers []*metapb.Peer
-	Buckets      *metapb.Buckets
-}
-
-// GlobalConfigItem standard format of KV pair in GlobalConfig client
-type GlobalConfigItem struct {
-	Name  string
-	Value string
-	Error error
 }
 
 // Client is a PD (Placement Driver) client.
@@ -77,13 +69,13 @@ type Client interface {
 	// taking care of region change.
 	// Also it may return nil if PD finds no Region for the key temporarily,
 	// client should retry later.
-	GetRegion(ctx context.Context, key []byte, opts ...GetRegionOption) (*Region, error)
+	GetRegion(ctx context.Context, key []byte) (*Region, error)
 	// GetRegionFromMember gets a region from certain members.
 	GetRegionFromMember(ctx context.Context, key []byte, memberURLs []string) (*Region, error)
 	// GetPrevRegion gets the previous region and its leader Peer of the region where the key is located.
-	GetPrevRegion(ctx context.Context, key []byte, opts ...GetRegionOption) (*Region, error)
+	GetPrevRegion(ctx context.Context, key []byte) (*Region, error)
 	// GetRegionByID gets a region and its leader Peer from PD by id.
-	GetRegionByID(ctx context.Context, regionID uint64, opts ...GetRegionOption) (*Region, error)
+	GetRegionByID(ctx context.Context, regionID uint64) (*Region, error)
 	// ScanRegion gets a list of regions, starts from the region that contains key.
 	// Limit limits the maximum number of regions returned.
 	// If a region has no leader, corresponding leader will be placed by a peer
@@ -115,17 +107,8 @@ type Client interface {
 	ScatterRegions(ctx context.Context, regionsID []uint64, opts ...RegionsOption) (*pdpb.ScatterRegionResponse, error)
 	// SplitRegions split regions by given split keys
 	SplitRegions(ctx context.Context, splitKeys [][]byte, opts ...RegionsOption) (*pdpb.SplitRegionsResponse, error)
-	// SplitAndScatterRegions split regions by given split keys and scatter new regions
-	SplitAndScatterRegions(ctx context.Context, splitKeys [][]byte, opts ...RegionsOption) (*pdpb.SplitAndScatterRegionsResponse, error)
 	// GetOperator gets the status of operator of the specified region.
 	GetOperator(ctx context.Context, regionID uint64) (*pdpb.GetOperatorResponse, error)
-
-	// LoadGlobalConfig gets the global config from etcd
-	LoadGlobalConfig(ctx context.Context, names []string) ([]GlobalConfigItem, error)
-	// StoreGlobalConfig set the config from etcd
-	StoreGlobalConfig(ctx context.Context, items []GlobalConfigItem) error
-	// WatchGlobalConfig returns an stream with all global config and updates
-	WatchGlobalConfig(ctx context.Context) (chan []GlobalConfigItem, error)
 	// UpdateOption updates the client option.
 	UpdateOption(option DynamicOption, value interface{}) error
 	// Close closes the client.
@@ -162,19 +145,6 @@ func WithGroup(group string) RegionsOption {
 // WithRetry specify the retry limit during Scatter/Split Regions
 func WithRetry(retry uint64) RegionsOption {
 	return func(op *RegionsOp) { op.retryLimit = retry }
-}
-
-// GetRegionOp represents available options when getting regions.
-type GetRegionOp struct {
-	needBuckets bool
-}
-
-// GetRegionOption configures GetRegionOp.
-type GetRegionOption func(op *GetRegionOp)
-
-// WithBuckets means getting region and its buckets.
-func WithBuckets() GetRegionOption {
-	return func(op *GetRegionOp) { op.needBuckets = true }
 }
 
 type tsoRequest struct {
@@ -281,10 +251,6 @@ func (tbc *tsoBatchController) pushRequest(tsoReq *tsoRequest) {
 	tbc.collectedRequestCount++
 }
 
-func (tbc *tsoBatchController) getCollectedRequests() []*tsoRequest {
-	return tbc.collectedRequests[:tbc.collectedRequestCount]
-}
-
 // adjustBestBatchSize stabilizes the latency with the AIAD algorithm.
 func (tbc *tsoBatchController) adjustBestBatchSize() {
 	tsoBestBatchSize.Observe(float64(tbc.bestBatchSize))
@@ -298,14 +264,8 @@ func (tbc *tsoBatchController) adjustBestBatchSize() {
 	}
 }
 
-func (tbc *tsoBatchController) revokePendingTSORequest(err error) {
-	for i := 0; i < len(tbc.tsoRequestCh); i++ {
-		req := <-tbc.tsoRequestCh
-		req.done <- err
-	}
-}
-
 type tsoDispatcher struct {
+	dispatcherCtx      context.Context
 	dispatcherCancel   context.CancelFunc
 	tsoBatchController *tsoBatchController
 }
@@ -320,8 +280,8 @@ const (
 	updateMemberTimeout    = time.Second // Use a shorter timeout to recover faster from network isolation.
 	tsLoopDCCheckInterval  = time.Minute
 	defaultMaxTSOBatchSize = 10000 // should be higher if client is sending requests in burst
-	retryInterval          = 1 * time.Second
-	maxRetryTimes          = 5
+	retryInterval          = 500 * time.Millisecond
+	maxRetryTimes          = 6
 )
 
 // LeaderHealthCheckInterval might be changed in the unit to shorten the testing time.
@@ -334,8 +294,6 @@ var (
 	errClosing = errors.New("[pd] closing")
 	// errTSOLength is returned when the number of response timestamps is inconsistent with request.
 	errTSOLength = errors.New("[pd] tso length in rpc response is incorrect")
-	// errGlobalConfigNotFound is returned when etcd does not contain the globalConfig item
-	errGlobalConfigNotFound = errors.New("[pd] global config not found")
 )
 
 // ClientOption configures client.
@@ -649,7 +607,7 @@ func (c *client) checkAllocator(
 			stream, err := c.createTsoStream(cctx, cancel, pdpb.NewPDClient(cc))
 			if err == nil && stream != nil {
 				log.Info("[pd] recover the original tso stream since the network has become normal", zap.String("dc", dc), zap.String("url", url))
-				updateAndClear(url, &connectionContext{url, stream, cctx, cancel})
+				updateAndClear(url, &connectionContext{url, stream, cancel})
 				return
 			}
 		}
@@ -675,6 +633,7 @@ func (c *client) checkTSODispatcher(dcLocation string) bool {
 func (c *client) createTSODispatcher(dcLocation string) {
 	dispatcherCtx, dispatcherCancel := context.WithCancel(c.ctx)
 	dispatcher := &tsoDispatcher{
+		dispatcherCtx:    dispatcherCtx,
 		dispatcherCancel: dispatcherCancel,
 		tsoBatchController: newTSOBatchController(
 			make(chan *tsoRequest, defaultMaxTSOBatchSize*2),
@@ -694,12 +653,10 @@ func (c *client) handleDispatcher(
 	dc string,
 	tbc *tsoBatchController) {
 	var (
-		retryTimeConsuming time.Duration
-		err                error
-		streamAddr         string
-		stream             pdpb.PD_TsoClient
-		streamCtx          context.Context
-		cancel             context.CancelFunc
+		err        error
+		streamAddr string
+		stream     pdpb.PD_TsoClient
+		cancel     context.CancelFunc
 		// addr -> connectionContext
 		connectionCtxs sync.Map
 		opts           []opentracing.StartSpanOption
@@ -756,67 +713,45 @@ func (c *client) handleDispatcher(
 	}
 
 	// Loop through each batch of TSO requests and send them for processing.
-tsoBatchLoop:
+	streamLoopTimer := time.NewTimer(c.option.timeout)
 	for {
 		select {
 		case <-dispatcherCtx.Done():
 			return
 		default:
 		}
+		// Choose a stream to send the TSO gRPC request.
+		connectionCtx := c.chooseStream(&connectionCtxs)
+		if connectionCtx != nil {
+			streamAddr, stream, cancel = connectionCtx.streamAddr, connectionCtx.stream, connectionCtx.cancel
+		}
+		// Check stream and retry if necessary.
+		if stream == nil {
+			log.Info("[pd] tso stream is not ready", zap.String("dc", dc))
+			if c.updateConnectionCtxs(dispatcherCtx, dc, &connectionCtxs) {
+				continue
+			}
+			select {
+			case <-dispatcherCtx.Done():
+				return
+			case <-streamLoopTimer.C:
+				err = errs.ErrClientCreateTSOStream.FastGenByArgs()
+				log.Error("[pd] create tso stream error", zap.String("dc-location", dc), errs.ZapError(err))
+				c.ScheduleCheckLeader()
+				c.revokeTSORequest(errors.WithStack(err), tbc.tsoRequestCh)
+				continue
+			case <-time.After(retryInterval):
+				continue
+			}
+		}
 		// Start to collect the TSO requests.
 		maxBatchWaitInterval := c.option.getMaxTSOBatchWaitInterval()
 		if err = tbc.fetchPendingRequests(dispatcherCtx, maxBatchWaitInterval); err != nil {
-			if err == context.Canceled {
-				log.Info("[pd] stop fetching the pending tso requests due to context canceled",
-					zap.String("dc-location", dc))
-			} else {
-				log.Error("[pd] fetch pending tso requests error",
-					zap.String("dc-location", dc), errs.ZapError(errs.ErrClientGetTSO, err))
-			}
+			log.Error("[pd] fetch pending tso requests error", zap.String("dc-location", dc), errs.ZapError(errs.ErrClientGetTSO, err))
 			return
 		}
 		if maxBatchWaitInterval >= 0 {
 			tbc.adjustBestBatchSize()
-		}
-		// Choose a stream to send the TSO gRPC request.
-	streamChoosingLoop:
-		for {
-			connectionCtx := c.chooseStream(&connectionCtxs)
-			if connectionCtx != nil {
-				streamAddr, stream, streamCtx, cancel = connectionCtx.streamAddr, connectionCtx.stream, connectionCtx.ctx, connectionCtx.cancel
-			}
-			// Check stream and retry if necessary.
-			if stream == nil {
-				log.Info("[pd] tso stream is not ready", zap.String("dc", dc))
-				c.updateConnectionCtxs(dispatcherCtx, dc, &connectionCtxs)
-				if retryTimeConsuming >= c.option.timeout {
-					err = errs.ErrClientCreateTSOStream.FastGenByArgs("retry timeout")
-					log.Error("[pd] create tso stream error", zap.String("dc-location", dc), errs.ZapError(err))
-					c.ScheduleCheckLeader()
-					c.finishTSORequest(tbc.getCollectedRequests(), 0, 0, 0, errors.WithStack(err))
-					retryTimeConsuming = 0
-					continue tsoBatchLoop
-				}
-				select {
-				case <-dispatcherCtx.Done():
-					return
-				case <-time.After(time.Second):
-					retryTimeConsuming += time.Second
-					continue
-				}
-			}
-			retryTimeConsuming = 0
-			select {
-			case <-streamCtx.Done():
-				log.Info("[pd] tso stream is canceled", zap.String("dc", dc), zap.String("stream-addr", streamAddr))
-				// Set `stream` to nil and remove this stream from the `connectionCtxs` due to being canceled.
-				connectionCtxs.Delete(streamAddr)
-				cancel()
-				stream = nil
-				continue
-			default:
-				break streamChoosingLoop
-			}
 		}
 		done := make(chan struct{})
 		dl := deadline{
@@ -846,11 +781,11 @@ tsoBatchLoop:
 			default:
 			}
 			c.ScheduleCheckLeader()
-			log.Error("[pd] getTS error", zap.String("dc-location", dc), zap.String("stream-addr", streamAddr), errs.ZapError(errs.ErrClientGetTSO, err))
-			// Set `stream` to nil and remove this stream from the `connectionCtxs` due to error.
-			connectionCtxs.Delete(streamAddr)
+			log.Error("[pd] getTS error", zap.String("dc-location", dc), errs.ZapError(errs.ErrClientGetTSO, err))
 			cancel()
+			// Set `stream` to nil and remove this stream from the `connectionCtxs`.
 			stream = nil
+			connectionCtxs.Delete(streamAddr)
 			// Because ScheduleCheckLeader is asynchronous, if the leader changes, we better call `updateMember` ASAP.
 			if IsLeaderChange(err) {
 				if err := c.updateMember(); err != nil {
@@ -895,11 +830,10 @@ type connectionContext struct {
 	streamAddr string
 	// Current stream to send gRPC requests, maybe a leader or a follower.
 	stream pdpb.PD_TsoClient
-	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func (c *client) updateConnectionCtxs(updaterCtx context.Context, dc string, connectionCtxs *sync.Map) {
+func (c *client) updateConnectionCtxs(updaterCtx context.Context, dc string, connectionCtxs *sync.Map) bool {
 	// Normal connection creating, it will be affected by the `enableForwarding`.
 	createTSOConnection := c.tryConnect
 	if c.allowTSOFollowerProxy(dc) {
@@ -907,7 +841,9 @@ func (c *client) updateConnectionCtxs(updaterCtx context.Context, dc string, con
 	}
 	if err := createTSOConnection(updaterCtx, dc, connectionCtxs); err != nil {
 		log.Error("[pd] update connection contexts failed", zap.String("dc", dc), errs.ZapError(err))
+		return false
 	}
+	return true
 }
 
 // tryConnect will try to connect to the TSO allocator leader. If the connection becomes unreachable
@@ -923,6 +859,8 @@ func (c *client) tryConnect(
 		networkErrNum uint64
 		err           error
 		stream        pdpb.PD_TsoClient
+		url           string
+		cc            *grpc.ClientConn
 	)
 	updateAndClear := func(newAddr string, connectionCtx *connectionContext) {
 		if cc, loaded := connectionCtxs.LoadOrStore(newAddr, connectionCtx); loaded {
@@ -938,9 +876,11 @@ func (c *client) tryConnect(
 			return true
 		})
 	}
-	cc, url := c.getAllocatorClientConnByDCLocation(dc)
 	// retry several times before falling back to the follower when the network problem happens
+
 	for i := 0; i < maxRetryTimes; i++ {
+		c.ScheduleCheckLeader()
+		cc, url = c.getAllocatorClientConnByDCLocation(dc)
 		cctx, cancel := context.WithCancel(dispatcherCtx)
 		stream, err = c.createTsoStream(cctx, cancel, pdpb.NewPDClient(cc))
 		failpoint.Inject("unreachableNetwork", func() {
@@ -948,7 +888,7 @@ func (c *client) tryConnect(
 			err = status.New(codes.Unavailable, "unavailable").Err()
 		})
 		if stream != nil && err == nil {
-			updateAndClear(url, &connectionContext{url, stream, cctx, cancel})
+			updateAndClear(url, &connectionContext{url, stream, cancel})
 			return nil
 		}
 
@@ -991,7 +931,7 @@ func (c *client) tryConnect(
 				// the goroutine is used to check the network and change back to the original stream
 				go c.checkAllocator(dispatcherCtx, cancel, dc, forwardedHostTrim, addrTrim, url, updateAndClear)
 				requestForwarded.WithLabelValues(forwardedHostTrim, addrTrim).Set(1)
-				updateAndClear(addr, &connectionContext{addr, stream, cctx, cancel})
+				updateAndClear(addr, &connectionContext{addr, stream, cancel})
 				return nil
 			}
 			cancel()
@@ -1040,7 +980,7 @@ func (c *client) tryConnectWithProxy(
 				addrTrim := trimHTTPPrefix(addr)
 				requestForwarded.WithLabelValues(forwardedHostTrim, addrTrim).Set(1)
 			}
-			connectionCtxs.Store(addr, &connectionContext{addr, stream, cctx, cancel})
+			connectionCtxs.Store(addr, &connectionContext{addr, stream, cancel})
 			continue
 		}
 		log.Error("[pd] create the tso stream failed", zap.String("dc", dc), zap.String("addr", addr), errs.ZapError(err))
@@ -1050,7 +990,7 @@ func (c *client) tryConnectWithProxy(
 }
 
 func extractSpanReference(tbc *tsoBatchController, opts []opentracing.StartSpanOption) []opentracing.StartSpanOption {
-	for _, req := range tbc.getCollectedRequests() {
+	for _, req := range tbc.collectedRequests[:tbc.collectedRequestCount] {
 		if span := opentracing.SpanFromContext(req.requestCtx); span != nil {
 			opts = append(opts, opentracing.ChildOf(span.Context()))
 		}
@@ -1064,7 +1004,7 @@ func (c *client) processTSORequests(stream pdpb.PD_TsoClient, dcLocation string,
 		defer span.Finish()
 	}
 	start := time.Now()
-	requests := tbc.getCollectedRequests()
+	requests := tbc.collectedRequests[:tbc.collectedRequestCount]
 	count := int64(len(requests))
 	req := &pdpb.TsoRequest{
 		Header:     c.requestHeader(),
@@ -1147,16 +1087,21 @@ func (c *client) finishTSORequest(requests []*tsoRequest, physical, firstLogical
 	}
 }
 
+func (c *client) revokeTSORequest(err error, tsoDispatcher <-chan *tsoRequest) {
+	for i := 0; i < len(tsoDispatcher); i++ {
+		req := <-tsoDispatcher
+		req.done <- err
+	}
+}
+
 func (c *client) Close() {
 	c.cancel()
 	c.wg.Wait()
 
-	c.tsoDispatcher.Range(func(_, dispatcherInterface interface{}) bool {
-		if dispatcherInterface != nil {
-			dispatcher := dispatcherInterface.(*tsoDispatcher)
-			tsoErr := errors.WithStack(errClosing)
-			dispatcher.tsoBatchController.revokePendingTSORequest(tsoErr)
-			dispatcher.dispatcherCancel()
+	c.tsoDispatcher.Range(func(_, dispatcher interface{}) bool {
+		if dispatcher != nil {
+			c.revokeTSORequest(errors.WithStack(errClosing), dispatcher.(*tsoDispatcher).tsoBatchController.tsoRequestCh)
+			dispatcher.(*tsoDispatcher).dispatcherCancel()
 		}
 		return true
 	})
@@ -1333,7 +1278,6 @@ func handleRegionResponse(res *pdpb.GetRegionResponse) *Region {
 		Meta:         res.Region,
 		Leader:       res.Leader,
 		PendingPeers: res.PendingPeers,
-		Buckets:      res.Buckets,
 	}
 	for _, s := range res.DownPeers {
 		r.DownPeers = append(r.DownPeers, s.Peer)
@@ -1341,23 +1285,18 @@ func handleRegionResponse(res *pdpb.GetRegionResponse) *Region {
 	return r
 }
 
-func (c *client) GetRegion(ctx context.Context, key []byte, opts ...GetRegionOption) (*Region, error) {
+func (c *client) GetRegion(ctx context.Context, key []byte) (*Region, error) {
 	if span := opentracing.SpanFromContext(ctx); span != nil {
 		span = opentracing.StartSpan("pdclient.GetRegion", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
 	defer func() { cmdDurationGetRegion.Observe(time.Since(start).Seconds()) }()
-	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
 
-	options := &GetRegionOp{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
 	req := &pdpb.GetRegionRequest{
-		Header:      c.requestHeader(),
-		RegionKey:   key,
-		NeedBuckets: options.needBuckets,
+		Header:    c.requestHeader(),
+		RegionKey: key,
 	}
 	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
 	resp, err := c.getClient().GetRegion(ctx, req)
@@ -1413,23 +1352,18 @@ func (c *client) GetRegionFromMember(ctx context.Context, key []byte, memberURLs
 	return handleRegionResponse(resp), nil
 }
 
-func (c *client) GetPrevRegion(ctx context.Context, key []byte, opts ...GetRegionOption) (*Region, error) {
+func (c *client) GetPrevRegion(ctx context.Context, key []byte) (*Region, error) {
 	if span := opentracing.SpanFromContext(ctx); span != nil {
 		span = opentracing.StartSpan("pdclient.GetPrevRegion", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
 	defer func() { cmdDurationGetPrevRegion.Observe(time.Since(start).Seconds()) }()
-	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
 
-	options := &GetRegionOp{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
 	req := &pdpb.GetRegionRequest{
-		Header:      c.requestHeader(),
-		RegionKey:   key,
-		NeedBuckets: options.needBuckets,
+		Header:    c.requestHeader(),
+		RegionKey: key,
 	}
 	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
 	resp, err := c.getClient().GetPrevRegion(ctx, req)
@@ -1443,23 +1377,18 @@ func (c *client) GetPrevRegion(ctx context.Context, key []byte, opts ...GetRegio
 	return handleRegionResponse(resp), nil
 }
 
-func (c *client) GetRegionByID(ctx context.Context, regionID uint64, opts ...GetRegionOption) (*Region, error) {
+func (c *client) GetRegionByID(ctx context.Context, regionID uint64) (*Region, error) {
 	if span := opentracing.SpanFromContext(ctx); span != nil {
 		span = opentracing.StartSpan("pdclient.GetRegionByID", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
 	defer func() { cmdDurationGetRegionByID.Observe(time.Since(start).Seconds()) }()
-	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
 
-	options := &GetRegionOp{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
 	req := &pdpb.GetRegionByIDRequest{
-		Header:      c.requestHeader(),
-		RegionId:    regionID,
-		NeedBuckets: options.needBuckets,
+		Header:   c.requestHeader(),
+		RegionId: regionID,
 	}
 	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
 	resp, err := c.getClient().GetRegionByID(ctx, req)
@@ -1563,7 +1492,7 @@ func handleStoreResponse(resp *pdpb.GetStoreResponse) (*metapb.Store, error) {
 	if store == nil {
 		return nil, errors.New("[pd] store field in rpc response not set")
 	}
-	if store.GetNodeState() == metapb.NodeState_Removed {
+	if store.GetState() == metapb.StoreState_Tombstone {
 		return nil, nil
 	}
 	return store, nil
@@ -1695,30 +1624,6 @@ func (c *client) ScatterRegions(ctx context.Context, regionsID []uint64, opts ..
 	return c.scatterRegionsWithOptions(ctx, regionsID, opts...)
 }
 
-func (c *client) SplitAndScatterRegions(ctx context.Context, splitKeys [][]byte, opts ...RegionsOption) (*pdpb.SplitAndScatterRegionsResponse, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.SplitAndScatterRegions", opentracing.ChildOf(span.Context()))
-		defer span.Finish()
-	}
-	start := time.Now()
-	defer func() { cmdDurationSplitAndScatterRegions.Observe(time.Since(start).Seconds()) }()
-	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
-	defer cancel()
-	options := &RegionsOp{}
-	for _, opt := range opts {
-		opt(options)
-	}
-	req := &pdpb.SplitAndScatterRegionsRequest{
-		Header:     c.requestHeader(),
-		SplitKeys:  splitKeys,
-		Group:      options.group,
-		RetryLimit: options.retryLimit,
-	}
-
-	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
-	return c.getClient().SplitAndScatterRegions(ctx, req)
-}
-
 func (c *client) GetOperator(ctx context.Context, regionID uint64) (*pdpb.GetOperatorResponse, error) {
 	if span := opentracing.SpanFromContext(ctx); span != nil {
 		span = opentracing.StartSpan("pdclient.GetOperator", opentracing.ChildOf(span.Context()))
@@ -1817,77 +1722,4 @@ func trimHTTPPrefix(str string) string {
 	str = strings.TrimPrefix(str, "http://")
 	str = strings.TrimPrefix(str, "https://")
 	return str
-}
-
-func (c *client) LoadGlobalConfig(ctx context.Context, names []string) ([]GlobalConfigItem, error) {
-	resp, err := c.getClient().LoadGlobalConfig(ctx, &pdpb.LoadGlobalConfigRequest{Names: names})
-	if err != nil {
-		return nil, err
-	}
-	res := make([]GlobalConfigItem, len(resp.GetItems()))
-	for i, item := range resp.GetItems() {
-		cfg := GlobalConfigItem{Name: item.GetName()}
-		if item.Error != nil {
-			if item.Error.Type == pdpb.ErrorType_GLOBAL_CONFIG_NOT_FOUND {
-				cfg.Error = errGlobalConfigNotFound
-			} else {
-				cfg.Error = errors.New("[pd]" + item.Error.Message)
-			}
-		} else {
-			cfg.Value = item.GetValue()
-		}
-		res[i] = cfg
-	}
-	return res, nil
-}
-
-func (c *client) StoreGlobalConfig(ctx context.Context, items []GlobalConfigItem) error {
-	resArr := make([]*pdpb.GlobalConfigItem, len(items))
-	for i, it := range items {
-		resArr[i] = &pdpb.GlobalConfigItem{Name: it.Name, Value: it.Value}
-	}
-	res, err := c.getClient().StoreGlobalConfig(ctx, &pdpb.StoreGlobalConfigRequest{Changes: resArr})
-	if err != nil {
-		return err
-	}
-	resErr := res.GetError()
-	if resErr != nil {
-		return errors.Errorf("[pd]" + resErr.Message)
-	}
-	return err
-}
-
-func (c *client) WatchGlobalConfig(ctx context.Context) (chan []GlobalConfigItem, error) {
-	globalConfigWatcherCh := make(chan []GlobalConfigItem, 16)
-	res, err := c.getClient().WatchGlobalConfig(ctx, &pdpb.WatchGlobalConfigRequest{})
-	if err != nil {
-		close(globalConfigWatcherCh)
-		return nil, err
-	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error("[pd] panic in client `WatchGlobalConfig`", zap.Any("error", r))
-				return
-			}
-		}()
-		for {
-			select {
-			case <-ctx.Done():
-				close(globalConfigWatcherCh)
-				return
-			default:
-				m, err := res.Recv()
-				if err != nil {
-					return
-				}
-				arr := make([]GlobalConfigItem, len(m.Changes))
-				for j, i := range m.Changes {
-					arr[j] = GlobalConfigItem{i.GetName(), i.GetValue(), nil}
-				}
-				globalConfigWatcherCh <- arr
-			}
-		}
-	}()
-	return globalConfigWatcherCh, err
 }

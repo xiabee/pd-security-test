@@ -16,6 +16,7 @@ package encryptionkm
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,7 +26,6 @@ import (
 	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/election"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/mvcc/mvccpb"
@@ -59,7 +59,7 @@ type KeyManager struct {
 	helper keyManagerHelper
 	// Mutex for updating keys. Used for both of LoadKeys() and rotateKeyIfNeeded().
 	mu struct {
-		syncutil.Mutex
+		sync.Mutex
 		// PD leadership of the current PD node. Only the PD leader will rotate data keys,
 		// or change current encryption method.
 		// Guarded by mu.
@@ -189,7 +189,7 @@ func newKeyManagerImpl(
 		helper:                helper,
 	}
 	// Load encryption keys from storage.
-	err = m.loadKeys()
+	_, err = m.loadKeys()
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +267,7 @@ func (m *KeyManager) StartBackgroundLoop(ctx context.Context) {
 				errs.ZapError(errs.ErrEncryptionKeysWatcher, resp.Err()))
 		}
 
-		if err := m.loadKeys(); err != nil {
+		if _, err := m.loadKeys(); err != nil {
 			log.Error("encryption key reload failed", errs.ZapError(err))
 		}
 	}
@@ -336,11 +336,10 @@ func (m *KeyManager) loadKeysImpl() (keys *encryptionpb.KeyDictionary, err error
 }
 
 // loadKeys reload keys from etcd storage.
-func (m *KeyManager) loadKeys() error {
+func (m *KeyManager) loadKeys() (*encryptionpb.KeyDictionary, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, err := m.loadKeysImpl()
-	return err
+	return m.loadKeysImpl()
 }
 
 // rotateKeyIfNeeded rotate key if one of the following condition is meet.

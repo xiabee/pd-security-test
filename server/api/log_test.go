@@ -20,7 +20,6 @@ import (
 
 	. "github.com/pingcap/check"
 	"github.com/pingcap/log"
-	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 )
 
@@ -50,7 +49,7 @@ func (s *testLogSuite) TestSetLogLevel(c *C) {
 	level := "error"
 	data, err := json.Marshal(level)
 	c.Assert(err, IsNil)
-	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/log", data, tu.StatusOK(c))
+	err = postJSON(testDialClient, s.urlPrefix+"/log", data)
 	c.Assert(err, IsNil)
 	c.Assert(log.GetLevel().String(), Equals, level)
 }

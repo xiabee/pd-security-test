@@ -16,10 +16,10 @@ package simulator
 
 import (
 	"context"
+	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/cases"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
@@ -28,7 +28,7 @@ import (
 
 // RaftEngine records all raft information.
 type RaftEngine struct {
-	syncutil.RWMutex
+	sync.RWMutex
 	regionsInfo       *core.RegionsInfo
 	conn              *Connection
 	regionChange      map[uint64][]uint64
@@ -280,11 +280,11 @@ func (r *RaftEngine) SetRegion(region *core.RegionInfo) []*core.RegionInfo {
 	return r.regionsInfo.SetRegion(region)
 }
 
-// GetRegionByKey searches the RegionInfo from regionTree
-func (r *RaftEngine) GetRegionByKey(regionKey []byte) *core.RegionInfo {
+// SearchRegion searches the RegionInfo from regionTree
+func (r *RaftEngine) SearchRegion(regionKey []byte) *core.RegionInfo {
 	r.RLock()
 	defer r.RUnlock()
-	return r.regionsInfo.GetRegionByKey(regionKey)
+	return r.regionsInfo.SearchRegion(regionKey)
 }
 
 // BootstrapRegion gets a region to construct bootstrap info.

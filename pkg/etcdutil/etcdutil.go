@@ -104,10 +104,7 @@ func RemoveEtcdMember(client *clientv3.Client, id uint64) (*clientv3.MemberRemov
 	ctx, cancel := context.WithTimeout(client.Ctx(), DefaultRequestTimeout)
 	rmResp, err := client.MemberRemove(ctx, id)
 	cancel()
-	if err != nil {
-		return rmResp, errs.ErrEtcdMemberRemove.Wrap(err).GenWithStackByCause()
-	}
-	return rmResp, nil
+	return rmResp, errors.WithStack(err)
 }
 
 // EtcdKVGet returns the etcd GetResponse by given key or key prefix

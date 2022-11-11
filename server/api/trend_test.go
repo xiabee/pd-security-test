@@ -20,7 +20,6 @@ import (
 
 	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule/operator"
@@ -37,7 +36,7 @@ func (s *testTrendSuite) TestTrend(c *C) {
 
 	mustBootstrapCluster(c, svr)
 	for i := 1; i <= 3; i++ {
-		mustPutStore(c, svr, uint64(i), metapb.StoreState_Up, metapb.NodeState_Serving, nil)
+		mustPutStore(c, svr, uint64(i), metapb.StoreState_Up, nil)
 	}
 
 	// Create 3 regions, all peers on store1 and store2, and the leaders are all on store1.
@@ -76,7 +75,7 @@ func (s *testTrendSuite) TestTrend(c *C) {
 	mustRegionHeartbeat(c, svr, region6)
 
 	var trend Trend
-	err = tu.ReadGetJSON(c, testDialClient, fmt.Sprintf("%s%s/api/v1/trend", svr.GetAddr(), apiPrefix), &trend)
+	err = readJSON(testDialClient, fmt.Sprintf("%s%s/api/v1/trend", svr.GetAddr(), apiPrefix), &trend)
 	c.Assert(err, IsNil)
 
 	// Check store states.

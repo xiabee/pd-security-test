@@ -26,6 +26,7 @@ import (
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/server/versioninfo"
 )
@@ -43,7 +44,7 @@ func (s *testCreateOperatorSuite) SetUpTest(c *C) {
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.cluster = mockcluster.NewCluster(s.ctx, opts)
 	s.cluster.SetLabelPropertyConfig(config.LabelPropertyConfig{
-		config.RejectLeader: {{Key: "noleader", Value: "true"}},
+		opt.RejectLeader: {{Key: "noleader", Value: "true"}},
 	})
 	s.cluster.SetLocationLabels([]string{"zone", "host"})
 	s.cluster.AddLabelsStore(1, 0, map[string]string{"zone": "z1", "host": "h1"})
@@ -361,7 +362,7 @@ func (s *testCreateOperatorSuite) TestCreateTransferLeaderOperator(c *C) {
 	}
 	for _, tc := range cases {
 		region := core.NewRegionInfo(&metapb.Region{Id: 1, Peers: tc.originPeers}, tc.originPeers[0])
-		op, err := CreateTransferLeaderOperator("test", s.cluster, region, tc.originPeers[0].StoreId, tc.targetLeaderStoreID, []uint64{}, 0)
+		op, err := CreateTransferLeaderOperator("test", s.cluster, region, tc.originPeers[0].StoreId, tc.targetLeaderStoreID, 0)
 
 		if tc.isErr {
 			c.Assert(err, NotNil)
@@ -1040,7 +1041,7 @@ func (s *testCreateOperatorSuite) TestMoveRegionWithoutJointConsensus(c *C) {
 		},
 	}
 
-	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	s.cluster.DisableFeature(versioninfo.JointConsensus)
 	for _, tc := range tt {
 		c.Log(tc.name)
 		region := core.NewRegionInfo(&metapb.Region{Id: 10, Peers: tc.originPeers}, tc.originPeers[0])

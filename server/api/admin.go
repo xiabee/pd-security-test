@@ -38,14 +38,14 @@ func newAdminHandler(svr *server.Server, rd *render.Render) *adminHandler {
 	}
 }
 
-// @Tags     admin
-// @Summary  Drop a specific region from cache.
-// @Param    id  path  integer  true  "Region Id"
-// @Produce  json
-// @Success  200  {string}  string  "The region is removed from server cache."
-// @Failure  400  {string}  string  "The input is invalid."
-// @Router   /admin/cache/region/{id} [delete]
-func (h *adminHandler) DeleteRegionCache(w http.ResponseWriter, r *http.Request) {
+// @Tags admin
+// @Summary Drop a specific region from cache.
+// @Param id path integer true "Region Id"
+// @Produce json
+// @Success 200 {string} string "The region is removed from server cache."
+// @Failure 400 {string} string "The input is invalid."
+// @Router /admin/cache/region/{id} [delete]
+func (h *adminHandler) HandleDropCacheRegion(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
 	vars := mux.Vars(r)
 	regionIDStr := vars["id"]
@@ -59,16 +59,16 @@ func (h *adminHandler) DeleteRegionCache(w http.ResponseWriter, r *http.Request)
 }
 
 // FIXME: details of input json body params
-// @Tags     admin
-// @Summary  Reset the ts.
-// @Accept   json
-// @Param    body  body  object  true  "json params"
-// @Produce  json
-// @Success  200  {string}  string  "Reset ts successfully."
-// @Failure  400  {string}  string  "The input is invalid."
-// @Failure  403  {string}  string  "Reset ts is forbidden."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /admin/reset-ts [post]
+// @Tags admin
+// @Summary Reset the ts.
+// @Accept json
+// @Param body body object true "json params"
+// @Produce json
+// @Success 200 {string} string "Reset ts successfully."
+// @Failure 400 {string} string "The input is invalid."
+// @Failure 403 {string} string "Reset ts is forbidden."
+// @Failure 500 {string} string "PD server failed to proceed the request."
+// @Router /admin/reset-ts [post]
 func (h *adminHandler) ResetTS(w http.ResponseWriter, r *http.Request) {
 	handler := h.svr.GetHandler()
 	var input map[string]interface{}
@@ -98,7 +98,7 @@ func (h *adminHandler) ResetTS(w http.ResponseWriter, r *http.Request) {
 
 // Intentionally no swagger mark as it is supposed to be only used in
 // server-to-server. For security reason, it only accepts JSON formatted data.
-func (h *adminHandler) SavePersistFile(w http.ResponseWriter, r *http.Request) {
+func (h *adminHandler) persistFile(w http.ResponseWriter, r *http.Request) {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		h.rd.Text(w, http.StatusInternalServerError, "")

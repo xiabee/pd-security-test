@@ -18,7 +18,7 @@ import (
 	"time"
 
 	. "github.com/pingcap/check"
-	"github.com/tikv/pd/client/testutil"
+	"github.com/tikv/pd/pkg/testutil"
 )
 
 var _ = Suite(&testClientOptionSuite{})
@@ -28,26 +28,22 @@ type testClientOptionSuite struct{}
 func (s *testClientSuite) TestDynamicOptionChange(c *C) {
 	o := newOption()
 	// Check the default value setting.
-	c.Assert(o.getMaxTSOBatchWaitInterval(), Equals, defaultMaxTSOBatchWaitInterval)
+	c.Assert(o.getMaxTSOBatchWaitInterval(), Equals, time.Duration(defaultMaxTSOBatchWaitInterval))
 	c.Assert(o.getEnableTSOFollowerProxy(), Equals, defaultEnableTSOFollowerProxy)
 
 	// Check the invalid value setting.
 	c.Assert(o.setMaxTSOBatchWaitInterval(time.Second), NotNil)
-	c.Assert(o.getMaxTSOBatchWaitInterval(), Equals, defaultMaxTSOBatchWaitInterval)
+	c.Assert(o.getMaxTSOBatchWaitInterval(), Equals, time.Duration(defaultMaxTSOBatchWaitInterval))
 	expectInterval := time.Millisecond
 	o.setMaxTSOBatchWaitInterval(expectInterval)
 	c.Assert(o.getMaxTSOBatchWaitInterval(), Equals, expectInterval)
-	expectInterval = time.Duration(float64(time.Millisecond) * 0.5)
-	o.setMaxTSOBatchWaitInterval(expectInterval)
-	c.Assert(o.getMaxTSOBatchWaitInterval(), Equals, expectInterval)
-	expectInterval = time.Duration(float64(time.Millisecond) * 1.5)
 	o.setMaxTSOBatchWaitInterval(expectInterval)
 	c.Assert(o.getMaxTSOBatchWaitInterval(), Equals, expectInterval)
 
 	expectBool := true
 	o.setEnableTSOFollowerProxy(expectBool)
 	// Check the value changing notification.
-	testutil.WaitUntil(c, func() bool {
+	testutil.WaitUntil(c, func(c *C) bool {
 		<-o.enableTSOFollowerProxyCh
 		return true
 	})

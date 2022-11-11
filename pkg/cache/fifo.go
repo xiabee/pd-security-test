@@ -16,13 +16,12 @@ package cache
 
 import (
 	"container/list"
-
-	"github.com/tikv/pd/pkg/syncutil"
+	"sync"
 )
 
 // FIFO is 'First-In-First-Out' cache.
 type FIFO struct {
-	syncutil.RWMutex
+	sync.RWMutex
 
 	// maxCount is the maximum number of items.
 	// 0 means no limit.

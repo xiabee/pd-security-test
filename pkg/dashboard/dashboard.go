@@ -27,7 +27,8 @@ import (
 	"github.com/pingcap/tidb-dashboard/pkg/uiserver"
 
 	"github.com/tikv/pd/pkg/dashboard/adapter"
-	"github.com/tikv/pd/pkg/dashboard/distroutil"
+	// inject distro information to dashboard
+	_ "github.com/tikv/pd/pkg/dashboard/distro"
 	"github.com/tikv/pd/pkg/dashboard/keyvisual"
 	ui "github.com/tikv/pd/pkg/dashboard/uiserver"
 	"github.com/tikv/pd/server"
@@ -69,8 +70,6 @@ func GetServiceBuilders() []server.HandlerBuilder {
 	return []server.HandlerBuilder{
 		// Dashboard API Service
 		func(ctx context.Context, srv *server.Server) (http.Handler, server.ServiceGroup, error) {
-			distroutil.MustLoadAndReplaceStrings()
-
 			if cfg, err = adapter.GenDashboardConfig(srv); err != nil {
 				return nil, apiServiceGroup, err
 			}

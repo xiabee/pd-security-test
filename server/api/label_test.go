@@ -22,7 +22,6 @@ import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 )
@@ -40,10 +39,9 @@ type testLabelsStoreSuite struct {
 func (s *testLabelsStoreSuite) SetUpSuite(c *C) {
 	s.stores = []*metapb.Store{
 		{
-			Id:        1,
-			Address:   "tikv1",
-			State:     metapb.StoreState_Up,
-			NodeState: metapb.NodeState_Serving,
+			Id:      1,
+			Address: "tikv1",
+			State:   metapb.StoreState_Up,
 			Labels: []*metapb.StoreLabel{
 				{
 					Key:   "zone",
@@ -57,10 +55,9 @@ func (s *testLabelsStoreSuite) SetUpSuite(c *C) {
 			Version: "2.0.0",
 		},
 		{
-			Id:        4,
-			Address:   "tikv4",
-			State:     metapb.StoreState_Up,
-			NodeState: metapb.NodeState_Serving,
+			Id:      4,
+			Address: "tikv4",
+			State:   metapb.StoreState_Up,
 			Labels: []*metapb.StoreLabel{
 				{
 					Key:   "zone",
@@ -74,10 +71,9 @@ func (s *testLabelsStoreSuite) SetUpSuite(c *C) {
 			Version: "2.0.0",
 		},
 		{
-			Id:        6,
-			Address:   "tikv6",
-			State:     metapb.StoreState_Up,
-			NodeState: metapb.NodeState_Serving,
+			Id:      6,
+			Address: "tikv6",
+			State:   metapb.StoreState_Up,
 			Labels: []*metapb.StoreLabel{
 				{
 					Key:   "zone",
@@ -91,10 +87,9 @@ func (s *testLabelsStoreSuite) SetUpSuite(c *C) {
 			Version: "2.0.0",
 		},
 		{
-			Id:        7,
-			Address:   "tikv7",
-			State:     metapb.StoreState_Up,
-			NodeState: metapb.NodeState_Serving,
+			Id:      7,
+			Address: "tikv7",
+			State:   metapb.StoreState_Up,
 			Labels: []*metapb.StoreLabel{
 				{
 					Key:   "zone",
@@ -123,7 +118,7 @@ func (s *testLabelsStoreSuite) SetUpSuite(c *C) {
 
 	mustBootstrapCluster(c, s.svr)
 	for _, store := range s.stores {
-		mustPutStore(c, s.svr, store.Id, store.State, store.NodeState, store.Labels)
+		mustPutStore(c, s.svr, store.Id, store.State, store.Labels)
 	}
 }
 
@@ -134,7 +129,7 @@ func (s *testLabelsStoreSuite) TearDownSuite(c *C) {
 func (s *testLabelsStoreSuite) TestLabelsGet(c *C) {
 	url := fmt.Sprintf("%s/labels", s.urlPrefix)
 	labels := make([]*metapb.StoreLabel, 0, len(s.stores))
-	err := tu.ReadGetJSON(c, testDialClient, url, &labels)
+	err := readJSON(testDialClient, url, &labels)
 	c.Assert(err, IsNil)
 }
 
@@ -145,7 +140,7 @@ func (s *testLabelsStoreSuite) TestStoresLabelFilter(c *C) {
 	}{
 		{
 			name: "Zone",
-			want: s.stores,
+			want: s.stores[:],
 		},
 		{
 			name: "other",
@@ -175,7 +170,7 @@ func (s *testLabelsStoreSuite) TestStoresLabelFilter(c *C) {
 	for _, t := range table {
 		url := fmt.Sprintf("%s/labels/stores?name=%s&value=%s", s.urlPrefix, t.name, t.value)
 		info := new(StoresInfo)
-		err := tu.ReadGetJSON(c, testDialClient, url, info)
+		err := readJSON(testDialClient, url, info)
 		c.Assert(err, IsNil)
 		checkStoresInfo(c, info.Stores, t.want)
 	}
@@ -185,7 +180,6 @@ func (s *testLabelsStoreSuite) TestStoresLabelFilter(c *C) {
 
 type testStrictlyLabelsStoreSuite struct {
 	svr       *server.Server
-	grpcSvr   *server.GrpcServer
 	cleanup   cleanUpFunc
 	urlPrefix string
 }
@@ -198,7 +192,6 @@ func (s *testStrictlyLabelsStoreSuite) SetUpSuite(c *C) {
 	})
 	mustWaitLeader(c, []*server.Server{s.svr})
 
-	s.grpcSvr = &server.GrpcServer{Server: s.svr}
 	addr := s.svr.GetAddr()
 	s.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
 
@@ -268,7 +261,7 @@ func (s *testStrictlyLabelsStoreSuite) TestStoreMatch(c *C) {
 	}
 
 	for _, t := range cases {
-		_, err := s.grpcSvr.PutStore(context.Background(), &pdpb.PutStoreRequest{
+		_, err := s.svr.PutStore(context.Background(), &pdpb.PutStoreRequest{
 			Header: &pdpb.RequestHeader{ClusterId: s.svr.ClusterID()},
 			Store: &metapb.Store{
 				Id:      t.store.Id,
@@ -286,9 +279,9 @@ func (s *testStrictlyLabelsStoreSuite) TestStoreMatch(c *C) {
 	}
 
 	// enable placement rules. Report no error any more.
-	c.Assert(tu.CheckPostJSON(testDialClient, fmt.Sprintf("%s/config", s.urlPrefix), []byte(`{"enable-placement-rules":"true"}`), tu.StatusOK(c)), IsNil)
+	c.Assert(postJSON(testDialClient, fmt.Sprintf("%s/config", s.urlPrefix), []byte(`{"enable-placement-rules":"true"}`)), IsNil)
 	for _, t := range cases {
-		_, err := s.grpcSvr.PutStore(context.Background(), &pdpb.PutStoreRequest{
+		_, err := s.svr.PutStore(context.Background(), &pdpb.PutStoreRequest{
 			Header: &pdpb.RequestHeader{ClusterId: s.svr.ClusterID()},
 			Store: &metapb.Store{
 				Id:      t.store.Id,

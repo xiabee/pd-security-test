@@ -32,6 +32,14 @@ var schedulerStatus = prometheus.NewGaugeVec(
 		Help:      "Inner status of the scheduler.",
 	}, []string{"type", "name"})
 
+var hotPeerSummary = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "pd",
+		Subsystem: "scheduler",
+		Name:      "hot_peers_summary",
+		Help:      "Hot peers summary for each store",
+	}, []string{"type", "store"})
+
 var opInfluenceStatus = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Namespace: "pd",
@@ -115,6 +123,7 @@ var hotPendingStatus = prometheus.NewGaugeVec(
 func init() {
 	prometheus.MustRegister(schedulerCounter)
 	prometheus.MustRegister(schedulerStatus)
+	prometheus.MustRegister(hotPeerSummary)
 	prometheus.MustRegister(balanceLeaderCounter)
 	prometheus.MustRegister(balanceRegionCounter)
 	prometheus.MustRegister(hotSchedulerResultCounter)
