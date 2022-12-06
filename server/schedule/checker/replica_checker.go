@@ -23,8 +23,8 @@ import (
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
 	"go.uber.org/zap"
 )
 
@@ -44,13 +44,13 @@ const (
 // Location management, mainly used for cross data center deployment.
 type ReplicaChecker struct {
 	PauseController
-	cluster           opt.Cluster
+	cluster           schedule.Cluster
 	opts              *config.PersistOptions
 	regionWaitingList cache.Cache
 }
 
 // NewReplicaChecker creates a replica checker.
-func NewReplicaChecker(cluster opt.Cluster, regionWaitingList cache.Cache) *ReplicaChecker {
+func NewReplicaChecker(cluster schedule.Cluster, regionWaitingList cache.Cache) *ReplicaChecker {
 	return &ReplicaChecker{
 		cluster:           cluster,
 		opts:              cluster.GetOpts(),
@@ -72,17 +72,17 @@ func (r *ReplicaChecker) Check(region *core.RegionInfo) *operator.Operator {
 	}
 	if op := r.checkDownPeer(region); op != nil {
 		checkerCounter.WithLabelValues("replica_checker", "new-operator").Inc()
-		op.SetPriorityLevel(core.HighPriority)
+		op.SetPriorityLevel(core.High)
 		return op
 	}
 	if op := r.checkOfflinePeer(region); op != nil {
 		checkerCounter.WithLabelValues("replica_checker", "new-operator").Inc()
-		op.SetPriorityLevel(core.HighPriority)
+		op.SetPriorityLevel(core.High)
 		return op
 	}
 	if op := r.checkMakeUpReplica(region); op != nil {
 		checkerCounter.WithLabelValues("replica_checker", "new-operator").Inc()
-		op.SetPriorityLevel(core.HighPriority)
+		op.SetPriorityLevel(core.High)
 		return op
 	}
 	if op := r.checkRemoveExtraReplica(region); op != nil {

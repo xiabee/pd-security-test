@@ -14,34 +14,52 @@
 
 package statistics
 
-// FlowKind is a identify Flow types.
-type FlowKind uint32
-
-// Flags for flow.
-const (
-	WriteFlow FlowKind = iota
-	ReadFlow
+import (
+	"github.com/tikv/pd/server/core"
 )
 
-func (k FlowKind) String() string {
-	switch k {
-	case WriteFlow:
-		return "write"
-	case ReadFlow:
-		return "read"
+const (
+	// BytePriority indicates hot-region-scheduler prefer byte dim
+	BytePriority = "byte"
+	// KeyPriority indicates hot-region-scheduler prefer key dim
+	KeyPriority = "key"
+	// QueryPriority indicates hot-region-scheduler prefer query dim
+	QueryPriority = "query"
+)
+
+// Indicator dims.
+const (
+	ByteDim int = iota
+	KeyDim
+	QueryDim
+	DimLen
+)
+
+// StringToDim return dim according to string.
+func StringToDim(name string) int {
+	switch name {
+	case BytePriority:
+		return ByteDim
+	case KeyPriority:
+		return KeyDim
+	case QueryPriority:
+		return QueryDim
 	}
-	return "unimplemented"
+	return ByteDim
 }
 
-// RegionStats returns hot items according to kind
-func (k FlowKind) RegionStats() []RegionStatKind {
-	switch k {
-	case WriteFlow:
-		return []RegionStatKind{RegionWriteBytes, RegionWriteKeys, RegionWriteQuery}
-	case ReadFlow:
-		return []RegionStatKind{RegionReadBytes, RegionReadKeys, RegionReadQuery}
+// DimToString return string according to dim.
+func DimToString(dim int) string {
+	switch dim {
+	case ByteDim:
+		return BytePriority
+	case KeyDim:
+		return KeyPriority
+	case QueryDim:
+		return QueryPriority
+	default:
+		return ""
 	}
-	return nil
 }
 
 // RegionStatKind represents the statistics type of region.
@@ -51,10 +69,10 @@ type RegionStatKind int
 const (
 	RegionReadBytes RegionStatKind = iota
 	RegionReadKeys
-	RegionReadQuery
+	RegionReadQueryNum
 	RegionWriteBytes
 	RegionWriteKeys
-	RegionWriteQuery
+	RegionWriteQueryNum
 
 	RegionStatCount
 )
@@ -69,9 +87,9 @@ func (k RegionStatKind) String() string {
 		return "write_bytes"
 	case RegionWriteKeys:
 		return "write_keys"
-	case RegionReadQuery:
+	case RegionReadQueryNum:
 		return "read_query"
-	case RegionWriteQuery:
+	case RegionWriteQueryNum:
 		return "write_query"
 	}
 	return "unknown RegionStatKind"
@@ -143,4 +161,118 @@ func (k sourceKind) String() string {
 		return "inherit"
 	}
 	return "unknown"
+}
+
+// RWType is a identify hot region types.
+type RWType int
+
+// Flags for r/w type.
+const (
+	Write RWType = iota
+	Read
+)
+
+func (rw RWType) String() string {
+	switch rw {
+	case Write:
+		return "write"
+	case Read:
+		return "read"
+	}
+	return "unimplemented"
+}
+
+var (
+	writeRegionStats = []RegionStatKind{RegionWriteBytes, RegionWriteKeys, RegionWriteQueryNum}
+	readRegionStats  = []RegionStatKind{RegionReadBytes, RegionReadKeys, RegionReadQueryNum}
+)
+
+// RegionStats returns hot items according to kind
+func (rw RWType) RegionStats() []RegionStatKind {
+	switch rw {
+	case Write:
+		return writeRegionStats
+	case Read:
+		return readRegionStats
+	}
+	return nil
+}
+
+// Inverse returns the opposite of kind.
+func (rw RWType) Inverse() RWType {
+	switch rw {
+	case Write:
+		return Read
+	default: // Case Read
+		return Write
+	}
+}
+
+// ReportInterval returns the report interval of read or write.
+func (rw RWType) ReportInterval() int {
+	switch rw {
+	case Write:
+		return WriteReportInterval
+	default: // Case Read
+		return ReadReportInterval
+	}
+}
+
+// DefaultAntiCount returns the default anti count of read or write.
+func (rw RWType) DefaultAntiCount() int {
+	switch rw {
+	case Write:
+		return HotRegionAntiCount
+	default: // Case Read
+		return HotRegionAntiCount * (RegionHeartBeatReportInterval / StoreHeartBeatReportInterval)
+	}
+}
+
+// GetLoadRatesFromPeer gets the load rates of the read or write type from PeerInfo.
+func (rw RWType) GetLoadRatesFromPeer(peer *core.PeerInfo) []float64 {
+	deltaLoads := peer.GetLoads()
+	interval := peer.GetInterval()
+	loads := make([]float64, DimLen)
+	for dim, k := range rw.RegionStats() {
+		loads[dim] = deltaLoads[k] / float64(interval)
+	}
+	return loads
+}
+
+// SetFullLoadRates set load rates to full as read or write type.
+func (rw RWType) SetFullLoadRates(full []float64, loads []float64) {
+	for dim, k := range rw.RegionStats() {
+		full[k] = loads[dim]
+	}
+}
+
+// ForeachRegionStats foreach all region stats of read and write.
+func ForeachRegionStats(f func(RWType, int, RegionStatKind)) {
+	for _, rwTy := range []RWType{Read, Write} {
+		for dim, kind := range rwTy.RegionStats() {
+			f(rwTy, dim, kind)
+		}
+	}
+}
+
+// ActionType indicates the action type for the stat item.
+type ActionType int
+
+// Flags for action type.
+const (
+	Add ActionType = iota
+	Remove
+	Update
+)
+
+func (t ActionType) String() string {
+	switch t {
+	case Add:
+		return "add"
+	case Remove:
+		return "remove"
+	case Update:
+		return "update"
+	}
+	return "unimplemented"
 }

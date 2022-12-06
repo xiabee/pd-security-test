@@ -17,11 +17,13 @@ package schedulers
 import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/schedule/plan"
+	"github.com/tikv/pd/server/storage/endpoint"
 	"go.uber.org/zap"
 )
 
@@ -49,7 +51,7 @@ func init() {
 		}
 	})
 
-	schedule.RegisterScheduler(LabelType, func(opController *schedule.OperatorController, storage *core.Storage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	schedule.RegisterScheduler(LabelType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		conf := &labelSchedulerConfig{}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -90,7 +92,7 @@ func (s *labelScheduler) EncodeConfig() ([]byte, error) {
 	return schedule.EncodeConfig(s.conf)
 }
 
-func (s *labelScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
+func (s *labelScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
 	allowed := s.OpController.OperatorCount(operator.OpLeader) < cluster.GetOpts().GetLeaderScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpLeader.String()).Inc()
@@ -98,22 +100,22 @@ func (s *labelScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 	return allowed
 }
 
-func (s *labelScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
+func (s *labelScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
 	stores := cluster.GetStores()
 	rejectLeaderStores := make(map[uint64]struct{})
 	for _, s := range stores {
-		if cluster.GetOpts().CheckLabelProperty(opt.RejectLeader, s.GetLabels()) {
+		if cluster.GetOpts().CheckLabelProperty(config.RejectLeader, s.GetLabels()) {
 			rejectLeaderStores[s.GetID()] = struct{}{}
 		}
 	}
 	if len(rejectLeaderStores) == 0 {
 		schedulerCounter.WithLabelValues(s.GetName(), "skip").Inc()
-		return nil
+		return nil, nil
 	}
 	log.Debug("label scheduler reject leader store list", zap.Reflect("stores", rejectLeaderStores))
 	for id := range rejectLeaderStores {
-		if region := cluster.RandLeaderRegion(id, s.conf.Ranges); region != nil {
+		if region := filter.SelectOneRegion(cluster.RandLeaderRegions(id, s.conf.Ranges), nil); region != nil {
 			log.Debug("label scheduler selects region to transfer leader", zap.Uint64("region-id", region.GetID()))
 			excludeStores := make(map[uint64]struct{})
 			for _, p := range region.GetDownPeers() {
@@ -125,7 +127,7 @@ func (s *labelScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
 			f := filter.NewExcludedFilter(s.GetName(), nil, excludeStores)
 
 			target := filter.NewCandidates(cluster.GetFollowerStores(region)).
-				FilterTarget(cluster.GetOpts(), &filter.StoreStateFilter{ActionScope: LabelName, TransferLeader: true}, f).
+				FilterTarget(cluster.GetOpts(), nil, nil, &filter.StoreStateFilter{ActionScope: LabelName, TransferLeader: true}, f).
 				RandomPick()
 			if target == nil {
 				log.Debug("label scheduler no target found for region", zap.Uint64("region-id", region.GetID()))
@@ -133,15 +135,15 @@ func (s *labelScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
 				continue
 			}
 
-			op, err := operator.CreateTransferLeaderOperator("label-reject-leader", cluster, region, id, target.GetID(), operator.OpLeader)
+			op, err := operator.CreateTransferLeaderOperator("label-reject-leader", cluster, region, id, target.GetID(), []uint64{}, operator.OpLeader)
 			if err != nil {
 				log.Debug("fail to create transfer label reject leader operator", errs.ZapError(err))
-				return nil
+				return nil, nil
 			}
 			op.Counters = append(op.Counters, schedulerCounter.WithLabelValues(s.GetName(), "new-operator"))
-			return []*operator.Operator{op}
+			return []*operator.Operator{op}, nil
 		}
 	}
 	schedulerCounter.WithLabelValues(s.GetName(), "no-region").Inc()
-	return nil
+	return nil, nil
 }

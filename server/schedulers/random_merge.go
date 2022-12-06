@@ -24,7 +24,8 @@ import (
 	"github.com/tikv/pd/server/schedule/checker"
 	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/schedule/plan"
+	"github.com/tikv/pd/server/storage/endpoint"
 )
 
 const (
@@ -50,7 +51,7 @@ func init() {
 			return nil
 		}
 	})
-	schedule.RegisterScheduler(RandomMergeType, func(opController *schedule.OperatorController, storage *core.Storage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	schedule.RegisterScheduler(RandomMergeType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		conf := &randomMergeSchedulerConfig{}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -91,7 +92,7 @@ func (s *randomMergeScheduler) EncodeConfig() ([]byte, error) {
 	return schedule.EncodeConfig(s.conf)
 }
 
-func (s *randomMergeScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
+func (s *randomMergeScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
 	allowed := s.OpController.OperatorCount(operator.OpMerge) < cluster.GetOpts().GetMergeScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpMerge.String()).Inc()
@@ -99,20 +100,22 @@ func (s *randomMergeScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 	return allowed
 }
 
-func (s *randomMergeScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
+func (s *randomMergeScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
 
 	store := filter.NewCandidates(cluster.GetStores()).
-		FilterSource(cluster.GetOpts(), &filter.StoreStateFilter{ActionScope: s.conf.Name, MoveRegion: true}).
+		FilterSource(cluster.GetOpts(), nil, nil, &filter.StoreStateFilter{ActionScope: s.conf.Name, MoveRegion: true}).
 		RandomPick()
 	if store == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-source-store").Inc()
-		return nil
+		return nil, nil
 	}
-	region := cluster.RandLeaderRegion(store.GetID(), s.conf.Ranges, opt.HealthRegion(cluster))
+	pendingFilter := filter.NewRegionPendingFilter()
+	downFilter := filter.NewRegionDownFilter()
+	region := filter.SelectOneRegion(cluster.RandLeaderRegions(store.GetID(), s.conf.Ranges), nil, pendingFilter, downFilter)
 	if region == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-region").Inc()
-		return nil
+		return nil, nil
 	}
 
 	other, target := cluster.GetAdjacentRegions(region)
@@ -121,28 +124,30 @@ func (s *randomMergeScheduler) Schedule(cluster opt.Cluster) []*operator.Operato
 	}
 	if target == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-target-store").Inc()
-		return nil
+		return nil, nil
 	}
 
 	if !s.allowMerge(cluster, region, target) {
 		schedulerCounter.WithLabelValues(s.GetName(), "not-allowed").Inc()
-		return nil
+		return nil, nil
 	}
 
 	ops, err := operator.CreateMergeRegionOperator(RandomMergeType, cluster, region, target, operator.OpMerge)
 	if err != nil {
 		log.Debug("fail to create merge region operator", errs.ZapError(err))
-		return nil
+		return nil, nil
 	}
+	ops[0].SetPriorityLevel(core.Low)
+	ops[1].SetPriorityLevel(core.Low)
 	ops[0].Counters = append(ops[0].Counters, schedulerCounter.WithLabelValues(s.GetName(), "new-operator"))
-	return ops
+	return ops, nil
 }
 
-func (s *randomMergeScheduler) allowMerge(cluster opt.Cluster, region, target *core.RegionInfo) bool {
-	if !opt.IsRegionHealthy(cluster, region) || !opt.IsRegionHealthy(cluster, target) {
+func (s *randomMergeScheduler) allowMerge(cluster schedule.Cluster, region, target *core.RegionInfo) bool {
+	if !filter.IsRegionHealthy(region) || !filter.IsRegionHealthy(target) {
 		return false
 	}
-	if !opt.IsRegionReplicated(cluster, region) || !opt.IsRegionReplicated(cluster, target) {
+	if !filter.IsRegionReplicated(cluster, region) || !filter.IsRegionReplicated(cluster, target) {
 		return false
 	}
 	if cluster.IsRegionHot(region) || cluster.IsRegionHot(target) {

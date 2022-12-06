@@ -23,7 +23,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
-	"github.com/tikv/pd/server/kv"
+	"github.com/tikv/pd/server/storage/kv"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/mvcc/mvccpb"
 	"go.uber.org/zap"
@@ -55,7 +55,7 @@ type Leadership struct {
 	leaderValue string
 
 	keepAliveCtx        context.Context
-	keepAliceCancelFunc context.CancelFunc
+	keepAliveCancelFunc context.CancelFunc
 }
 
 // NewLeadership creates a new Leadership.
@@ -137,8 +137,8 @@ func (ls *Leadership) Keep(ctx context.Context) {
 	if ls == nil {
 		return
 	}
-	ls.keepAliveCtx, ls.keepAliceCancelFunc = context.WithCancel(ctx)
-	ls.getLease().KeepAlive(ls.keepAliveCtx)
+	ls.keepAliveCtx, ls.keepAliveCancelFunc = context.WithCancel(ctx)
+	go ls.getLease().KeepAlive(ls.keepAliveCtx)
 }
 
 // Check returns whether the leadership is still available.
@@ -230,8 +230,8 @@ func (ls *Leadership) Reset() {
 	if ls == nil || ls.getLease() == nil {
 		return
 	}
-	if ls.keepAliceCancelFunc != nil {
-		ls.keepAliceCancelFunc()
+	if ls.keepAliveCancelFunc != nil {
+		ls.keepAliveCancelFunc()
 	}
 	ls.getLease().Close()
 }

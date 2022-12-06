@@ -17,9 +17,12 @@ package config
 import (
 	"net/url"
 	"regexp"
+	"strings"
+	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/tikv/pd/pkg/errs"
 )
 
 const (
@@ -52,6 +55,11 @@ func ValidateLabels(labels []*metapb.StoreLabel) error {
 	return nil
 }
 
+// ValidateLabelKey checks the legality of the label key.
+func ValidateLabelKey(key string) error {
+	return validateFormat(key, keyFormat)
+}
+
 // ValidateURLWithScheme checks the format of the URL.
 func ValidateURLWithScheme(rawURL string) error {
 	u, err := url.ParseRequestURI(rawURL)
@@ -64,16 +72,16 @@ func ValidateURLWithScheme(rawURL string) error {
 	return nil
 }
 
-var schedulerMap = make(map[string]struct{})
+var schedulerMap sync.Map
 
 // RegisterScheduler registers the scheduler type.
 func RegisterScheduler(typ string) {
-	schedulerMap[typ] = struct{}{}
+	schedulerMap.Store(typ, struct{}{})
 }
 
 // IsSchedulerRegistered checks if the named scheduler type is registered.
 func IsSchedulerRegistered(name string) bool {
-	_, ok := schedulerMap[name]
+	_, ok := schedulerMap.Load(name)
 	return ok
 }
 
@@ -86,4 +94,20 @@ func NewTestOptions() *PersistOptions {
 	c := NewConfig()
 	c.Adjust(nil, false)
 	return NewPersistOptions(c)
+}
+
+// parseUrls parse a string into multiple urls.
+func parseUrls(s string) ([]url.URL, error) {
+	items := strings.Split(s, ",")
+	urls := make([]url.URL, 0, len(items))
+	for _, item := range items {
+		u, err := url.Parse(item)
+		if err != nil {
+			return nil, errs.ErrURLParse.Wrap(err).GenWithStackByCause()
+		}
+
+		urls = append(urls, *u)
+	}
+
+	return urls, nil
 }

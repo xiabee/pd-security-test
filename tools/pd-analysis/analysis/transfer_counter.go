@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/tikv/pd/pkg/syncutil"
 )
 
 // TransferCounter is to count transfer schedule for judging whether redundant
@@ -39,7 +41,7 @@ type TransferCounter struct {
 	graphMat          [][]uint64
 	indexArray        []uint64
 	unIndexMap        map[uint64]int
-	mutex             sync.Mutex
+	mutex             syncutil.Mutex
 	loopResultPath    [][]int
 	loopResultCount   []uint64
 }
@@ -238,7 +240,11 @@ func (c *TransferCounter) PrintResult() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer fd.Close()
+	defer func() {
+		if err := fd.Close(); err != nil {
+			log.Printf("Error closing file: %s\n", err)
+		}
+	}()
 	fdContent := strings.Join([]string{
 		toString(uint64(c.storeNum)),
 		toString(uint64(c.regionNum)),

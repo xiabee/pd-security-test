@@ -16,54 +16,74 @@ package syncer
 
 import (
 	"context"
-	"os"
+	"testing"
 	"time"
 
-	. "github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/grpcutil"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/kv"
+	"github.com/tikv/pd/server/storage"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-var _ = Suite(&testClientSuite{})
-
-type testClientSuite struct{}
-
 // For issue https://github.com/tikv/pd/issues/3936
-func (t *testClientSuite) TestLoadRegion(c *C) {
-	tempDir, err := os.MkdirTemp(os.TempDir(), "region_syncer_load_region")
-	c.Assert(err, IsNil)
-	defer os.RemoveAll(tempDir)
-	rs, err := core.NewRegionStorage(context.Background(), tempDir, nil)
-	c.Assert(err, IsNil)
+func TestLoadRegion(t *testing.T) {
+	re := require.New(t)
+	tempDir := t.TempDir()
+	rs, err := storage.NewStorageWithLevelDBBackend(context.Background(), tempDir, nil)
+	re.NoError(err)
 
 	server := &mockServer{
 		ctx:     context.Background(),
-		storage: core.NewStorage(kv.NewMemoryKV(), core.WithRegionStorage(rs)),
+		storage: storage.NewCoreStorage(storage.NewStorageWithMemoryBackend(), rs),
 		bc:      core.NewBasicCluster(),
 	}
 	for i := 0; i < 30; i++ {
 		rs.SaveRegion(&metapb.Region{Id: uint64(i) + 1})
 	}
-	c.Assert(failpoint.Enable("github.com/tikv/pd/server/core/slowLoadRegion", "return(true)"), IsNil)
-	defer func() { c.Assert(failpoint.Disable("github.com/tikv/pd/server/core/slowLoadRegion"), IsNil) }()
+	re.NoError(failpoint.Enable("github.com/tikv/pd/server/storage/base_backend/slowLoadRegion", "return(true)"))
+	defer func() {
+		re.NoError(failpoint.Disable("github.com/tikv/pd/server/storage/base_backend/slowLoadRegion"))
+	}()
 
 	rc := NewRegionSyncer(server)
 	start := time.Now()
 	rc.StartSyncWithLeader("")
 	time.Sleep(time.Second)
 	rc.StopSyncWithLeader()
-	c.Assert(time.Since(start), Greater, time.Second) // make sure failpoint is injected
-	c.Assert(time.Since(start), Less, time.Second*2)
+	re.Greater(time.Since(start), time.Second) // make sure failpoint is injected
+	re.Less(time.Since(start), time.Second*2)
+}
+
+func TestErrorCode(t *testing.T) {
+	re := require.New(t)
+	tempDir := t.TempDir()
+	rs, err := storage.NewStorageWithLevelDBBackend(context.Background(), tempDir, nil)
+	re.NoError(err)
+	server := &mockServer{
+		ctx:     context.Background(),
+		storage: storage.NewCoreStorage(storage.NewStorageWithMemoryBackend(), rs),
+		bc:      core.NewBasicCluster(),
+	}
+	ctx, cancel := context.WithCancel(context.TODO())
+	rc := NewRegionSyncer(server)
+	conn, err := grpcutil.GetClientConn(ctx, "127.0.0.1", nil)
+	re.NoError(err)
+	cancel()
+	_, err = rc.syncRegion(ctx, conn)
+	ev, ok := status.FromError(err)
+	re.True(ok)
+	re.Equal(codes.Canceled, ev.Code())
 }
 
 type mockServer struct {
 	ctx            context.Context
 	member, leader *pdpb.Member
-	storage        *core.Storage
+	storage        storage.Storage
 	bc             *core.BasicCluster
 }
 
@@ -83,7 +103,7 @@ func (s *mockServer) GetLeader() *pdpb.Member {
 	return s.leader
 }
 
-func (s *mockServer) GetStorage() *core.Storage {
+func (s *mockServer) GetStorage() storage.Storage {
 	return s.storage
 }
 

@@ -17,39 +17,44 @@ package api
 import (
 	"fmt"
 	"net/url"
+	"testing"
 
-	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/statistics"
 )
 
-var _ = Suite(&testStatsSuite{})
-
-type testStatsSuite struct {
+type statsTestSuite struct {
+	suite.Suite
 	svr       *server.Server
 	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
-func (s *testStatsSuite) SetUpSuite(c *C) {
-	s.svr, s.cleanup = mustNewServer(c)
-	mustWaitLeader(c, []*server.Server{s.svr})
-
-	addr := s.svr.GetAddr()
-	s.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
-
-	mustBootstrapCluster(c, s.svr)
+func TestStatsTestSuite(t *testing.T) {
+	suite.Run(t, new(statsTestSuite))
 }
 
-func (s *testStatsSuite) TearDownSuite(c *C) {
-	s.cleanup()
+func (suite *statsTestSuite) SetupSuite() {
+	re := suite.Require()
+	suite.svr, suite.cleanup = mustNewServer(re)
+	server.MustWaitLeader(re, []*server.Server{suite.svr})
+
+	addr := suite.svr.GetAddr()
+	suite.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
+
+	mustBootstrapCluster(re, suite.svr)
 }
 
-func (s *testStatsSuite) TestRegionStats(c *C) {
-	statsURL := s.urlPrefix + "/stats/region"
+func (suite *statsTestSuite) TearDownSuite() {
+	suite.cleanup()
+}
+
+func (suite *statsTestSuite) TestRegionStats() {
+	statsURL := suite.urlPrefix + "/stats/region"
 	epoch := &metapb.RegionEpoch{
 		ConfVer: 1,
 		Version: 1,
@@ -117,8 +122,9 @@ func (s *testStatsSuite) TestRegionStats(c *C) {
 		),
 	}
 
+	re := suite.Require()
 	for _, r := range regions {
-		mustRegionHeartbeat(c, s.svr, r)
+		mustRegionHeartbeat(re, suite.svr, r)
 	}
 
 	// Distribution (L for leader, F for follower):
@@ -140,20 +146,6 @@ func (s *testStatsSuite) TestRegionStats(c *C) {
 		StorePeerSize:    map[uint64]int64{1: 301, 2: 100, 3: 100, 4: 250, 5: 201},
 		StorePeerKeys:    map[uint64]int64{1: 201, 2: 50, 3: 50, 4: 170, 5: 151},
 	}
-	res, err := testDialClient.Get(statsURL)
-	c.Assert(err, IsNil)
-	stats := &statistics.RegionStats{}
-	err = apiutil.ReadJSON(res.Body, stats)
-	c.Assert(err, IsNil)
-	c.Assert(stats, DeepEquals, statsAll)
-
-	args := fmt.Sprintf("?start_key=%s&end_key=%s", url.QueryEscape("\x01\x02"), url.QueryEscape("xyz\x00\x00"))
-	res, err = testDialClient.Get(statsURL + args)
-	c.Assert(err, IsNil)
-	stats = &statistics.RegionStats{}
-	err = apiutil.ReadJSON(res.Body, stats)
-	c.Assert(err, IsNil)
-	c.Assert(stats, DeepEquals, statsAll)
 
 	stats23 := &statistics.RegionStats{
 		Count:            2,
@@ -168,11 +160,40 @@ func (s *testStatsSuite) TestRegionStats(c *C) {
 		StorePeerKeys:    map[uint64]int64{1: 151, 4: 150, 5: 151},
 	}
 
-	args = fmt.Sprintf("?start_key=%s&end_key=%s", url.QueryEscape("a"), url.QueryEscape("x"))
-	res, err = testDialClient.Get(statsURL + args)
-	c.Assert(err, IsNil)
-	stats = &statistics.RegionStats{}
-	err = apiutil.ReadJSON(res.Body, stats)
-	c.Assert(err, IsNil)
-	c.Assert(stats, DeepEquals, stats23)
+	testdata := []struct {
+		startKey string
+		endKey   string
+		expect   *statistics.RegionStats
+	}{
+		{
+			startKey: "",
+			endKey:   "",
+			expect:   statsAll,
+		}, {
+			startKey: url.QueryEscape("\x01\x02"),
+			endKey:   url.QueryEscape("xyz\x00\x00"),
+			expect:   statsAll,
+		},
+		{
+			startKey: url.QueryEscape("a"),
+			endKey:   url.QueryEscape("x"),
+			expect:   stats23,
+		},
+	}
+
+	for _, data := range testdata {
+		for _, query := range []string{"", "count"} {
+			args := fmt.Sprintf("?start_key=%s&end_key=%s&%s", data.startKey, data.endKey, query)
+			res, err := testDialClient.Get(statsURL + args)
+			suite.NoError(err)
+			defer res.Body.Close()
+			stats := &statistics.RegionStats{}
+			err = apiutil.ReadJSON(res.Body, stats)
+			suite.NoError(err)
+			suite.Equal(data.expect.Count, stats.Count)
+			if query != "count" {
+				suite.Equal(data.expect, stats)
+			}
+		}
+	}
 }

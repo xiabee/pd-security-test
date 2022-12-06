@@ -18,6 +18,7 @@ import (
 	"net/http"
 
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/statistics"
 	"github.com/unrolled/render"
 )
 
@@ -33,16 +34,21 @@ func newStatsHandler(svr *server.Server, rd *render.Render) *statsHandler {
 	}
 }
 
-// @Tags stats
-// @Summary Get region statistics of a specified range.
-// @Param start_key query string true "Start key"
-// @Param end_key query string true "End key"
-// @Produce json
-// @Success 200 {object} statistics.RegionStats
-// @Router /stats/region [get]
-func (h *statsHandler) Region(w http.ResponseWriter, r *http.Request) {
+// @Tags     stats
+// @Summary  Get region statistics of a specified range.
+// @Param    start_key  query  string  true  "Start key"
+// @Param    end_key    query  string  true  "End key"
+// @Produce  json
+// @Success  200  {object}  statistics.RegionStats
+// @Router   /stats/region [get]
+func (h *statsHandler) GetRegionStatus(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
 	startKey, endKey := r.URL.Query().Get("start_key"), r.URL.Query().Get("end_key")
-	stats := rc.GetRegionStats([]byte(startKey), []byte(endKey))
+	var stats *statistics.RegionStats
+	if r.URL.Query().Has("count") {
+		stats = rc.GetRangeCount([]byte(startKey), []byte(endKey))
+	} else {
+		stats = rc.GetRegionStats([]byte(startKey), []byte(endKey))
+	}
 	h.rd.JSON(w, http.StatusOK, stats)
 }

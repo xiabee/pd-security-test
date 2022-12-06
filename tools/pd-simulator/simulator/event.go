@@ -84,7 +84,7 @@ type WriteFlowOnSpot struct {
 func (e *WriteFlowOnSpot) Run(raft *RaftEngine, tickCount int64) bool {
 	res := e.descriptor.Step(tickCount)
 	for key, size := range res {
-		region := raft.SearchRegion([]byte(key))
+		region := raft.GetRegionByKey([]byte(key))
 		simutil.Logger.Debug("search the region", zap.Reflect("region", region.GetMeta()))
 		if region == nil {
 			simutil.Logger.Error("region not found for key", zap.String("key", key))
@@ -145,13 +145,12 @@ func (e *AddNodes) Run(raft *RaftEngine, tickCount int64) bool {
 
 	config := raft.storeConfig
 	s := &cases.Store{
-		ID:        id,
-		Status:    metapb.StoreState_Up,
-		Capacity:  config.StoreCapacityGB * cases.GB,
-		Available: config.StoreAvailableGB * cases.GB,
-		Version:   config.StoreVersion,
+		ID:       id,
+		Status:   metapb.StoreState_Up,
+		Capacity: uint64(config.RaftStore.Capacity),
+		Version:  config.StoreVersion,
 	}
-	n, err := NewNode(s, raft.conn.pdAddr, config.StoreIOMBPerSecond)
+	n, err := NewNode(s, raft.conn.pdAddr, config)
 	if err != nil {
 		simutil.Logger.Error("add node failed", zap.Uint64("node-id", id), zap.Error(err))
 		return false
@@ -187,7 +186,7 @@ func (e *DeleteNodes) Run(raft *RaftEngine, tickCount int64) bool {
 
 	regions := raft.GetRegions()
 	for _, region := range regions {
-		storeIDs := region.GetStoreIds()
+		storeIDs := region.GetStoreIDs()
 		if _, ok := storeIDs[id]; ok {
 			downPeer := &pdpb.PeerStats{
 				Peer:        region.GetStorePeer(id),
