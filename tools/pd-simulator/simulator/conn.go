@@ -33,7 +33,7 @@ func NewConnection(simCase *cases.Case, pdAddr string, storeConfig *SimConfig) (
 	}
 
 	for _, store := range simCase.Stores {
-		node, err := NewNode(store, pdAddr, storeConfig)
+		node, err := NewNode(store, pdAddr, storeConfig.StoreIOMBPerSecond)
 		if err != nil {
 			return nil, err
 		}
@@ -49,5 +49,5 @@ func (c *Connection) nodeHealth(storeID uint64) bool {
 		return false
 	}
 
-	return n.GetNodeState() == metapb.NodeState_Preparing || n.GetNodeState() == metapb.NodeState_Serving
+	return n.GetState() == metapb.StoreState_Up
 }

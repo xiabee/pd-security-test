@@ -20,7 +20,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/tikv/pd/pkg/utils/apiutil/serverapi"
+	"github.com/tikv/pd/pkg/apiutil/serverapi"
 	"github.com/tikv/pd/server"
 )
 
@@ -32,7 +32,7 @@ func newQueryMetric(s *server.Server) *queryMetric {
 	return &queryMetric{s: s}
 }
 
-func (h *queryMetric) QueryMetric(w http.ResponseWriter, r *http.Request) {
+func (h *queryMetric) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	metricAddr := h.s.GetConfig().PDServerCfg.MetricStorage
 	if metricAddr == "" {
 		http.Error(w, "metric storage doesn't set", http.StatusInternalServerError)

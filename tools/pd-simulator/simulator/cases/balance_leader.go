@@ -15,7 +15,6 @@
 package cases
 
 import (
-	"github.com/docker/go-units"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
@@ -30,8 +29,11 @@ func newBalanceLeader() *Case {
 
 	for i := 1; i <= storeNum; i++ {
 		simCase.Stores = append(simCase.Stores, &Store{
-			ID:     IDAllocator.nextID(),
-			Status: metapb.StoreState_Up,
+			ID:        IDAllocator.nextID(),
+			Status:    metapb.StoreState_Up,
+			Capacity:  1 * TB,
+			Available: 900 * GB,
+			Version:   "2.1.0",
 		})
 	}
 
@@ -45,7 +47,7 @@ func newBalanceLeader() *Case {
 			ID:     IDAllocator.nextID(),
 			Peers:  peers,
 			Leader: peers[0],
-			Size:   96 * units.MiB,
+			Size:   96 * MB,
 			Keys:   960000,
 		})
 	}

@@ -15,9 +15,8 @@
 package operator
 
 import (
+	"sync"
 	"time"
-
-	"github.com/tikv/pd/pkg/utils/syncutil"
 )
 
 // Only record non-end status and one end status.
@@ -25,7 +24,7 @@ type statusTimes [firstEndStatus + 1]time.Time
 
 // OpStatusTracker represents the status of an operator.
 type OpStatusTracker struct {
-	rw         syncutil.RWMutex
+	rw         sync.RWMutex
 	current    OpStatus    // Current status
 	reachTimes statusTimes // Time when reach the current status
 }
@@ -115,13 +114,12 @@ func (trk *OpStatusTracker) CheckExpired(exp time.Duration) bool {
 	return trk.current == EXPIRED
 }
 
-// CheckTimeout returns true if timeout, and update the current status.
-func (trk *OpStatusTracker) CheckTimeout(duration time.Duration) bool {
+// CheckTimeout checks if timeout, and update the current status.
+func (trk *OpStatusTracker) CheckTimeout(wait time.Duration) bool {
 	trk.rw.Lock()
 	defer trk.rw.Unlock()
 	if trk.current == STARTED {
-		start := trk.getTime(STARTED)
-		if time.Since(start) < duration {
+		if time.Since(trk.reachTimes[STARTED]) < wait {
 			return false
 		}
 		_ = trk.toLocked(TIMEOUT)

@@ -30,7 +30,6 @@ const (
 
 type storeStatistics struct {
 	opt             *config.PersistOptions
-	storeConfig     *config.StoreConfig
 	Up              int
 	Disconnect      int
 	Unhealthy       int
@@ -43,18 +42,12 @@ type storeStatistics struct {
 	StorageCapacity uint64
 	RegionCount     int
 	LeaderCount     int
-	WitnessCount    int
 	LabelCounter    map[string]int
-	Preparing       int
-	Serving         int
-	Removing        int
-	Removed         int
 }
 
-func newStoreStatistics(opt *config.PersistOptions, storeConfig *config.StoreConfig) *storeStatistics {
+func newStoreStatistics(opt *config.PersistOptions) *storeStatistics {
 	return &storeStatistics{
 		opt:          opt,
-		storeConfig:  storeConfig,
 		LabelCounter: make(map[string]int),
 	}
 }
@@ -67,15 +60,15 @@ func (s *storeStatistics) Observe(store *core.StoreInfo, stats *StoresStats) {
 		}
 		key := fmt.Sprintf("%s:%s", k, v)
 		// exclude tombstone
-		if !store.IsRemoved() {
+		if store.GetState() != metapb.StoreState_Tombstone {
 			s.LabelCounter[key]++
 		}
 	}
 	storeAddress := store.GetAddress()
 	id := strconv.FormatUint(store.GetID(), 10)
 	// Store state.
-	switch store.GetNodeState() {
-	case metapb.NodeState_Preparing, metapb.NodeState_Serving:
+	switch store.GetState() {
+	case metapb.StoreState_Up:
 		if store.DownTime() >= s.opt.GetMaxStoreDownTime() {
 			s.Down++
 		} else if store.IsUnhealthy() {
@@ -87,17 +80,10 @@ func (s *storeStatistics) Observe(store *core.StoreInfo, stats *StoresStats) {
 		} else {
 			s.Up++
 		}
-		if store.IsPreparing() {
-			s.Preparing++
-		} else {
-			s.Serving++
-		}
-	case metapb.NodeState_Removing:
+	case metapb.StoreState_Offline:
 		s.Offline++
-		s.Removing++
-	case metapb.NodeState_Removed:
+	case metapb.StoreState_Tombstone:
 		s.Tombstone++
-		s.Removed++
 		s.resetStoreStatistics(storeAddress, id)
 		return
 	}
@@ -110,7 +96,6 @@ func (s *storeStatistics) Observe(store *core.StoreInfo, stats *StoresStats) {
 	s.StorageCapacity += store.GetCapacity()
 	s.RegionCount += store.GetRegionCount()
 	s.LeaderCount += store.GetLeaderCount()
-	s.WitnessCount += store.GetWitnessCount()
 
 	storeStatusGauge.WithLabelValues(storeAddress, id, "region_score").Set(store.RegionScore(s.opt.GetRegionScoreFormulaVersion(), s.opt.GetHighSpaceRatio(), s.opt.GetLowSpaceRatio(), 0))
 	storeStatusGauge.WithLabelValues(storeAddress, id, "leader_score").Set(store.LeaderScore(s.opt.GetLeaderSchedulePolicy(), 0))
@@ -118,10 +103,11 @@ func (s *storeStatistics) Observe(store *core.StoreInfo, stats *StoresStats) {
 	storeStatusGauge.WithLabelValues(storeAddress, id, "region_count").Set(float64(store.GetRegionCount()))
 	storeStatusGauge.WithLabelValues(storeAddress, id, "leader_size").Set(float64(store.GetLeaderSize()))
 	storeStatusGauge.WithLabelValues(storeAddress, id, "leader_count").Set(float64(store.GetLeaderCount()))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "witness_count").Set(float64(store.GetWitnessCount()))
 	storeStatusGauge.WithLabelValues(storeAddress, id, "store_available").Set(float64(store.GetAvailable()))
 	storeStatusGauge.WithLabelValues(storeAddress, id, "store_used").Set(float64(store.GetUsedSize()))
 	storeStatusGauge.WithLabelValues(storeAddress, id, "store_capacity").Set(float64(store.GetCapacity()))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_available_avg").Set(float64(store.GetAvgAvailable()))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_available_deviation").Set(float64(store.GetAvailableDeviation()))
 
 	// Store flows.
 	storeFlowStats := stats.GetRollingStoreStats(store.GetID())
@@ -163,13 +149,8 @@ func (s *storeStatistics) Collect() {
 	metrics["store_tombstone_count"] = float64(s.Tombstone)
 	metrics["store_low_space_count"] = float64(s.LowSpace)
 	metrics["store_slow_count"] = float64(s.Slow)
-	metrics["store_preparing_count"] = float64(s.Preparing)
-	metrics["store_serving_count"] = float64(s.Serving)
-	metrics["store_removing_count"] = float64(s.Removing)
-	metrics["store_removed_count"] = float64(s.Removed)
 	metrics["region_count"] = float64(s.RegionCount)
 	metrics["leader_count"] = float64(s.LeaderCount)
-	metrics["witness_count"] = float64(s.WitnessCount)
 	metrics["storage_size"] = float64(s.StorageSize)
 	metrics["storage_capacity"] = float64(s.StorageCapacity)
 
@@ -193,10 +174,6 @@ func (s *storeStatistics) Collect() {
 	configs["max-snapshot-count"] = float64(s.opt.GetMaxSnapshotCount())
 	configs["max-merge-region-size"] = float64(s.opt.GetMaxMergeRegionSize())
 	configs["max-merge-region-keys"] = float64(s.opt.GetMaxMergeRegionKeys())
-	configs["region-max-size"] = float64(s.storeConfig.GetRegionMaxSize())
-	configs["region-split-size"] = float64(s.storeConfig.GetRegionSplitSize())
-	configs["region-split-keys"] = float64(s.storeConfig.GetRegionSplitKeys())
-	configs["region-max-keys"] = float64(s.storeConfig.GetRegionMaxKeys())
 
 	var enableMakeUpReplica, enableRemoveDownReplica, enableRemoveExtraReplica, enableReplaceOfflineReplica float64
 	if s.opt.IsMakeUpReplicaEnabled() {
@@ -240,7 +217,6 @@ func (s *storeStatistics) resetStoreStatistics(storeAddress string, id string) {
 		"region_count",
 		"leader_size",
 		"leader_count",
-		"witness_count",
 		"store_available",
 		"store_used",
 		"store_capacity",
@@ -264,10 +240,10 @@ type storeStatisticsMap struct {
 }
 
 // NewStoreStatisticsMap creates a new storeStatisticsMap.
-func NewStoreStatisticsMap(opt *config.PersistOptions, storeConfig *config.StoreConfig) *storeStatisticsMap {
+func NewStoreStatisticsMap(opt *config.PersistOptions) *storeStatisticsMap {
 	return &storeStatisticsMap{
 		opt:   opt,
-		stats: newStoreStatistics(opt, storeConfig),
+		stats: newStoreStatistics(opt),
 	}
 }
 

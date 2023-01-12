@@ -18,18 +18,18 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/opt"
 )
 
 // JointStateChecker ensures region is in joint state will leave.
 type JointStateChecker struct {
 	PauseController
-	cluster schedule.Cluster
+	cluster opt.Cluster
 }
 
 // NewJointStateChecker creates a joint state checker.
-func NewJointStateChecker(cluster schedule.Cluster) *JointStateChecker {
+func NewJointStateChecker(cluster opt.Cluster) *JointStateChecker {
 	return &JointStateChecker{
 		cluster: cluster,
 	}
@@ -45,7 +45,7 @@ func (c *JointStateChecker) Check(region *core.RegionInfo) *operator.Operator {
 	if !core.IsInJointState(region.GetPeers()...) {
 		return nil
 	}
-	op, err := operator.CreateLeaveJointStateOperator(operator.OpDescLeaveJointState, c.cluster, region)
+	op, err := operator.CreateLeaveJointStateOperator("leave-joint-state", c.cluster, region)
 	if err != nil {
 		checkerCounter.WithLabelValues("joint_state_checker", "create-operator-fail").Inc()
 		log.Debug("fail to create leave joint state operator", errs.ZapError(err))
@@ -55,7 +55,7 @@ func (c *JointStateChecker) Check(region *core.RegionInfo) *operator.Operator {
 		if op.Len() > 1 {
 			checkerCounter.WithLabelValues("joint_state_checker", "transfer-leader").Inc()
 		}
-		op.SetPriorityLevel(core.High)
+		op.SetPriorityLevel(core.HighPriority)
 	}
 	return op
 }

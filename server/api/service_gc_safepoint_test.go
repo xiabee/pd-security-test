@@ -17,49 +17,44 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/storage/endpoint"
+	"github.com/tikv/pd/server/core"
 )
 
-type serviceGCSafepointTestSuite struct {
-	suite.Suite
+var _ = Suite(&testServiceGCSafepointSuite{})
+
+type testServiceGCSafepointSuite struct {
 	svr       *server.Server
 	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
-func TestServiceGCSafepointTestSuite(t *testing.T) {
-	suite.Run(t, new(serviceGCSafepointTestSuite))
+func (s *testServiceGCSafepointSuite) SetUpSuite(c *C) {
+	s.svr, s.cleanup = mustNewServer(c)
+	mustWaitLeader(c, []*server.Server{s.svr})
+
+	addr := s.svr.GetAddr()
+	s.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
+
+	mustBootstrapCluster(c, s.svr)
+	mustPutStore(c, s.svr, 1, metapb.StoreState_Up, nil)
 }
 
-func (suite *serviceGCSafepointTestSuite) SetupSuite() {
-	re := suite.Require()
-	suite.svr, suite.cleanup = mustNewServer(re)
-	server.MustWaitLeader(re, []*server.Server{suite.svr})
-
-	addr := suite.svr.GetAddr()
-	suite.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
-
-	mustBootstrapCluster(re, suite.svr)
-	mustPutStore(re, suite.svr, 1, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
+func (s *testServiceGCSafepointSuite) TearDownSuite(c *C) {
+	s.cleanup()
 }
 
-func (suite *serviceGCSafepointTestSuite) TearDownSuite() {
-	suite.cleanup()
-}
+func (s *testServiceGCSafepointSuite) TestRegionStats(c *C) {
+	sspURL := s.urlPrefix + "/gc/safepoint"
 
-func (suite *serviceGCSafepointTestSuite) TestServiceGCSafepoint() {
-	sspURL := suite.urlPrefix + "/gc/safepoint"
-
-	storage := suite.svr.GetStorage()
+	storage := s.svr.GetStorage()
 	list := &listServiceGCSafepoint{
-		ServiceGCSafepoints: []*endpoint.ServiceSafePoint{
+		ServiceGCSafepoints: []*core.ServiceSafePoint{
 			{
 				ServiceID: "a",
 				ExpiredAt: time.Now().Unix() + 10,
@@ -80,23 +75,23 @@ func (suite *serviceGCSafepointTestSuite) TestServiceGCSafepoint() {
 	}
 	for _, ssp := range list.ServiceGCSafepoints {
 		err := storage.SaveServiceGCSafePoint(ssp)
-		suite.NoError(err)
+		c.Assert(err, IsNil)
 	}
 	storage.SaveGCSafePoint(1)
 
 	res, err := testDialClient.Get(sspURL)
-	suite.NoError(err)
+	c.Assert(err, IsNil)
 	defer res.Body.Close()
 	listResp := &listServiceGCSafepoint{}
 	err = apiutil.ReadJSON(res.Body, listResp)
-	suite.NoError(err)
-	suite.Equal(list, listResp)
+	c.Assert(err, IsNil)
+	c.Assert(listResp, DeepEquals, list)
 
-	statusCode, err := apiutil.DoDelete(testDialClient, sspURL+"/a")
-	suite.NoError(err)
-	suite.Equal(http.StatusOK, statusCode)
+	statusCode, err := doDelete(testDialClient, sspURL+"/a")
+	c.Assert(err, IsNil)
+	c.Assert(statusCode, Equals, http.StatusOK)
 
-	left, err := storage.LoadAllServiceGCSafePoints()
-	suite.NoError(err)
-	suite.Equal(list.ServiceGCSafepoints[1:], left)
+	left, err := storage.GetAllServiceGCSafePoints()
+	c.Assert(err, IsNil)
+	c.Assert(left, DeepEquals, list.ServiceGCSafepoints[1:])
 }

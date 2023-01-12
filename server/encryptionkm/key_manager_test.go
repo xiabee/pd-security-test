@@ -15,28 +15,35 @@
 package encryptionkm
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
-	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/election"
 	"github.com/tikv/pd/pkg/encryption"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/tempurl"
-	"github.com/tikv/pd/pkg/utils/typeutil"
-	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/tempurl"
+	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server/election"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
 )
+
+func TestKeyManager(t *testing.T) {
+	TestingT(t)
+}
+
+type testKeyManagerSuite struct{}
+
+var _ = SerialSuites(&testKeyManagerSuite{})
 
 const (
 	testMasterKey     = "8fd7e3e917c170d92f3e51a981dd7bc8fba11f3df7d8df994842f6e86f69b530"
@@ -50,97 +57,104 @@ func getTestDataKey() []byte {
 	return key
 }
 
-func newTestEtcd(t *testing.T, re *require.Assertions) (client *clientv3.Client) {
+func newTestEtcd(c *C) (client *clientv3.Client, cleanup func()) {
 	cfg := embed.NewConfig()
 	cfg.Name = "test_etcd"
-	cfg.Dir = t.TempDir()
+	cfg.Dir, _ = os.MkdirTemp("/tmp", "test_etcd")
 	cfg.Logger = "zap"
 	pu, err := url.Parse(tempurl.Alloc())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	cfg.LPUrls = []url.URL{*pu}
 	cfg.APUrls = cfg.LPUrls
 	cu, err := url.Parse(tempurl.Alloc())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	cfg.LCUrls = []url.URL{*cu}
 	cfg.ACUrls = cfg.LCUrls
 	cfg.InitialCluster = fmt.Sprintf("%s=%s", cfg.Name, &cfg.LPUrls[0])
 	cfg.ClusterState = embed.ClusterStateFlagNew
 	server, err := embed.StartEtcd(cfg)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	<-server.Server.ReadyNotify()
 
 	client, err = clientv3.New(clientv3.Config{
 		Endpoints: []string{cfg.LCUrls[0].String()},
 	})
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
-	t.Cleanup(func() {
+	cleanup = func() {
 		client.Close()
 		server.Close()
-	})
+		os.RemoveAll(cfg.Dir)
+	}
 
-	return client
+	return client, cleanup
 }
 
-func newTestKeyFile(t *testing.T, re *require.Assertions, key ...string) (keyFilePath string) {
+func newTestKeyFile(c *C, key ...string) (keyFilePath string, cleanup func()) {
 	testKey := testMasterKey
 	for _, k := range key {
 		testKey = k
 	}
+	tempDir, err := os.MkdirTemp("/tmp", "test_key_file")
+	c.Assert(err, IsNil)
+	keyFilePath = tempDir + "/key"
+	err = os.WriteFile(keyFilePath, []byte(testKey), 0600)
+	c.Assert(err, IsNil)
 
-	keyFilePath = filepath.Join(t.TempDir(), "key")
-	err := os.WriteFile(keyFilePath, []byte(testKey), 0600)
-	re.NoError(err)
+	cleanup = func() {
+		os.RemoveAll(tempDir)
+	}
 
-	return keyFilePath
+	return keyFilePath, cleanup
 }
 
-func newTestLeader(re *require.Assertions, client *clientv3.Client) *election.Leadership {
+func newTestLeader(c *C, client *clientv3.Client) *election.Leadership {
 	leader := election.NewLeadership(client, "test_leader", "test")
 	timeout := int64(30000000) // about a year.
 	err := leader.Campaign(timeout, "")
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	return leader
 }
 
-func checkMasterKeyMeta(re *require.Assertions, value []byte, meta *encryptionpb.MasterKey, ciphertextKey []byte) {
+func checkMasterKeyMeta(c *C, value []byte, meta *encryptionpb.MasterKey, ciphertextKey []byte) {
 	content := &encryptionpb.EncryptedContent{}
 	err := content.Unmarshal(value)
-	re.NoError(err)
-	re.True(proto.Equal(content.MasterKey, meta))
-	re.Equal(content.CiphertextKey, ciphertextKey)
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(content.MasterKey, meta), IsTrue)
+	c.Assert(bytes.Equal(content.CiphertextKey, ciphertextKey), IsTrue)
 }
 
-func TestNewKeyManagerBasic(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestNewKeyManagerBasic(c *C) {
 	// Initialize.
-	client := newTestEtcd(t, re)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
 	// Use default config.
 	config := &encryption.Config{}
 	err := config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := NewKeyManager(client, config)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check config.
-	re.Equal(encryptionpb.EncryptionMethod_PLAINTEXT, m.method)
-	re.NotNil(m.masterKeyMeta.GetPlaintext())
+	c.Assert(m.method, Equals, encryptionpb.EncryptionMethod_PLAINTEXT)
+	c.Assert(m.masterKeyMeta.GetPlaintext(), NotNil)
 	// Check loaded keys.
-	re.Nil(m.keys.Load())
+	c.Assert(m.keys.Load(), IsNil)
 	// Check etcd KV.
 	value, err := etcdutil.GetValue(client, EncryptionKeysPath)
-	re.NoError(err)
-	re.Nil(value)
+	c.Assert(err, IsNil)
+	c.Assert(value, IsNil)
 }
 
-func TestNewKeyManagerWithCustomConfig(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestNewKeyManagerWithCustomConfig(c *C) {
 	// Initialize.
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
 	// Custom config
 	rotatePeriod, err := time.ParseDuration("100h")
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	config := &encryption.Config{
 		DataEncryptionMethod:  "aes128-ctr",
 		DataKeyRotationPeriod: typeutil.NewDuration(rotatePeriod),
@@ -152,35 +166,36 @@ func TestNewKeyManagerWithCustomConfig(t *testing.T) {
 		},
 	}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := NewKeyManager(client, config)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check config.
-	re.Equal(encryptionpb.EncryptionMethod_AES128_CTR, m.method)
-	re.Equal(rotatePeriod, m.dataKeyRotationPeriod)
-	re.NotNil(m.masterKeyMeta)
+	c.Assert(m.method, Equals, encryptionpb.EncryptionMethod_AES128_CTR)
+	c.Assert(m.dataKeyRotationPeriod, Equals, rotatePeriod)
+	c.Assert(m.masterKeyMeta, NotNil)
 	keyFileMeta := m.masterKeyMeta.GetFile()
-	re.NotNil(keyFileMeta)
-	re.Equal(config.MasterKey.MasterKeyFileConfig.FilePath, keyFileMeta.Path)
+	c.Assert(keyFileMeta, NotNil)
+	c.Assert(keyFileMeta.Path, Equals, config.MasterKey.MasterKeyFileConfig.FilePath)
 	// Check loaded keys.
-	re.Nil(m.keys.Load())
+	c.Assert(m.keys.Load(), IsNil)
 	// Check etcd KV.
 	value, err := etcdutil.GetValue(client, EncryptionKeysPath)
-	re.NoError(err)
-	re.Nil(value)
+	c.Assert(err, IsNil)
+	c.Assert(value, IsNil)
 }
 
-func TestNewKeyManagerLoadKeys(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestNewKeyManagerLoadKeys(c *C) {
 	// Initialize.
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Use default config.
 	config := &encryption.Config{}
 	err := config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Store initial keys in etcd.
 	masterKeyMeta := newMasterKey(keyFile)
 	keys := &encryptionpb.KeyDictionary{
@@ -195,39 +210,39 @@ func TestNewKeyManagerLoadKeys(t *testing.T) {
 		},
 	}
 	err = saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := NewKeyManager(client, config)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check config.
-	re.Equal(encryptionpb.EncryptionMethod_PLAINTEXT, m.method)
-	re.NotNil(m.masterKeyMeta.GetPlaintext())
+	c.Assert(m.method, Equals, encryptionpb.EncryptionMethod_PLAINTEXT)
+	c.Assert(m.masterKeyMeta.GetPlaintext(), NotNil)
 	// Check loaded keys.
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	// Check etcd KV.
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(storedKeys, keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(storedKeys, keys), IsTrue)
 }
 
-func TestGetCurrentKey(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestGetCurrentKey(c *C) {
 	// Initialize.
-	client := newTestEtcd(t, re)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
 	// Use default config.
 	config := &encryption.Config{}
 	err := config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := NewKeyManager(client, config)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Test encryption disabled.
 	currentKeyID, currentKey, err := m.GetCurrentKey()
-	re.NoError(err)
-	re.Equal(uint64(disableEncryptionKeyID), currentKeyID)
-	re.Nil(currentKey)
+	c.Assert(err, IsNil)
+	c.Assert(currentKeyID, Equals, uint64(disableEncryptionKeyID))
+	c.Assert(currentKey, IsNil)
 	// Test normal case.
 	keys := &encryptionpb.KeyDictionary{
 		CurrentKeyId: 123,
@@ -242,9 +257,9 @@ func TestGetCurrentKey(t *testing.T) {
 	}
 	m.keys.Store(keys)
 	currentKeyID, currentKey, err = m.GetCurrentKey()
-	re.NoError(err)
-	re.Equal(keys.CurrentKeyId, currentKeyID)
-	re.True(proto.Equal(currentKey, keys.Keys[keys.CurrentKeyId]))
+	c.Assert(err, IsNil)
+	c.Assert(currentKeyID, Equals, keys.CurrentKeyId)
+	c.Assert(proto.Equal(currentKey, keys.Keys[keys.CurrentKeyId]), IsTrue)
 	// Test current key missing.
 	keys = &encryptionpb.KeyDictionary{
 		CurrentKeyId: 123,
@@ -252,15 +267,16 @@ func TestGetCurrentKey(t *testing.T) {
 	}
 	m.keys.Store(keys)
 	_, _, err = m.GetCurrentKey()
-	re.Error(err)
+	c.Assert(err, NotNil)
 }
 
-func TestGetKey(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestGetKey(c *C) {
 	// Initialize.
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Store initial keys in etcd.
 	masterKeyMeta := newMasterKey(keyFile)
 	keys := &encryptionpb.KeyDictionary{
@@ -281,41 +297,41 @@ func TestGetKey(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Use default config.
 	config := &encryption.Config{}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := NewKeyManager(client, config)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Get existing key.
 	key, err := m.GetKey(uint64(123))
-	re.NoError(err)
-	re.True(proto.Equal(key, keys.Keys[123]))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(key, keys.Keys[123]), IsTrue)
 	// Get key that require a reload.
 	// Deliberately cancel watcher, delete a key and check if it has reloaded.
 	loadedKeys := m.keys.Load().(*encryptionpb.KeyDictionary)
-	newLoadedKeys := typeutil.DeepClone(loadedKeys, core.KeyDictionaryFactory)
-
-	delete(newLoadedKeys.Keys, 456)
-	m.keys.Store(newLoadedKeys)
+	loadedKeys = proto.Clone(loadedKeys).(*encryptionpb.KeyDictionary)
+	delete(loadedKeys.Keys, 456)
+	m.keys.Store(loadedKeys)
 	m.mu.keysRevision = 0
 	key, err = m.GetKey(uint64(456))
-	re.NoError(err)
-	re.True(proto.Equal(key, keys.Keys[456]))
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(key, keys.Keys[456]), IsTrue)
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	// Get non-existing key.
 	_, err = m.GetKey(uint64(789))
-	re.Error(err)
+	c.Assert(err, NotNil)
 }
 
-func TestLoadKeyEmpty(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestLoadKeyEmpty(c *C) {
 	// Initialize.
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Store initial keys in etcd.
 	masterKeyMeta := newMasterKey(keyFile)
 	keys := &encryptionpb.KeyDictionary{
@@ -330,28 +346,29 @@ func TestLoadKeyEmpty(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Use default config.
 	config := &encryption.Config{}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := NewKeyManager(client, config)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Simulate keys get deleted.
 	_, err = client.Delete(context.Background(), EncryptionKeysPath)
-	re.NoError(err)
-	re.NotNil(m.loadKeys())
+	c.Assert(err, IsNil)
+	c.Assert(m.loadKeys(), NotNil)
 }
 
-func TestWatcher(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestWatcher(c *C) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Listen on watcher event
@@ -363,15 +380,15 @@ func TestWatcher(t *testing.T) {
 	// Use default config.
 	config := &encryption.Config{}
 	err := config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	go m.StartBackgroundLoop(ctx)
 	_, err = m.GetKey(123)
-	re.Error(err)
+	c.Assert(err, NotNil)
 	_, err = m.GetKey(456)
-	re.Error(err)
+	c.Assert(err, NotNil)
 	// Update keys in etcd
 	masterKeyMeta := newMasterKey(keyFile)
 	keys := &encryptionpb.KeyDictionary{
@@ -386,13 +403,13 @@ func TestWatcher(t *testing.T) {
 		},
 	}
 	err = saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	<-reloadEvent
 	key, err := m.GetKey(123)
-	re.NoError(err)
-	re.True(proto.Equal(key, keys.Keys[123]))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(key, keys.Keys[123]), IsTrue)
 	_, err = m.GetKey(456)
-	re.Error(err)
+	c.Assert(err, NotNil)
 	// Update again
 	keys = &encryptionpb.KeyDictionary{
 		CurrentKeyId: 456,
@@ -412,47 +429,48 @@ func TestWatcher(t *testing.T) {
 		},
 	}
 	err = saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	<-reloadEvent
 	key, err = m.GetKey(123)
-	re.NoError(err)
-	re.True(proto.Equal(key, keys.Keys[123]))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(key, keys.Keys[123]), IsTrue)
 	key, err = m.GetKey(456)
-	re.NoError(err)
-	re.True(proto.Equal(key, keys.Keys[456]))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(key, keys.Keys[456]), IsTrue)
 }
 
-func TestSetLeadershipWithEncryptionOff(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestSetLeadershipWithEncryptionOff(c *C) {
 	// Initialize.
-	client := newTestEtcd(t, re)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
 	// Use default config.
 	config := &encryption.Config{}
 	err := config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := NewKeyManager(client, config)
-	re.NoError(err)
-	re.Nil(m.keys.Load())
+	c.Assert(err, IsNil)
+	c.Assert(m.keys.Load(), IsNil)
 	// Set leadership
-	leadership := newTestLeader(re, client)
+	leadership := newTestLeader(c, client)
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check encryption stays off.
-	re.Nil(m.keys.Load())
+	c.Assert(m.keys.Load(), IsNil)
 	value, err := etcdutil.GetValue(client, EncryptionKeysPath)
-	re.NoError(err)
-	re.Nil(value)
+	c.Assert(err, IsNil)
+	c.Assert(value, IsNil)
 }
 
-func TestSetLeadershipWithEncryptionEnabling(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestSetLeadershipWithEncryptionEnabling(c *C) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Listen on watcher event
@@ -472,40 +490,41 @@ func TestSetLeadershipWithEncryptionEnabling(t *testing.T) {
 		},
 	}
 	err := config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
-	re.Nil(m.keys.Load())
+	c.Assert(err, IsNil)
+	c.Assert(m.keys.Load(), IsNil)
 	go m.StartBackgroundLoop(ctx)
 	// Set leadership
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check encryption is on and persisted.
 	<-reloadEvent
-	re.NotNil(m.keys.Load())
+	c.Assert(m.keys.Load(), NotNil)
 	currentKeyID, currentKey, err := m.GetCurrentKey()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	method, err := config.GetMethod()
-	re.NoError(err)
-	re.Equal(method, currentKey.Method)
+	c.Assert(err, IsNil)
+	c.Assert(currentKey.Method, Equals, method)
 	loadedKeys := m.keys.Load().(*encryptionpb.KeyDictionary)
-	re.True(proto.Equal(loadedKeys.Keys[currentKeyID], currentKey))
+	c.Assert(proto.Equal(loadedKeys.Keys[currentKeyID], currentKey), IsTrue)
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(loadedKeys, storedKeys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(loadedKeys, storedKeys), IsTrue)
 }
 
-func TestSetLeadershipWithEncryptionMethodChanged(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestSetLeadershipWithEncryptionMethodChanged(c *C) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Mock time
@@ -536,7 +555,7 @@ func TestSetLeadershipWithEncryptionMethodChanged(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Config with different encrption method.
 	config := &encryption.Config{
 		DataEncryptionMethod: "aes256-ctr",
@@ -548,40 +567,41 @@ func TestSetLeadershipWithEncryptionMethodChanged(t *testing.T) {
 		},
 	}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	go m.StartBackgroundLoop(ctx)
 	// Set leadership
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check encryption method is updated.
 	<-reloadEvent
-	re.NotNil(m.keys.Load())
+	c.Assert(m.keys.Load(), NotNil)
 	currentKeyID, currentKey, err := m.GetCurrentKey()
-	re.NoError(err)
-	re.Equal(encryptionpb.EncryptionMethod_AES256_CTR, currentKey.Method)
-	re.Len(currentKey.Key, 32)
+	c.Assert(err, IsNil)
+	c.Assert(currentKey.Method, Equals, encryptionpb.EncryptionMethod_AES256_CTR)
+	c.Assert(currentKey.Key, HasLen, 32)
 	loadedKeys := m.keys.Load().(*encryptionpb.KeyDictionary)
-	re.Equal(currentKeyID, loadedKeys.CurrentKeyId)
-	re.True(proto.Equal(loadedKeys.Keys[123], keys.Keys[123]))
+	c.Assert(loadedKeys.CurrentKeyId, Equals, currentKeyID)
+	c.Assert(proto.Equal(loadedKeys.Keys[123], keys.Keys[123]), IsTrue)
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(loadedKeys, storedKeys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(loadedKeys, storedKeys), IsTrue)
 }
 
-func TestSetLeadershipWithCurrentKeyExposed(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestSetLeadershipWithCurrentKeyExposed(c *C) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Mock time
@@ -606,7 +626,7 @@ func TestSetLeadershipWithCurrentKeyExposed(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Config with different encrption method.
 	config := &encryption.Config{
 		DataEncryptionMethod: "aes128-ctr",
@@ -618,41 +638,42 @@ func TestSetLeadershipWithCurrentKeyExposed(t *testing.T) {
 		},
 	}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	go m.StartBackgroundLoop(ctx)
 	// Set leadership
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check encryption method is updated.
 	<-reloadEvent
-	re.NotNil(m.keys.Load())
+	c.Assert(m.keys.Load(), NotNil)
 	currentKeyID, currentKey, err := m.GetCurrentKey()
-	re.NoError(err)
-	re.Equal(encryptionpb.EncryptionMethod_AES128_CTR, currentKey.Method)
-	re.Len(currentKey.Key, 16)
-	re.False(currentKey.WasExposed)
+	c.Assert(err, IsNil)
+	c.Assert(currentKey.Method, Equals, encryptionpb.EncryptionMethod_AES128_CTR)
+	c.Assert(currentKey.Key, HasLen, 16)
+	c.Assert(currentKey.WasExposed, IsFalse)
 	loadedKeys := m.keys.Load().(*encryptionpb.KeyDictionary)
-	re.Equal(currentKeyID, loadedKeys.CurrentKeyId)
-	re.True(proto.Equal(loadedKeys.Keys[123], keys.Keys[123]))
+	c.Assert(loadedKeys.CurrentKeyId, Equals, currentKeyID)
+	c.Assert(proto.Equal(loadedKeys.Keys[123], keys.Keys[123]), IsTrue)
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(loadedKeys, storedKeys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(loadedKeys, storedKeys), IsTrue)
 }
 
-func TestSetLeadershipWithCurrentKeyExpired(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestSetLeadershipWithCurrentKeyExpired(c *C) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Mock time
@@ -677,10 +698,10 @@ func TestSetLeadershipWithCurrentKeyExpired(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Config with 100s rotation period.
 	rotationPeriod, err := time.ParseDuration("100s")
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	config := &encryption.Config{
 		DataEncryptionMethod:  "aes128-ctr",
 		DataKeyRotationPeriod: typeutil.NewDuration(rotationPeriod),
@@ -692,43 +713,45 @@ func TestSetLeadershipWithCurrentKeyExpired(t *testing.T) {
 		},
 	}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	go m.StartBackgroundLoop(ctx)
 	// Set leadership
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check encryption method is updated.
 	<-reloadEvent
-	re.NotNil(m.keys.Load())
+	c.Assert(m.keys.Load(), NotNil)
 	currentKeyID, currentKey, err := m.GetCurrentKey()
-	re.NoError(err)
-	re.Equal(encryptionpb.EncryptionMethod_AES128_CTR, currentKey.Method)
-	re.Len(currentKey.Key, 16)
-	re.False(currentKey.WasExposed)
-	re.Equal(uint64(helper.now().Unix()), currentKey.CreationTime)
+	c.Assert(err, IsNil)
+	c.Assert(currentKey.Method, Equals, encryptionpb.EncryptionMethod_AES128_CTR)
+	c.Assert(currentKey.Key, HasLen, 16)
+	c.Assert(currentKey.WasExposed, IsFalse)
+	c.Assert(currentKey.CreationTime, Equals, uint64(helper.now().Unix()))
 	loadedKeys := m.keys.Load().(*encryptionpb.KeyDictionary)
-	re.Equal(currentKeyID, loadedKeys.CurrentKeyId)
-	re.True(proto.Equal(loadedKeys.Keys[123], keys.Keys[123]))
+	c.Assert(loadedKeys.CurrentKeyId, Equals, currentKeyID)
+	c.Assert(proto.Equal(loadedKeys.Keys[123], keys.Keys[123]), IsTrue)
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(loadedKeys, storedKeys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(loadedKeys, storedKeys), IsTrue)
 }
 
-func TestSetLeadershipWithMasterKeyChanged(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestSetLeadershipWithMasterKeyChanged(c *C) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	keyFile2 := newTestKeyFile(t, re, testMasterKey2)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	keyFile2, cleanupKeyFile2 := newTestKeyFile(c, testMasterKey2)
+	defer cleanupKeyFile2()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Mock time
@@ -753,7 +776,7 @@ func TestSetLeadershipWithMasterKeyChanged(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Config with a different master key.
 	config := &encryption.Config{
 		DataEncryptionMethod: "aes128-ctr",
@@ -765,34 +788,35 @@ func TestSetLeadershipWithMasterKeyChanged(t *testing.T) {
 		},
 	}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	go m.StartBackgroundLoop(ctx)
 	// Set leadership
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check keys are the same, but encrypted with the new master key.
 	<-reloadEvent
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(storedKeys, keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(storedKeys, keys), IsTrue)
 	meta, err := config.GetMasterKeyMeta()
-	re.NoError(err)
-	checkMasterKeyMeta(re, resp.Kvs[0].Value, meta, nil)
+	c.Assert(err, IsNil)
+	checkMasterKeyMeta(c, resp.Kvs[0].Value, meta, nil)
 }
 
-func TestSetLeadershipMasterKeyWithCiphertextKey(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestSetLeadershipMasterKeyWithCiphertextKey(c *C) {
 	// Initialize.
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Mock time
@@ -807,10 +831,10 @@ func TestSetLeadershipMasterKeyWithCiphertextKey(t *testing.T) {
 	) (*encryption.MasterKey, error) {
 		if newMasterKeyCalled < 2 {
 			// initial load and save. no ciphertextKey
-			re.Nil(ciphertext)
+			c.Assert(ciphertext, IsNil)
 		} else if newMasterKeyCalled == 2 {
 			// called by loadKeys after saveKeys
-			re.Equal(ciphertext, outputCiphertextKey)
+			c.Assert(bytes.Equal(ciphertext, outputCiphertextKey), IsTrue)
 		}
 		newMasterKeyCalled += 1
 		return encryption.NewCustomMasterKeyForTest(outputMasterKey, outputCiphertextKey), nil
@@ -829,7 +853,7 @@ func TestSetLeadershipMasterKeyWithCiphertextKey(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Config with a different master key.
 	config := &encryption.Config{
 		DataEncryptionMethod: "aes128-ctr",
@@ -841,36 +865,37 @@ func TestSetLeadershipMasterKeyWithCiphertextKey(t *testing.T) {
 		},
 	}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	// Set leadership
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
-	re.Equal(3, newMasterKeyCalled)
+	c.Assert(err, IsNil)
+	c.Assert(newMasterKeyCalled, Equals, 3)
 	// Check if keys are the same
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(storedKeys, keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(storedKeys, keys), IsTrue)
 	meta, err := config.GetMasterKeyMeta()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check ciphertext key is stored with keys.
-	checkMasterKeyMeta(re, resp.Kvs[0].Value, meta, outputCiphertextKey)
+	checkMasterKeyMeta(c, resp.Kvs[0].Value, meta, outputCiphertextKey)
 }
 
-func TestSetLeadershipWithEncryptionDisabling(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestSetLeadershipWithEncryptionDisabling(c *C) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Listen on watcher event
@@ -893,40 +918,41 @@ func TestSetLeadershipWithEncryptionDisabling(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Use default config.
 	config := &encryption.Config{}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	go m.StartBackgroundLoop(ctx)
 	// Set leadership
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check encryption is disabled
 	<-reloadEvent
-	expectedKeys := typeutil.DeepClone(keys, core.KeyDictionaryFactory)
+	expectedKeys := proto.Clone(keys).(*encryptionpb.KeyDictionary)
 	expectedKeys.CurrentKeyId = disableEncryptionKeyID
 	expectedKeys.Keys[123].WasExposed = true
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), expectedKeys))
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), expectedKeys), IsTrue)
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(storedKeys, expectedKeys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(storedKeys, expectedKeys), IsTrue)
 }
 
-func TestKeyRotation(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestKeyRotation(c *C) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Mock time
@@ -960,10 +986,10 @@ func TestKeyRotation(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Config with 100s rotation period.
 	rotationPeriod, err := time.ParseDuration("100s")
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	config := &encryption.Config{
 		DataEncryptionMethod:  "aes128-ctr",
 		DataKeyRotationPeriod: typeutil.NewDuration(rotationPeriod),
@@ -975,22 +1001,22 @@ func TestKeyRotation(t *testing.T) {
 		},
 	}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	go m.StartBackgroundLoop(ctx)
 	// Set leadership
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check keys
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(storedKeys, keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(storedKeys, keys), IsTrue)
 	// Advance time and trigger ticker
 	atomic.AddInt64(&mockNow, int64(101))
 	mockTick <- time.Unix(atomic.LoadInt64(&mockNow), 0)
@@ -998,31 +1024,32 @@ func TestKeyRotation(t *testing.T) {
 	<-reloadEvent
 	// Check key is rotated.
 	currentKeyID, currentKey, err := m.GetCurrentKey()
-	re.NoError(err)
-	re.NotEqual(uint64(123), currentKeyID)
-	re.Equal(encryptionpb.EncryptionMethod_AES128_CTR, currentKey.Method)
-	re.Len(currentKey.Key, 16)
-	re.Equal(uint64(mockNow), currentKey.CreationTime)
-	re.False(currentKey.WasExposed)
+	c.Assert(err, IsNil)
+	c.Assert(currentKeyID, Not(Equals), uint64(123))
+	c.Assert(currentKey.Method, Equals, encryptionpb.EncryptionMethod_AES128_CTR)
+	c.Assert(currentKey.Key, HasLen, 16)
+	c.Assert(currentKey.CreationTime, Equals, uint64(mockNow))
+	c.Assert(currentKey.WasExposed, IsFalse)
 	loadedKeys := m.keys.Load().(*encryptionpb.KeyDictionary)
-	re.Equal(currentKeyID, loadedKeys.CurrentKeyId)
-	re.True(proto.Equal(loadedKeys.Keys[123], keys.Keys[123]))
-	re.True(proto.Equal(loadedKeys.Keys[currentKeyID], currentKey))
+	c.Assert(loadedKeys.CurrentKeyId, Equals, currentKeyID)
+	c.Assert(proto.Equal(loadedKeys.Keys[123], keys.Keys[123]), IsTrue)
+	c.Assert(proto.Equal(loadedKeys.Keys[currentKeyID], currentKey), IsTrue)
 	resp, err = etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err = extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(storedKeys, loadedKeys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(storedKeys, loadedKeys), IsTrue)
 }
 
-func TestKeyRotationConflict(t *testing.T) {
-	re := require.New(t)
+func (s *testKeyManagerSuite) TestKeyRotationConflict(c *C) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t, re)
-	keyFile := newTestKeyFile(t, re)
-	leadership := newTestLeader(re, client)
+	client, cleanupEtcd := newTestEtcd(c)
+	defer cleanupEtcd()
+	keyFile, cleanupKeyFile := newTestKeyFile(c)
+	defer cleanupKeyFile()
+	leadership := newTestLeader(c, client)
 	// Setup helper
 	helper := defaultKeyManagerHelper()
 	// Mock time
@@ -1066,10 +1093,10 @@ func TestKeyRotationConflict(t *testing.T) {
 		},
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Config with 100s rotation period.
 	rotationPeriod, err := time.ParseDuration("100s")
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	config := &encryption.Config{
 		DataEncryptionMethod:  "aes128-ctr",
 		DataKeyRotationPeriod: typeutil.NewDuration(rotationPeriod),
@@ -1081,22 +1108,22 @@ func TestKeyRotationConflict(t *testing.T) {
 		},
 	}
 	err = config.Adjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Create the key manager.
 	m, err := newKeyManagerImpl(client, config, helper)
-	re.NoError(err)
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	go m.StartBackgroundLoop(ctx)
 	// Set leadership
 	err = m.SetLeadership(leadership)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// Check keys
-	re.True(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys))
+	c.Assert(proto.Equal(m.keys.Load().(*encryptionpb.KeyDictionary), keys), IsTrue)
 	resp, err := etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err := extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(storedKeys, keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(storedKeys, keys), IsTrue)
 	// Invalidate leader after leader check.
 	atomic.StoreInt32(&shouldResetLeader, 1)
 	atomic.StoreInt32(&shouldListenSaveKeysFailure, 1)
@@ -1107,10 +1134,10 @@ func TestKeyRotationConflict(t *testing.T) {
 	<-saveKeysFailureEvent
 	// Check keys is unchanged.
 	resp, err = etcdutil.EtcdKVGet(client, EncryptionKeysPath)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	storedKeys, err = extractKeysFromKV(resp.Kvs[0], defaultKeyManagerHelper())
-	re.NoError(err)
-	re.True(proto.Equal(storedKeys, keys))
+	c.Assert(err, IsNil)
+	c.Assert(proto.Equal(storedKeys, keys), IsTrue)
 }
 
 func newMasterKey(keyFile string) *encryptionpb.MasterKey {

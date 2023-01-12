@@ -25,7 +25,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/spf13/cobra"
-	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/apiutil"
 	"go.etcd.io/etcd/pkg/transport"
 )
 
@@ -58,20 +58,22 @@ func InitHTTPSClient(caPath, certPath, keyPath string) error {
 }
 
 type bodyOption struct {
-	body io.Reader
+	contentType string
+	body        io.Reader
 }
 
 // BodyOption sets the type and content of the body
 type BodyOption func(*bodyOption)
 
 // WithBody returns a BodyOption
-func WithBody(body io.Reader) BodyOption {
+func WithBody(contentType string, body io.Reader) BodyOption {
 	return func(bo *bodyOption) {
+		bo.contentType = contentType
 		bo.body = body
 	}
 }
 
-func doRequest(cmd *cobra.Command, prefix string, method string, customHeader http.Header,
+func doRequest(cmd *cobra.Command, prefix string, method string,
 	opts ...BodyOption) (string, error) {
 	b := &bodyOption{}
 	for _, o := range opts {
@@ -81,12 +83,12 @@ func doRequest(cmd *cobra.Command, prefix string, method string, customHeader ht
 
 	endpoints := getEndpoints(cmd)
 	err := tryURLs(cmd, endpoints, func(endpoint string) error {
-		return do(endpoint, prefix, method, &resp, customHeader, b)
+		return doGet(endpoint, prefix, method, &resp, b)
 	})
 	return resp, err
 }
 
-func doRequestSingleEndpoint(cmd *cobra.Command, endpoint, prefix, method string, customHeader http.Header,
+func doRequestSingleEndpoint(cmd *cobra.Command, endpoint, prefix, method string,
 	opts ...BodyOption) (string, error) {
 	b := &bodyOption{}
 	for _, o := range opts {
@@ -95,7 +97,7 @@ func doRequestSingleEndpoint(cmd *cobra.Command, endpoint, prefix, method string
 	var resp string
 
 	err := requestURL(cmd, endpoint, func(endpoint string) error {
-		return do(endpoint, prefix, method, &resp, customHeader, b)
+		return doGet(endpoint, prefix, method, &resp, b)
 	})
 	return resp, err
 }
@@ -162,7 +164,13 @@ func getEndpoints(cmd *cobra.Command) []string {
 		cmd.Println("get pd address failed, should set flag with '-u'")
 		os.Exit(1)
 	}
-	return strings.Split(addrs, ",")
+	eps := strings.Split(addrs, ",")
+	for i, ep := range eps {
+		if j := strings.Index(ep, "//"); j == -1 {
+			eps[i] = "//" + ep
+		}
+	}
+	return eps
 }
 
 func postJSON(cmd *cobra.Command, prefix string, input map[string]interface{}) {
@@ -198,8 +206,8 @@ func postJSON(cmd *cobra.Command, prefix string, input map[string]interface{}) {
 	cmd.Println("Success!")
 }
 
-// do send a request to server. Default is Get.
-func do(endpoint, prefix, method string, resp *string, customHeader http.Header, b *bodyOption) error {
+// doGet send a get request to server.
+func doGet(endpoint, prefix, method string, resp *string, b *bodyOption) error {
 	var err error
 	url := endpoint + "/" + prefix
 	if method == "" {
@@ -211,11 +219,8 @@ func do(endpoint, prefix, method string, resp *string, customHeader http.Header,
 	if err != nil {
 		return err
 	}
-
-	for key, values := range customHeader {
-		for _, v := range values {
-			req.Header.Add(key, v)
-		}
+	if b.contentType != "" {
+		req.Header.Set("Content-Type", b.contentType)
 	}
 	// the resp would be returned by the outer function
 	*resp, err = dial(req)
@@ -226,9 +231,6 @@ func do(endpoint, prefix, method string, resp *string, customHeader http.Header,
 }
 
 func checkURL(endpoint string) (string, error) {
-	if j := strings.Index(endpoint, "//"); j == -1 {
-		endpoint = "//" + endpoint
-	}
 	var u *url.URL
 	u, err := url.Parse(endpoint)
 	if err != nil {

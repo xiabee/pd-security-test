@@ -17,69 +17,63 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"testing"
+	"reflect"
 	"time"
 
-	"github.com/stretchr/testify/suite"
+	. "github.com/pingcap/check"
 	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/tikv/pd/pkg/storage/kv"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/kv"
 	_ "github.com/tikv/pd/server/schedulers"
-	"github.com/tikv/pd/server/storage"
 )
 
-type hotStatusTestSuite struct {
-	suite.Suite
+var _ = Suite(&testHotStatusSuite{})
+
+type testHotStatusSuite struct {
 	svr       *server.Server
 	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
-func TestHotStatusTestSuite(t *testing.T) {
-	suite.Run(t, new(hotStatusTestSuite))
+func (s *testHotStatusSuite) SetUpSuite(c *C) {
+	s.svr, s.cleanup = mustNewServer(c)
+	mustWaitLeader(c, []*server.Server{s.svr})
+
+	addr := s.svr.GetAddr()
+	s.urlPrefix = fmt.Sprintf("%s%s/api/v1/hotspot", addr, apiPrefix)
+
+	mustBootstrapCluster(c, s.svr)
 }
 
-func (suite *hotStatusTestSuite) SetupSuite() {
-	re := suite.Require()
-	suite.svr, suite.cleanup = mustNewServer(re)
-	server.MustWaitLeader(re, []*server.Server{suite.svr})
-
-	addr := suite.svr.GetAddr()
-	suite.urlPrefix = fmt.Sprintf("%s%s/api/v1/hotspot", addr, apiPrefix)
-
-	mustBootstrapCluster(re, suite.svr)
+func (s *testHotStatusSuite) TearDownSuite(c *C) {
+	s.cleanup()
 }
 
-func (suite *hotStatusTestSuite) TearDownSuite() {
-	suite.cleanup()
-}
-
-func (suite *hotStatusTestSuite) TestGetHotStore() {
+func (s testHotStatusSuite) TestGetHotStore(c *C) {
 	stat := HotStoreStats{}
-	err := tu.ReadGetJSON(suite.Require(), testDialClient, suite.urlPrefix+"/stores", &stat)
-	suite.NoError(err)
+	err := readJSON(testDialClient, s.urlPrefix+"/stores", &stat)
+	c.Assert(err, IsNil)
 }
 
-func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsBasic() {
+func (s testHotStatusSuite) TestGetHistoryHotRegionsBasic(c *C) {
 	request := HistoryHotRegionsRequest{
 		StartTime: 0,
 		EndTime:   time.Now().AddDate(0, 2, 0).UnixNano() / int64(time.Millisecond),
 	}
 	data, err := json.Marshal(request)
-	suite.NoError(err)
-	re := suite.Require()
-	err = tu.CheckGetJSON(testDialClient, suite.urlPrefix+"/regions/history", data, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = getJSON(testDialClient, s.urlPrefix+"/regions/history", data)
+	c.Assert(err, IsNil)
 	errRequest := "{\"start_time\":\"err\"}"
-	err = tu.CheckGetJSON(testDialClient, suite.urlPrefix+"/regions/history", []byte(errRequest), tu.StatusNotOK(re))
-	suite.NoError(err)
+	err = getJSON(testDialClient, s.urlPrefix+"/regions/history", []byte(errRequest))
+	c.Assert(err, NotNil)
 }
 
-func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsTimeRange() {
-	hotRegionStorage := suite.svr.GetHistoryHotRegionStorage()
+func (s testHotStatusSuite) TestGetHistoryHotRegionsTimeRange(c *C) {
+	storage := s.svr.GetHistoryHotRegionStorage()
 	now := time.Now()
-	hotRegions := []*storage.HistoryHotRegion{
+	hotRegions := []*core.HistoryHotRegion{
 		{
 			RegionID:   1,
 			UpdateTime: now.UnixNano() / int64(time.Millisecond),
@@ -94,26 +88,26 @@ func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsTimeRange() {
 		EndTime:   now.Add(10*time.Second).UnixNano() / int64(time.Millisecond),
 	}
 	check := func(res []byte, statusCode int) {
-		suite.Equal(200, statusCode)
-		historyHotRegions := &storage.HistoryHotRegions{}
+		c.Assert(statusCode, Equals, 200)
+		historyHotRegions := &core.HistoryHotRegions{}
 		json.Unmarshal(res, historyHotRegions)
 		for _, region := range historyHotRegions.HistoryHotRegion {
-			suite.GreaterOrEqual(region.UpdateTime, request.StartTime)
-			suite.LessOrEqual(region.UpdateTime, request.EndTime)
+			c.Assert(region.UpdateTime, GreaterEqual, request.StartTime)
+			c.Assert(region.UpdateTime, LessEqual, request.EndTime)
 		}
 	}
-	err := writeToDB(hotRegionStorage.LevelDBKV, hotRegions)
-	suite.NoError(err)
+	err := writeToDB(storage.LeveldbKV, hotRegions)
+	c.Assert(err, IsNil)
 	data, err := json.Marshal(request)
-	suite.NoError(err)
-	err = tu.CheckGetJSON(testDialClient, suite.urlPrefix+"/regions/history", data, check)
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = getJSON(testDialClient, s.urlPrefix+"/regions/history", data, check)
+	c.Assert(err, IsNil)
 }
 
-func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsIDAndTypes() {
-	hotRegionStorage := suite.svr.GetHistoryHotRegionStorage()
+func (s testHotStatusSuite) TestGetHistoryHotRegionsIDAndTypes(c *C) {
+	storage := s.svr.GetHistoryHotRegionStorage()
 	now := time.Now()
-	hotRegions := []*storage.HistoryHotRegion{
+	hotRegions := []*core.HistoryHotRegion{
 		{
 			RegionID:      1,
 			StoreID:       1,
@@ -179,24 +173,24 @@ func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsIDAndTypes() {
 		EndTime:        now.Add(10*time.Minute).UnixNano() / int64(time.Millisecond),
 	}
 	check := func(res []byte, statusCode int) {
-		suite.Equal(200, statusCode)
-		historyHotRegions := &storage.HistoryHotRegions{}
+		c.Assert(statusCode, Equals, 200)
+		historyHotRegions := &core.HistoryHotRegions{}
 		json.Unmarshal(res, historyHotRegions)
-		suite.Len(historyHotRegions.HistoryHotRegion, 1)
-		suite.Equal(hotRegions[0], historyHotRegions.HistoryHotRegion[0])
+		c.Assert(historyHotRegions.HistoryHotRegion, HasLen, 1)
+		c.Assert(reflect.DeepEqual(historyHotRegions.HistoryHotRegion[0], hotRegions[0]), IsTrue)
 	}
-	err := writeToDB(hotRegionStorage.LevelDBKV, hotRegions)
-	suite.NoError(err)
+	err := writeToDB(storage.LeveldbKV, hotRegions)
+	c.Assert(err, IsNil)
 	data, err := json.Marshal(request)
-	suite.NoError(err)
-	err = tu.CheckGetJSON(testDialClient, suite.urlPrefix+"/regions/history", data, check)
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = getJSON(testDialClient, s.urlPrefix+"/regions/history", data, check)
+	c.Assert(err, IsNil)
 }
 
-func writeToDB(kv *kv.LevelDBKV, hotRegions []*storage.HistoryHotRegion) error {
+func writeToDB(kv *kv.LeveldbKV, hotRegions []*core.HistoryHotRegion) error {
 	batch := new(leveldb.Batch)
 	for _, region := range hotRegions {
-		key := storage.HotRegionStorePath(region.HotRegionType, region.UpdateTime, region.RegionID)
+		key := core.HotRegionStorePath(region.HotRegionType, region.UpdateTime, region.RegionID)
 		value, err := json.Marshal(region)
 		if err != nil {
 			return err

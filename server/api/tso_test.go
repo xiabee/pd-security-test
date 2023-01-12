@@ -16,50 +16,44 @@ package api
 
 import (
 	"fmt"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/suite"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	. "github.com/pingcap/check"
+	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 )
 
-type tsoTestSuite struct {
-	suite.Suite
+var _ = Suite(&testTsoSuite{})
+
+type testTsoSuite struct {
 	svr       *server.Server
 	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
-func TestTSOTestSuite(t *testing.T) {
-	suite.Run(t, new(tsoTestSuite))
-}
-
-func (suite *tsoTestSuite) SetupSuite() {
-	re := suite.Require()
-	suite.svr, suite.cleanup = mustNewServer(re, func(cfg *config.Config) {
+func (s *testTsoSuite) SetUpSuite(c *C) {
+	s.svr, s.cleanup = mustNewServer(c, func(cfg *config.Config) {
 		cfg.EnableLocalTSO = true
 		cfg.Labels[config.ZoneLabel] = "dc-1"
 	})
-	server.MustWaitLeader(re, []*server.Server{suite.svr})
+	mustWaitLeader(c, []*server.Server{s.svr})
 
-	addr := suite.svr.GetAddr()
-	suite.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
+	addr := s.svr.GetAddr()
+	s.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
 }
 
-func (suite *tsoTestSuite) TearDownSuite() {
-	suite.cleanup()
+func (s *testTsoSuite) TearDownSuite(c *C) {
+	s.cleanup()
 }
 
-func (suite *tsoTestSuite) TestTransferAllocator() {
-	re := suite.Require()
-	tu.Eventually(re, func() bool {
-		suite.svr.GetTSOAllocatorManager().ClusterDCLocationChecker()
-		_, err := suite.svr.GetTSOAllocatorManager().GetAllocator("dc-1")
+func (s *testTsoSuite) TestTransferAllocator(c *C) {
+	testutil.WaitUntil(c, func(c *C) bool {
+		s.svr.GetTSOAllocatorManager().ClusterDCLocationChecker()
+		_, err := s.svr.GetTSOAllocatorManager().GetAllocator("dc-1")
 		return err == nil
-	}, tu.WithWaitFor(15*time.Second), tu.WithTickInterval(3*time.Second))
-	addr := suite.urlPrefix + "/tso/allocator/transfer/pd1?dcLocation=dc-1"
-	err := tu.CheckPostJSON(testDialClient, addr, nil, tu.StatusOK(re))
-	suite.NoError(err)
+	}, testutil.WithRetryTimes(5), testutil.WithSleepInterval(3*time.Second))
+	addr := s.urlPrefix + "/tso/allocator/transfer/pd1?dcLocation=dc-1"
+	err := postJSON(testDialClient, addr, nil)
+	c.Assert(err, IsNil)
 }

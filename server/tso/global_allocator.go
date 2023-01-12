@@ -21,15 +21,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/election"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/utils/tsoutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/tsoutil"
+	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server/election"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
@@ -44,11 +43,9 @@ type Allocator interface {
 	IsInitialize() bool
 	// UpdateTSO is used to update the TSO in memory and the time window in etcd.
 	UpdateTSO() error
-	// SetTSO sets the physical part with given TSO. It's mainly used for BR restore.
-	// Cannot set the TSO smaller than now in any case.
-	// if ignoreSmaller=true, if input ts is smaller than current, ignore silently, else return error
-	// if skipUpperBoundCheck=true, skip tso upper bound check
-	SetTSO(tso uint64, ignoreSmaller, skipUpperBoundCheck bool) error
+	// SetTSO sets the physical part with given TSO. It's mainly used for BR restore
+	// and can not forcibly set the TSO smaller than now.
+	SetTSO(tso uint64) error
 	// GenerateTSO is used to generate a given number of TSOs.
 	// Make sure you have initialized the TSO allocator before calling.
 	GenerateTSO(count uint32) (pdpb.Timestamp, error)
@@ -141,20 +138,19 @@ func (gta *GlobalTSOAllocator) UpdateTSO() error {
 }
 
 // SetTSO sets the physical part with given TSO.
-func (gta *GlobalTSOAllocator) SetTSO(tso uint64, ignoreSmaller, skipUpperBoundCheck bool) error {
-	return gta.timestampOracle.resetUserTimestampInner(gta.leadership, tso, ignoreSmaller, skipUpperBoundCheck)
+func (gta *GlobalTSOAllocator) SetTSO(tso uint64) error {
+	return gta.timestampOracle.resetUserTimestamp(gta.leadership, tso, false)
 }
 
 // GenerateTSO is used to generate the given number of TSOs.
 // Make sure you have initialized the TSO allocator before calling this method.
 // Basically, there are two ways to generate a Global TSO:
-//  1. The old way to generate a normal TSO from memory directly, which makes the TSO service node become single point.
-//  2. The new way to generate a Global TSO by synchronizing with all other Local TSO Allocators.
-//
+//   1. The old way to generate a normal TSO from memory directly, which makes the TSO service node become single point.
+//   2. The new way to generate a Global TSO by synchronizing with all other Local TSO Allocators.
 // And for the new way, there are two different strategies:
-//  1. Collect the max Local TSO from all Local TSO Allocator leaders and write it back to them as MaxTS.
-//  2. Estimate a MaxTS and try to write it to all Local TSO Allocator leaders directly to reduce the RTT.
-//     During the process, if the estimated MaxTS is not accurate, it will fallback to the collecting way.
+//   1. Collect the max Local TSO from all Local TSO Allocator leaders and write it back to them as MaxTS.
+//   2. Estimate a MaxTS and try to write it to all Local TSO Allocator leaders directly to reduce the RTT.
+//      During the process, if the estimated MaxTS is not accurate, it will fallback to the collecting way.
 func (gta *GlobalTSOAllocator) GenerateTSO(count uint32) (pdpb.Timestamp, error) {
 	if !gta.leadership.Check() {
 		tsoCounter.WithLabelValues("not_leader", gta.timestampOracle.dcLocation).Inc()
@@ -351,10 +347,8 @@ func (gta *GlobalTSOAllocator) SyncMaxTS(
 					log.Error("sync max ts rpc failed, got an error", zap.String("local-allocator-leader-url", leaderConn.Target()), errs.ZapError(err))
 					return
 				}
-				if syncMaxTSResp.rpcRes.GetHeader().GetError() != nil {
-					log.Error("sync max ts rpc failed, got an error", zap.String("local-allocator-leader-url", leaderConn.Target()),
-						errs.ZapError(errors.Errorf("%s", syncMaxTSResp.rpcRes.GetHeader().GetError().String())))
-					return
+				if syncMaxTSResp == nil {
+					log.Error("sync max ts rpc failed, got a nil response", zap.String("local-allocator-leader-url", leaderConn.Target()))
 				}
 			}(ctx, leaderConn, respCh)
 		}

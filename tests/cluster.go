@@ -22,19 +22,18 @@ import (
 	"time"
 
 	"github.com/coreos/go-semver/semver"
+	"github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/autoscaling"
 	"github.com/tikv/pd/pkg/dashboard"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/swaggerserver"
-	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
-	"github.com/tikv/pd/server/apiv2"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
@@ -82,7 +81,7 @@ func NewTestServer(ctx context.Context, cfg *config.Config) (*TestServer, error)
 	if err != nil {
 		return nil, err
 	}
-	serviceBuilders := []server.HandlerBuilder{api.NewHandler, apiv2.NewV2Handler, swaggerserver.NewHandler, autoscaling.NewHandler}
+	serviceBuilders := []server.HandlerBuilder{api.NewHandler, swaggerserver.NewHandler, autoscaling.NewHandler}
 	serviceBuilders = append(serviceBuilders, dashboard.GetServiceBuilders()...)
 	svr, err := server.CreateServer(ctx, cfg, serviceBuilders...)
 	if err != nil {
@@ -155,11 +154,6 @@ func (s *TestServer) GetConfig() *config.Config {
 	s.RLock()
 	defer s.RUnlock()
 	return s.server.GetConfig()
-}
-
-// SetEnableLocalTSO sets the enable-local-tso flag of the TestServer.
-func (s *TestServer) SetEnableLocalTSO(enableLocalTSO bool) {
-	s.server.SetEnableLocalTSO(enableLocalTSO)
 }
 
 // GetPersistOptions returns the current TestServer's schedule option.
@@ -265,9 +259,9 @@ func (s *TestServer) GetEtcdLeader() (string, error) {
 	s.RLock()
 	defer s.RUnlock()
 	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: s.server.ClusterID()}}
-	members, _ := s.grpcServer.GetMembers(context.TODO(), req)
-	if members.Header.GetError() != nil {
-		return "", errors.WithStack(errors.New(members.Header.GetError().String()))
+	members, err := s.grpcServer.GetMembers(context.TODO(), req)
+	if err != nil {
+		return "", errors.WithStack(err)
 	}
 	return members.GetEtcdLeader().GetName(), nil
 }
@@ -280,9 +274,6 @@ func (s *TestServer) GetEtcdLeaderID() (uint64, error) {
 	members, err := s.grpcServer.GetMembers(context.TODO(), req)
 	if err != nil {
 		return 0, errors.WithStack(err)
-	}
-	if members.GetHeader().GetError() != nil {
-		return 0, errors.WithStack(errors.New(members.GetHeader().GetError().String()))
 	}
 	return members.GetEtcdLeader().GetMemberId(), nil
 }
@@ -370,15 +361,12 @@ func (s *TestServer) GetStoreRegions(storeID uint64) []*core.RegionInfo {
 func (s *TestServer) BootstrapCluster() error {
 	bootstrapReq := &pdpb.BootstrapRequest{
 		Header: &pdpb.RequestHeader{ClusterId: s.GetClusterID()},
-		Store:  &metapb.Store{Id: 1, Address: "mock://1", LastHeartbeat: time.Now().UnixNano()},
+		Store:  &metapb.Store{Id: 1, Address: "mock://1"},
 		Region: &metapb.Region{Id: 2, Peers: []*metapb.Peer{{Id: 3, StoreId: 1, Role: metapb.PeerRole_Voter}}},
 	}
-	resp, err := s.grpcServer.Bootstrap(context.Background(), bootstrapReq)
+	_, err := s.grpcServer.Bootstrap(context.Background(), bootstrapReq)
 	if err != nil {
 		return err
-	}
-	if resp.GetHeader().GetError() != nil {
-		return errors.New(resp.GetHeader().GetError().String())
 	}
 	return nil
 }
@@ -615,7 +603,7 @@ func (c *TestCluster) WaitAllocatorLeader(dcLocation string, ops ...WaitOption) 
 }
 
 // WaitAllLeaders will block and wait for the election of PD leader and all Local TSO Allocator leaders.
-func (c *TestCluster) WaitAllLeaders(re *require.Assertions, dcLocations map[string]string) {
+func (c *TestCluster) WaitAllLeaders(testC *check.C, dcLocations map[string]string) {
 	c.WaitLeader()
 	c.CheckClusterDCLocation()
 	// Wait for each DC's Local TSO Allocator leader
@@ -623,8 +611,9 @@ func (c *TestCluster) WaitAllLeaders(re *require.Assertions, dcLocations map[str
 	for _, dcLocation := range dcLocations {
 		wg.Add(1)
 		go func(dc string) {
-			testutil.Eventually(re, func() bool {
-				return c.WaitAllocatorLeader(dc) != ""
+			testutil.WaitUntil(testC, func(testC *check.C) bool {
+				leaderName := c.WaitAllocatorLeader(dc)
+				return leaderName != ""
 			})
 			wg.Done()
 		}(dcLocation)

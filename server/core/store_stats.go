@@ -15,23 +15,33 @@
 package core
 
 import (
+	"math"
+	"sync"
+
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/tikv/pd/pkg/movingaverage"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 )
 
 type storeStats struct {
-	mu       syncutil.RWMutex
+	mu       sync.RWMutex
 	rawStats *pdpb.StoreStats
 
 	// avgAvailable is used to make available smooth, aka no sudden changes.
 	avgAvailable *movingaverage.HMA
+	// Following two fields are used to trace the deviation when available
+	// records' deviation range to make scheduling able to converge.
+	// Here `MaxFilter` is used to make the scheduling more conservative, and
+	// `HMA` is used to make it smooth.
+	maxAvailableDeviation    *movingaverage.MaxFilter
+	avgMaxAvailableDeviation *movingaverage.HMA
 }
 
 func newStoreStats() *storeStats {
 	return &storeStats{
-		rawStats:     &pdpb.StoreStats{},
-		avgAvailable: movingaverage.NewHMA(60), // take 10 minutes sample under 10s heartbeat rate
+		rawStats:                 &pdpb.StoreStats{},
+		avgAvailable:             movingaverage.NewHMA(60),        // take 10 minutes sample under 10s heartbeat rate
+		maxAvailableDeviation:    movingaverage.NewMaxFilter(120), // take 20 minutes sample under 10s heartbeat rate
+		avgMaxAvailableDeviation: movingaverage.NewHMA(60),        // take 10 minutes sample under 10s heartbeat rate
 	}
 }
 
@@ -43,7 +53,11 @@ func (ss *storeStats) updateRawStats(rawStats *pdpb.StoreStats) {
 	if ss.avgAvailable == nil {
 		return
 	}
+
 	ss.avgAvailable.Add(float64(rawStats.GetAvailable()))
+	deviation := math.Abs(float64(rawStats.GetAvailable()) - ss.avgAvailable.Get())
+	ss.maxAvailableDeviation.Add(deviation)
+	ss.avgMaxAvailableDeviation.Add(ss.maxAvailableDeviation.Get())
 }
 
 // GetStoreStats returns the statistics information of the store.
@@ -51,16 +65,6 @@ func (ss *storeStats) GetStoreStats() *pdpb.StoreStats {
 	ss.mu.RLock()
 	defer ss.mu.RUnlock()
 	return ss.rawStats
-}
-
-// CloneStoreStats returns the statistics information cloned from the store.
-func (ss *storeStats) CloneStoreStats() *pdpb.StoreStats {
-	ss.mu.RLock()
-	b, _ := ss.rawStats.Marshal()
-	ss.mu.RUnlock()
-	stats := &pdpb.StoreStats{}
-	stats.Unmarshal(b)
-	return stats
 }
 
 // GetCapacity returns the capacity size of the store.
@@ -141,6 +145,16 @@ func (ss *storeStats) GetAvgAvailable() uint64 {
 		return ss.rawStats.Available
 	}
 	return climp0(ss.avgAvailable.Get())
+}
+
+// GetAvailableDeviation returns approximate magnitude of available in the recent period.
+func (ss *storeStats) GetAvailableDeviation() uint64 {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	if ss.avgMaxAvailableDeviation == nil {
+		return 0
+	}
+	return climp0(ss.avgMaxAvailableDeviation.Get())
 }
 
 func climp0(v float64) uint64 {

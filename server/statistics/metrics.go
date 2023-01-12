@@ -170,14 +170,6 @@ var (
 			Name:      "flow_queue_status",
 			Help:      "Status of the hotspot flow queue.",
 		}, []string{"type"})
-
-	hotPeerSummary = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "scheduler",
-			Name:      "hot_peers_summary",
-			Help:      "Hot peers summary for each store",
-		}, []string{"type", "store"})
 )
 
 var (
@@ -204,5 +196,4 @@ func init() {
 	prometheus.MustRegister(storeHeartbeatIntervalHist)
 	prometheus.MustRegister(regionAbnormalPeerDuration)
 	prometheus.MustRegister(hotCacheFlowQueueStatusGauge)
-	prometheus.MustRegister(hotPeerSummary)
 }

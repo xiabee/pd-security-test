@@ -17,9 +17,8 @@ package checker
 import (
 	"context"
 	"encoding/hex"
-	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/schedule/labeler"
@@ -27,18 +26,37 @@ import (
 	"github.com/tikv/pd/server/schedule/placement"
 )
 
-func TestSplit(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testSplitCheckerSuite{})
+
+type testSplitCheckerSuite struct {
+	cluster     *mockcluster.Cluster
+	ruleManager *placement.RuleManager
+	labeler     *labeler.RegionLabeler
+	sc          *SplitChecker
+	ctx         context.Context
+	cancel      context.CancelFunc
+}
+
+func (s *testSplitCheckerSuite) SetUpSuite(c *C) {
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+}
+
+func (s *testSplitCheckerSuite) TearDownTest(c *C) {
+	s.cancel()
+}
+
+func (s *testSplitCheckerSuite) SetUpTest(c *C) {
 	cfg := config.NewTestOptions()
 	cfg.GetReplicationConfig().EnablePlacementRules = true
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cluster := mockcluster.NewCluster(ctx, cfg)
-	ruleManager := cluster.RuleManager
-	regionLabeler := cluster.RegionLabeler
-	sc := NewSplitChecker(cluster, ruleManager, regionLabeler)
-	cluster.AddLeaderStore(1, 1)
-	ruleManager.SetRule(&placement.Rule{
+	s.cluster = mockcluster.NewCluster(s.ctx, cfg)
+	s.ruleManager = s.cluster.RuleManager
+	s.labeler = s.cluster.RegionLabeler
+	s.sc = NewSplitChecker(s.cluster, s.ruleManager, s.labeler)
+}
+
+func (s *testSplitCheckerSuite) TestSplit(c *C) {
+	s.cluster.AddLeaderStore(1, 1)
+	s.ruleManager.SetRule(&placement.Rule{
 		GroupID:     "test",
 		ID:          "test",
 		StartKeyHex: "aa",
@@ -46,25 +64,25 @@ func TestSplit(t *testing.T) {
 		Role:        placement.Voter,
 		Count:       1,
 	})
-	cluster.AddLeaderRegionWithRange(1, "", "", 1)
-	op := sc.Check(cluster.GetRegion(1))
-	re.NotNil(op)
-	re.Equal(1, op.Len())
+	s.cluster.AddLeaderRegionWithRange(1, "", "", 1)
+	op := s.sc.Check(s.cluster.GetRegion(1))
+	c.Assert(op, NotNil)
+	c.Assert(op.Len(), Equals, 1)
 	splitKeys := op.Step(0).(operator.SplitRegion).SplitKeys
-	re.Equal("aa", hex.EncodeToString(splitKeys[0]))
-	re.Equal("cc", hex.EncodeToString(splitKeys[1]))
+	c.Assert(hex.EncodeToString(splitKeys[0]), Equals, "aa")
+	c.Assert(hex.EncodeToString(splitKeys[1]), Equals, "cc")
 
 	// region label has higher priority.
-	regionLabeler.SetLabelRule(&labeler.LabelRule{
+	s.labeler.SetLabelRule(&labeler.LabelRule{
 		ID:       "test",
 		Labels:   []labeler.RegionLabel{{Key: "test", Value: "test"}},
 		RuleType: labeler.KeyRange,
 		Data:     makeKeyRanges("bb", "dd"),
 	})
-	op = sc.Check(cluster.GetRegion(1))
-	re.NotNil(op)
-	re.Equal(1, op.Len())
+	op = s.sc.Check(s.cluster.GetRegion(1))
+	c.Assert(op, NotNil)
+	c.Assert(op.Len(), Equals, 1)
 	splitKeys = op.Step(0).(operator.SplitRegion).SplitKeys
-	re.Equal("bb", hex.EncodeToString(splitKeys[0]))
-	re.Equal("dd", hex.EncodeToString(splitKeys[1]))
+	c.Assert(hex.EncodeToString(splitKeys[0]), Equals, "bb")
+	c.Assert(hex.EncodeToString(splitKeys[1]), Equals, "dd")
 }

@@ -27,9 +27,8 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/client/errs"
-	"github.com/tikv/pd/client/grpcutil"
-	"github.com/tikv/pd/client/tlsutil"
+	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/grpcutil"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
@@ -245,46 +244,22 @@ func (c *baseClient) gcAllocatorLeaderAddr(curAllocatorMap map[string]*pdpb.Memb
 func (c *baseClient) initClusterID() error {
 	ctx, cancel := context.WithCancel(c.ctx)
 	defer cancel()
-	var clusterID uint64
 	for _, u := range c.GetURLs() {
 		members, err := c.getMembers(ctx, u, c.option.timeout)
 		if err != nil || members.GetHeader() == nil {
 			log.Warn("[pd] failed to get cluster id", zap.String("url", u), errs.ZapError(err))
 			continue
 		}
-		if clusterID == 0 {
-			clusterID = members.GetHeader().GetClusterId()
-			continue
-		}
-		failpoint.Inject("skipClusterIDCheck", func() {
-			failpoint.Continue()
-		})
-		// All URLs passed in should have the same cluster ID.
-		if members.GetHeader().GetClusterId() != clusterID {
-			return errors.WithStack(errUnmatchedClusterID)
-		}
+		c.clusterID = members.GetHeader().GetClusterId()
+		return nil
 	}
-	// Failed to init the cluster ID.
-	if clusterID == 0 {
-		return errors.WithStack(errFailInitClusterID)
-	}
-	c.clusterID = clusterID
-	return nil
+	return errors.WithStack(errFailInitClusterID)
 }
 
 func (c *baseClient) updateMember() error {
-	for i, u := range c.GetURLs() {
-		failpoint.Inject("skipFirstUpdateMember", func() {
-			if i == 0 {
-				failpoint.Continue()
-			}
-		})
+	for _, u := range c.GetURLs() {
 		members, err := c.getMembers(c.ctx, u, updateMemberTimeout)
-		// Check the cluster ID.
-		if err == nil && members.GetHeader().GetClusterId() != c.clusterID {
-			err = errs.ErrClientUpdateMember.FastGenByArgs("cluster id does not match")
-		}
-		// Check the TSO Allocator Leader.
+
 		var errTSO error
 		if err == nil {
 			if members.GetLeader() == nil || len(members.GetLeader().GetClientUrls()) == 0 {
@@ -331,10 +306,6 @@ func (c *baseClient) getMembers(ctx context.Context, url string, timeout time.Du
 	members, err := pdpb.NewPDClient(cc).GetMembers(ctx, &pdpb.GetMembersRequest{})
 	if err != nil {
 		attachErr := errors.Errorf("error:%s target:%s status:%s", err, cc.Target(), cc.GetState().String())
-		return nil, errs.ErrClientGetMember.Wrap(attachErr).GenWithStackByCause()
-	}
-	if members.GetHeader().GetError() != nil {
-		attachErr := errors.Errorf("error:%s target:%s status:%s", members.GetHeader().GetError().String(), cc.Target(), cc.GetState().String())
 		return nil, errs.ErrClientGetMember.Wrap(attachErr).GenWithStackByCause()
 	}
 	return members, nil
@@ -428,7 +399,7 @@ func (c *baseClient) getOrCreateGRPCConn(addr string) (*grpc.ClientConn, error) 
 	if ok {
 		return conn.(*grpc.ClientConn), nil
 	}
-	tlsCfg, err := tlsutil.TLSConfig{
+	tlsCfg, err := grpcutil.TLSConfig{
 		CAPath:   c.security.CAPath,
 		CertPath: c.security.CertPath,
 		KeyPath:  c.security.KeyPath,

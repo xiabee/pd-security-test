@@ -21,26 +21,42 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	pb "github.com/pingcap/kvproto/pkg/replication_modepb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/kv"
 )
 
-func TestInitial(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	store := storage.NewStorageWithMemoryBackend()
+func TestReplicationMode(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testReplicationMode{})
+
+type testReplicationMode struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (s *testReplicationMode) SetUpSuite(c *C) {
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+}
+
+func (s *testReplicationMode) TearDownTest(c *C) {
+	s.cancel()
+}
+
+func (s *testReplicationMode) TestInitial(c *C) {
+	store := core.NewStorage(kv.NewMemoryKV())
 	conf := config.ReplicationModeConfig{ReplicationMode: modeMajority}
-	cluster := mockcluster.NewCluster(ctx, config.NewTestOptions())
+	cluster := mockcluster.NewCluster(s.ctx, config.NewTestOptions())
 	rep, err := NewReplicationModeManager(conf, store, cluster, newMockReplicator([]uint64{1}))
-	re.NoError(err)
-	re.Equal(&pb.ReplicationStatus{Mode: pb.ReplicationMode_MAJORITY}, rep.GetReplicationStatus())
+	c.Assert(err, IsNil)
+	c.Assert(rep.GetReplicationStatus(), DeepEquals, &pb.ReplicationStatus{Mode: pb.ReplicationMode_MAJORITY})
 
 	conf = config.ReplicationModeConfig{ReplicationMode: modeDRAutoSync, DRAutoSync: config.DRAutoSyncReplicationConfig{
 		LabelKey:         "dr-label",
@@ -49,10 +65,11 @@ func TestInitial(t *testing.T) {
 		PrimaryReplicas:  2,
 		DRReplicas:       1,
 		WaitStoreTimeout: typeutil.Duration{Duration: time.Minute},
+		WaitSyncTimeout:  typeutil.Duration{Duration: time.Minute},
 	}}
 	rep, err = NewReplicationModeManager(conf, store, cluster, newMockReplicator([]uint64{1}))
-	re.NoError(err)
-	re.Equal(&pb.ReplicationStatus{
+	c.Assert(err, IsNil)
+	c.Assert(rep.GetReplicationStatus(), DeepEquals, &pb.ReplicationStatus{
 		Mode: pb.ReplicationMode_DR_AUTO_SYNC,
 		DrAutoSync: &pb.DRAutoSync{
 			LabelKey:            "dr-label",
@@ -60,21 +77,19 @@ func TestInitial(t *testing.T) {
 			StateId:             1,
 			WaitSyncTimeoutHint: 60,
 		},
-	}, rep.GetReplicationStatus())
+	})
 }
 
-func TestStatus(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	store := storage.NewStorageWithMemoryBackend()
+func (s *testReplicationMode) TestStatus(c *C) {
+	store := core.NewStorage(kv.NewMemoryKV())
 	conf := config.ReplicationModeConfig{ReplicationMode: modeDRAutoSync, DRAutoSync: config.DRAutoSyncReplicationConfig{
-		LabelKey: "dr-label",
+		LabelKey:        "dr-label",
+		WaitSyncTimeout: typeutil.Duration{Duration: time.Minute},
 	}}
-	cluster := mockcluster.NewCluster(ctx, config.NewTestOptions())
+	cluster := mockcluster.NewCluster(s.ctx, config.NewTestOptions())
 	rep, err := NewReplicationModeManager(conf, store, cluster, newMockReplicator([]uint64{1}))
-	re.NoError(err)
-	re.Equal(&pb.ReplicationStatus{
+	c.Assert(err, IsNil)
+	c.Assert(rep.GetReplicationStatus(), DeepEquals, &pb.ReplicationStatus{
 		Mode: pb.ReplicationMode_DR_AUTO_SYNC,
 		DrAutoSync: &pb.DRAutoSync{
 			LabelKey:            "dr-label",
@@ -82,11 +97,11 @@ func TestStatus(t *testing.T) {
 			StateId:             1,
 			WaitSyncTimeoutHint: 60,
 		},
-	}, rep.GetReplicationStatus())
+	})
 
-	err = rep.drSwitchToAsync(nil)
-	re.NoError(err)
-	re.Equal(&pb.ReplicationStatus{
+	err = rep.drSwitchToAsync()
+	c.Assert(err, IsNil)
+	c.Assert(rep.GetReplicationStatus(), DeepEquals, &pb.ReplicationStatus{
 		Mode: pb.ReplicationMode_DR_AUTO_SYNC,
 		DrAutoSync: &pb.DRAutoSync{
 			LabelKey:            "dr-label",
@@ -94,12 +109,12 @@ func TestStatus(t *testing.T) {
 			StateId:             2,
 			WaitSyncTimeoutHint: 60,
 		},
-	}, rep.GetReplicationStatus())
+	})
 
 	err = rep.drSwitchToSyncRecover()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	stateID := rep.drAutoSync.StateID
-	re.Equal(&pb.ReplicationStatus{
+	c.Assert(rep.GetReplicationStatus(), DeepEquals, &pb.ReplicationStatus{
 		Mode: pb.ReplicationMode_DR_AUTO_SYNC,
 		DrAutoSync: &pb.DRAutoSync{
 			LabelKey:            "dr-label",
@@ -107,16 +122,16 @@ func TestStatus(t *testing.T) {
 			StateId:             stateID,
 			WaitSyncTimeoutHint: 60,
 		},
-	}, rep.GetReplicationStatus())
+	})
 
 	// test reload
 	rep, err = NewReplicationModeManager(conf, store, cluster, newMockReplicator([]uint64{1}))
-	re.NoError(err)
-	re.Equal(drStateSyncRecover, rep.drAutoSync.State)
+	c.Assert(err, IsNil)
+	c.Assert(rep.drAutoSync.State, Equals, drStateSyncRecover)
 
 	err = rep.drSwitchToSync()
-	re.NoError(err)
-	re.Equal(&pb.ReplicationStatus{
+	c.Assert(err, IsNil)
+	c.Assert(rep.GetReplicationStatus(), DeepEquals, &pb.ReplicationStatus{
 		Mode: pb.ReplicationMode_DR_AUTO_SYNC,
 		DrAutoSync: &pb.DRAutoSync{
 			LabelKey:            "dr-label",
@@ -124,7 +139,7 @@ func TestStatus(t *testing.T) {
 			StateId:             rep.drAutoSync.StateID,
 			WaitSyncTimeoutHint: 60,
 		},
-	}, rep.GetReplicationStatus())
+	})
 }
 
 type mockFileReplicator struct {
@@ -157,166 +172,98 @@ func newMockReplicator(ids []uint64) *mockFileReplicator {
 	}
 }
 
-func TestStateSwitch(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	store := storage.NewStorageWithMemoryBackend()
+func (s *testReplicationMode) TestStateSwitch(c *C) {
+	store := core.NewStorage(kv.NewMemoryKV())
 	conf := config.ReplicationModeConfig{ReplicationMode: modeDRAutoSync, DRAutoSync: config.DRAutoSyncReplicationConfig{
 		LabelKey:         "zone",
 		Primary:          "zone1",
 		DR:               "zone2",
-		PrimaryReplicas:  4,
+		PrimaryReplicas:  2,
 		DRReplicas:       1,
 		WaitStoreTimeout: typeutil.Duration{Duration: time.Minute},
+		WaitSyncTimeout:  typeutil.Duration{Duration: time.Minute},
 	}}
-	cluster := mockcluster.NewCluster(ctx, config.NewTestOptions())
+	cluster := mockcluster.NewCluster(s.ctx, config.NewTestOptions())
 	replicator := newMockReplicator([]uint64{1})
 	rep, err := NewReplicationModeManager(conf, store, cluster, replicator)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	cluster.AddLabelsStore(1, 1, map[string]string{"zone": "zone1"})
 	cluster.AddLabelsStore(2, 1, map[string]string{"zone": "zone1"})
 	cluster.AddLabelsStore(3, 1, map[string]string{"zone": "zone1"})
-	cluster.AddLabelsStore(4, 1, map[string]string{"zone": "zone1"})
 
 	// initial state is sync
-	re.Equal(drStateSync, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateSync)
 	stateID := rep.drAutoSync.StateID
-	re.NotEqual(uint64(0), stateID)
-	re.Equal(fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID), replicator.lastData[1])
+	c.Assert(stateID, Not(Equals), uint64(0))
+	c.Assert(replicator.lastData[1], Equals, fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID))
 	assertStateIDUpdate := func() {
-		re.NotEqual(stateID, rep.drAutoSync.StateID)
+		c.Assert(rep.drAutoSync.StateID, Not(Equals), stateID)
 		stateID = rep.drAutoSync.StateID
 	}
-	syncStoreStatus := func(storeIDs ...uint64) {
-		state := rep.GetReplicationStatus()
-		for _, s := range storeIDs {
-			rep.UpdateStoreDRStatus(s, &pb.StoreDRAutoSyncStatus{State: state.GetDrAutoSync().State, StateId: state.GetDrAutoSync().GetStateId()})
-		}
-	}
 
-	// only one zone, sync -> async_wait -> async
+	// only one zone, sync -> async
 	rep.tickDR()
-	re.Equal(drStateAsyncWait, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateAsync)
 	assertStateIDUpdate()
-	re.Equal(fmt.Sprintf(`{"state":"async_wait","state_id":%d,"available_stores":[1,2,3,4]}`, stateID), replicator.lastData[1])
-
-	re.False(rep.GetReplicationStatus().GetDrAutoSync().GetPauseRegionSplit())
-	conf.DRAutoSync.PauseRegionSplit = true
-	rep.UpdateConfig(conf)
-	re.True(rep.GetReplicationStatus().GetDrAutoSync().GetPauseRegionSplit())
-
-	syncStoreStatus(1, 2, 3, 4)
-	rep.tickDR()
-	assertStateIDUpdate()
-	re.Equal(fmt.Sprintf(`{"state":"async","state_id":%d,"available_stores":[1,2,3,4]}`, stateID), replicator.lastData[1])
+	c.Assert(replicator.lastData[1], Equals, fmt.Sprintf(`{"state":"async","state_id":%d}`, stateID))
 
 	// add new store in dr zone.
+	cluster.AddLabelsStore(4, 1, map[string]string{"zone": "zone2"})
 	cluster.AddLabelsStore(5, 1, map[string]string{"zone": "zone2"})
-	cluster.AddLabelsStore(6, 1, map[string]string{"zone": "zone2"})
 	// async -> sync
 	rep.tickDR()
-	re.Equal(drStateSyncRecover, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateSyncRecover)
 	rep.drSwitchToSync()
-	re.Equal(drStateSync, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateSync)
 	assertStateIDUpdate()
 
-	// sync -> async_wait
+	// sync -> async
 	rep.tickDR()
-	re.Equal(drStateSync, rep.drGetState())
-	setStoreState(cluster, "down", "up", "up", "up", "up", "up")
+	c.Assert(rep.drGetState(), Equals, drStateSync)
+	s.setStoreState(cluster, 1, "down")
 	rep.tickDR()
-	re.Equal(drStateSync, rep.drGetState())
-	setStoreState(cluster, "down", "down", "up", "up", "up", "up")
-	setStoreState(cluster, "down", "down", "down", "up", "up", "up")
+	c.Assert(rep.drGetState(), Equals, drStateSync)
+	s.setStoreState(cluster, 2, "down")
 	rep.tickDR()
-	re.Equal(drStateSync, rep.drGetState()) // cannot guarantee majority, keep sync.
-
-	setStoreState(cluster, "up", "up", "up", "up", "down", "up")
+	c.Assert(rep.drGetState(), Equals, drStateSync) // cannot guarantee majority, keep sync.
+	s.setStoreState(cluster, 1, "up")
+	s.setStoreState(cluster, 2, "up")
+	s.setStoreState(cluster, 5, "down")
 	rep.tickDR()
-	re.Equal(drStateAsyncWait, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateAsync)
 	assertStateIDUpdate()
-
 	rep.drSwitchToSync()
-	replicator.errors[2] = errors.New("fail to replicate")
+	replicator.errors[1] = errors.New("fail to replicate")
 	rep.tickDR()
-	re.Equal(drStateAsyncWait, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateAsync)
 	assertStateIDUpdate()
-	delete(replicator.errors, 1)
-
-	// async_wait -> sync
-	setStoreState(cluster, "up", "up", "up", "up", "up", "up")
-	rep.tickDR()
-	re.Equal(drStateSync, rep.drGetState())
-	re.False(rep.GetReplicationStatus().GetDrAutoSync().GetPauseRegionSplit())
-
-	// async_wait -> async_wait
-	setStoreState(cluster, "up", "up", "up", "up", "down", "up")
-	rep.tickDR()
-	re.Equal(drStateAsyncWait, rep.drGetState())
-	assertStateIDUpdate()
-	re.Equal(fmt.Sprintf(`{"state":"async_wait","state_id":%d,"available_stores":[1,2,3,4]}`, stateID), replicator.lastData[1])
-	setStoreState(cluster, "down", "up", "up", "up", "down", "up")
-	rep.tickDR()
-	assertStateIDUpdate()
-	re.Equal(fmt.Sprintf(`{"state":"async_wait","state_id":%d,"available_stores":[2,3,4]}`, stateID), replicator.lastData[1])
-	setStoreState(cluster, "up", "down", "up", "up", "down", "up")
-	rep.tickDR()
-	assertStateIDUpdate()
-	re.Equal(fmt.Sprintf(`{"state":"async_wait","state_id":%d,"available_stores":[1,3,4]}`, stateID), replicator.lastData[1])
-
-	// async_wait -> async
-	rep.tickDR()
-	re.Equal(drStateAsyncWait, rep.drGetState())
-	syncStoreStatus(1, 3)
-	rep.tickDR()
-	re.Equal(drStateAsyncWait, rep.drGetState())
-	syncStoreStatus(4)
-	rep.tickDR()
-	assertStateIDUpdate()
-	re.Equal(fmt.Sprintf(`{"state":"async","state_id":%d,"available_stores":[1,3,4]}`, stateID), replicator.lastData[1])
-
-	// async -> async
-	setStoreState(cluster, "up", "up", "up", "up", "down", "up")
-	rep.tickDR()
-	// store 2 won't be available before it syncs status.
-	re.Equal(fmt.Sprintf(`{"state":"async","state_id":%d,"available_stores":[1,3,4]}`, stateID), replicator.lastData[1])
-	syncStoreStatus(1, 2, 3, 4)
-	rep.tickDR()
-	assertStateIDUpdate()
-	re.Equal(fmt.Sprintf(`{"state":"async","state_id":%d,"available_stores":[1,2,3,4]}`, stateID), replicator.lastData[1])
 
 	// async -> sync_recover
-	setStoreState(cluster, "up", "up", "up", "up", "up", "up")
+	s.setStoreState(cluster, 5, "up")
 	rep.tickDR()
-	re.Equal(drStateSyncRecover, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateSyncRecover)
 	assertStateIDUpdate()
-	rep.drSwitchToAsync([]uint64{1, 2, 3, 4, 5})
-	setStoreState(cluster, "down", "up", "up", "up", "up", "up")
+	rep.drSwitchToAsync()
+	s.setStoreState(cluster, 1, "down")
 	rep.tickDR()
-	re.Equal(drStateSyncRecover, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateSyncRecover)
 	assertStateIDUpdate()
 
 	// sync_recover -> async
 	rep.tickDR()
-	re.Equal(drStateSyncRecover, rep.drGetState())
-	setStoreState(cluster, "up", "up", "up", "up", "down", "up")
+	c.Assert(rep.drGetState(), Equals, drStateSyncRecover)
+	s.setStoreState(cluster, 1, "up")
+	s.setStoreState(cluster, 4, "down")
 	rep.tickDR()
-	re.Equal(drStateAsync, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateAsync)
 	assertStateIDUpdate()
-	// lost majority, does not switch to async.
-	rep.drSwitchToSyncRecover()
-	assertStateIDUpdate()
-	setStoreState(cluster, "down", "down", "up", "up", "down", "up")
-	rep.tickDR()
-	re.Equal(drStateSyncRecover, rep.drGetState())
 
 	// sync_recover -> sync
 	rep.drSwitchToSyncRecover()
 	assertStateIDUpdate()
-	setStoreState(cluster, "up", "up", "up", "up", "up", "up")
-	cluster.AddLeaderRegion(1, 1, 2, 3, 4, 5)
+	s.setStoreState(cluster, 4, "up")
+	cluster.AddLeaderRegion(1, 1, 2, 5)
 	region := cluster.GetRegion(1)
 
 	region = region.Clone(core.WithStartKey(nil), core.WithEndKey(nil), core.SetReplicationStatus(&pb.RegionReplicationStatus{
@@ -324,7 +271,7 @@ func TestStateSwitch(t *testing.T) {
 	}))
 	cluster.PutRegion(region)
 	rep.tickDR()
-	re.Equal(drStateSyncRecover, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateSyncRecover)
 
 	region = region.Clone(core.SetReplicationStatus(&pb.RegionReplicationStatus{
 		State:   pb.RegionReplicationState_INTEGRITY_OVER_LABEL,
@@ -332,22 +279,19 @@ func TestStateSwitch(t *testing.T) {
 	}))
 	cluster.PutRegion(region)
 	rep.tickDR()
-	re.Equal(drStateSyncRecover, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateSyncRecover)
 	region = region.Clone(core.SetReplicationStatus(&pb.RegionReplicationStatus{
 		State:   pb.RegionReplicationState_INTEGRITY_OVER_LABEL,
 		StateId: rep.drAutoSync.StateID,
 	}))
 	cluster.PutRegion(region)
 	rep.tickDR()
-	re.Equal(drStateSync, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateSync)
 	assertStateIDUpdate()
 }
 
-func TestReplicateState(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	store := storage.NewStorageWithMemoryBackend()
+func (s *testReplicationMode) TestReplicateState(c *C) {
+	store := core.NewStorage(kv.NewMemoryKV())
 	conf := config.ReplicationModeConfig{ReplicationMode: modeDRAutoSync, DRAutoSync: config.DRAutoSyncReplicationConfig{
 		LabelKey:         "zone",
 		Primary:          "zone1",
@@ -355,41 +299,39 @@ func TestReplicateState(t *testing.T) {
 		PrimaryReplicas:  2,
 		DRReplicas:       1,
 		WaitStoreTimeout: typeutil.Duration{Duration: time.Minute},
+		WaitSyncTimeout:  typeutil.Duration{Duration: time.Minute},
 	}}
-	cluster := mockcluster.NewCluster(ctx, config.NewTestOptions())
+	cluster := mockcluster.NewCluster(s.ctx, config.NewTestOptions())
 	replicator := newMockReplicator([]uint64{1})
 	rep, err := NewReplicationModeManager(conf, store, cluster, replicator)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	stateID := rep.drAutoSync.StateID
 	// replicate after initialized
-	re.Equal(fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID), replicator.lastData[1])
+	c.Assert(replicator.lastData[1], Equals, fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID))
 
 	// repliate state to new member
 	replicator.memberIDs = append(replicator.memberIDs, 2, 3)
 	rep.checkReplicateFile()
-	re.Equal(fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID), replicator.lastData[2])
-	re.Equal(fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID), replicator.lastData[3])
+	c.Assert(replicator.lastData[2], Equals, fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID))
+	c.Assert(replicator.lastData[3], Equals, fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID))
 
 	// inject error
 	replicator.errors[2] = errors.New("failed to persist")
-	rep.tickDR() // switch async_wait since there is only one zone
+	rep.tickDR() // switch async since there is only one zone
 	newStateID := rep.drAutoSync.StateID
-	re.Equal(fmt.Sprintf(`{"state":"async_wait","state_id":%d}`, newStateID), replicator.lastData[1])
-	re.Equal(fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID), replicator.lastData[2])
-	re.Equal(fmt.Sprintf(`{"state":"async_wait","state_id":%d}`, newStateID), replicator.lastData[3])
+	c.Assert(replicator.lastData[1], Equals, fmt.Sprintf(`{"state":"async","state_id":%d}`, newStateID))
+	c.Assert(replicator.lastData[2], Equals, fmt.Sprintf(`{"state":"sync","state_id":%d}`, stateID))
+	c.Assert(replicator.lastData[3], Equals, fmt.Sprintf(`{"state":"async","state_id":%d}`, newStateID))
 
 	// clear error, replicate to node 2 next time
 	delete(replicator.errors, 2)
 	rep.checkReplicateFile()
-	re.Equal(fmt.Sprintf(`{"state":"async_wait","state_id":%d}`, newStateID), replicator.lastData[2])
+	c.Assert(replicator.lastData[2], Equals, fmt.Sprintf(`{"state":"async","state_id":%d}`, newStateID))
 }
 
-func TestAsynctimeout(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	store := storage.NewStorageWithMemoryBackend()
+func (s *testReplicationMode) TestAsynctimeout(c *C) {
+	store := core.NewStorage(kv.NewMemoryKV())
 	conf := config.ReplicationModeConfig{ReplicationMode: modeDRAutoSync, DRAutoSync: config.DRAutoSyncReplicationConfig{
 		LabelKey:         "zone",
 		Primary:          "zone1",
@@ -397,42 +339,51 @@ func TestAsynctimeout(t *testing.T) {
 		PrimaryReplicas:  2,
 		DRReplicas:       1,
 		WaitStoreTimeout: typeutil.Duration{Duration: time.Minute},
+		WaitSyncTimeout:  typeutil.Duration{Duration: time.Minute},
+		WaitAsyncTimeout: typeutil.Duration{Duration: 2 * time.Minute},
 	}}
-	cluster := mockcluster.NewCluster(ctx, config.NewTestOptions())
+	cluster := mockcluster.NewCluster(s.ctx, config.NewTestOptions())
 	var replicator mockFileReplicator
 	rep, err := NewReplicationModeManager(conf, store, cluster, &replicator)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	cluster.AddLabelsStore(1, 1, map[string]string{"zone": "zone1"})
 	cluster.AddLabelsStore(2, 1, map[string]string{"zone": "zone1"})
 	cluster.AddLabelsStore(3, 1, map[string]string{"zone": "zone2"})
 
-	setStoreState(cluster, "up", "up", "down")
+	s.setStoreState(cluster, 3, "down")
 	rep.tickDR()
-	re.Equal(drStateAsyncWait, rep.drGetState())
+	c.Assert(rep.drGetState(), Equals, drStateSync) // cannot switch state due to recently start
+
+	rep.initTime = time.Now().Add(-3 * time.Minute)
+	rep.tickDR()
+	c.Assert(rep.drGetState(), Equals, drStateAsync)
+
+	rep.drSwitchToSync()
+	rep.UpdateMemberWaitAsyncTime(42)
+	rep.tickDR()
+	c.Assert(rep.drGetState(), Equals, drStateSync) // cannot switch state due to member not timeout
+
+	rep.drMemberWaitAsyncTime[42] = time.Now().Add(-3 * time.Minute)
+	rep.tickDR()
+	c.Assert(rep.drGetState(), Equals, drStateAsync)
 }
 
-func setStoreState(cluster *mockcluster.Cluster, states ...string) {
-	for i, state := range states {
-		store := cluster.GetStore(uint64(i + 1))
-		if state == "down" {
-			store.GetMeta().LastHeartbeat = time.Now().Add(-time.Minute * 10).UnixNano()
-		} else if state == "up" {
-			store.GetMeta().LastHeartbeat = time.Now().UnixNano()
-		}
-		cluster.PutStore(store)
+func (s *testReplicationMode) setStoreState(cluster *mockcluster.Cluster, id uint64, state string) {
+	store := cluster.GetStore(id)
+	if state == "down" {
+		store.GetMeta().LastHeartbeat = time.Now().Add(-time.Minute * 10).UnixNano()
+	} else if state == "up" {
+		store.GetMeta().LastHeartbeat = time.Now().UnixNano()
 	}
+	cluster.PutStore(store)
 }
 
-func TestRecoverProgress(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (s *testReplicationMode) TestRecoverProgress(c *C) {
 	regionScanBatchSize = 10
 	regionMinSampleSize = 5
 
-	store := storage.NewStorageWithMemoryBackend()
+	store := core.NewStorage(kv.NewMemoryKV())
 	conf := config.ReplicationModeConfig{ReplicationMode: modeDRAutoSync, DRAutoSync: config.DRAutoSyncReplicationConfig{
 		LabelKey:         "zone",
 		Primary:          "zone1",
@@ -440,15 +391,16 @@ func TestRecoverProgress(t *testing.T) {
 		PrimaryReplicas:  2,
 		DRReplicas:       1,
 		WaitStoreTimeout: typeutil.Duration{Duration: time.Minute},
+		WaitSyncTimeout:  typeutil.Duration{Duration: time.Minute},
 	}}
-	cluster := mockcluster.NewCluster(ctx, config.NewTestOptions())
+	cluster := mockcluster.NewCluster(s.ctx, config.NewTestOptions())
 	cluster.AddLabelsStore(1, 1, map[string]string{})
 	rep, err := NewReplicationModeManager(conf, store, cluster, newMockReplicator([]uint64{1}))
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	prepare := func(n int, asyncRegions []int) {
 		rep.drSwitchToSyncRecover()
-		regions := genRegions(cluster, rep.drAutoSync.StateID, n)
+		regions := s.genRegions(cluster, rep.drAutoSync.StateID, n)
 		for _, i := range asyncRegions {
 			regions[i] = regions[i].Clone(core.SetReplicationStatus(&pb.RegionReplicationStatus{
 				State:   pb.RegionReplicationState_SIMPLE_MAJORITY,
@@ -462,39 +414,36 @@ func TestRecoverProgress(t *testing.T) {
 	}
 
 	prepare(20, nil)
-	re.Equal(20, rep.drRecoverCount)
-	re.Equal(float32(1.0), rep.estimateProgress())
+	c.Assert(rep.drRecoverCount, Equals, 20)
+	c.Assert(rep.estimateProgress(), Equals, float32(1.0))
 
 	prepare(10, []int{9})
-	re.Equal(9, rep.drRecoverCount)
-	re.Equal(10, rep.drTotalRegion)
-	re.Equal(1, rep.drSampleTotalRegion)
-	re.Equal(0, rep.drSampleRecoverCount)
-	re.Equal(float32(9)/float32(10), rep.estimateProgress())
+	c.Assert(rep.drRecoverCount, Equals, 9)
+	c.Assert(rep.drTotalRegion, Equals, 10)
+	c.Assert(rep.drSampleTotalRegion, Equals, 1)
+	c.Assert(rep.drSampleRecoverCount, Equals, 0)
+	c.Assert(rep.estimateProgress(), Equals, float32(9)/float32(10))
 
 	prepare(30, []int{3, 4, 5, 6, 7, 8, 9})
-	re.Equal(3, rep.drRecoverCount)
-	re.Equal(30, rep.drTotalRegion)
-	re.Equal(7, rep.drSampleTotalRegion)
-	re.Equal(0, rep.drSampleRecoverCount)
-	re.Equal(float32(3)/float32(30), rep.estimateProgress())
+	c.Assert(rep.drRecoverCount, Equals, 3)
+	c.Assert(rep.drTotalRegion, Equals, 30)
+	c.Assert(rep.drSampleTotalRegion, Equals, 7)
+	c.Assert(rep.drSampleRecoverCount, Equals, 0)
+	c.Assert(rep.estimateProgress(), Equals, float32(3)/float32(30))
 
 	prepare(30, []int{9, 13, 14})
-	re.Equal(9, rep.drRecoverCount)
-	re.Equal(30, rep.drTotalRegion)
-	re.Equal(6, rep.drSampleTotalRegion) // 9 + 10,11,12,13,14
-	re.Equal(3, rep.drSampleRecoverCount)
-	re.Equal((float32(9)+float32(30-9)/2)/float32(30), rep.estimateProgress())
+	c.Assert(rep.drRecoverCount, Equals, 9)
+	c.Assert(rep.drTotalRegion, Equals, 30)
+	c.Assert(rep.drSampleTotalRegion, Equals, 6) // 9 + 10,11,12,13,14
+	c.Assert(rep.drSampleRecoverCount, Equals, 3)
+	c.Assert(rep.estimateProgress(), Equals, (float32(9)+float32(30-9)/2)/float32(30))
 }
 
-func TestRecoverProgressWithSplitAndMerge(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func (s *testReplicationMode) TestRecoverProgressWithSplitAndMerge(c *C) {
 	regionScanBatchSize = 10
 	regionMinSampleSize = 5
 
-	store := storage.NewStorageWithMemoryBackend()
+	store := core.NewStorage(kv.NewMemoryKV())
 	conf := config.ReplicationModeConfig{ReplicationMode: modeDRAutoSync, DRAutoSync: config.DRAutoSyncReplicationConfig{
 		LabelKey:         "zone",
 		Primary:          "zone1",
@@ -502,15 +451,16 @@ func TestRecoverProgressWithSplitAndMerge(t *testing.T) {
 		PrimaryReplicas:  2,
 		DRReplicas:       1,
 		WaitStoreTimeout: typeutil.Duration{Duration: time.Minute},
+		WaitSyncTimeout:  typeutil.Duration{Duration: time.Minute},
 	}}
-	cluster := mockcluster.NewCluster(ctx, config.NewTestOptions())
+	cluster := mockcluster.NewCluster(s.ctx, config.NewTestOptions())
 	cluster.AddLabelsStore(1, 1, map[string]string{})
 	rep, err := NewReplicationModeManager(conf, store, cluster, newMockReplicator([]uint64{1}))
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	prepare := func(n int, asyncRegions []int) {
 		rep.drSwitchToSyncRecover()
-		regions := genRegions(cluster, rep.drAutoSync.StateID, n)
+		regions := s.genRegions(cluster, rep.drAutoSync.StateID, n)
 		for _, i := range asyncRegions {
 			regions[i] = regions[i].Clone(core.SetReplicationStatus(&pb.RegionReplicationStatus{
 				State:   pb.RegionReplicationState_SIMPLE_MAJORITY,
@@ -527,8 +477,8 @@ func TestRecoverProgressWithSplitAndMerge(t *testing.T) {
 	r := cluster.GetRegion(1).Clone(core.WithEndKey(cluster.GetRegion(2).GetEndKey()))
 	cluster.PutRegion(r)
 	rep.updateProgress()
-	re.Equal(19, rep.drRecoverCount)
-	re.Equal(float32(1.0), rep.estimateProgress())
+	c.Assert(rep.drRecoverCount, Equals, 19)
+	c.Assert(rep.estimateProgress(), Equals, float32(1.0))
 
 	// merged happened during the scan
 	prepare(20, nil)
@@ -539,23 +489,23 @@ func TestRecoverProgressWithSplitAndMerge(t *testing.T) {
 	rep.drRecoverCount = 1
 	rep.drRecoverKey = r1.GetEndKey()
 	rep.updateProgress()
-	re.Equal(20, rep.drRecoverCount)
-	re.Equal(float32(1.0), rep.estimateProgress())
+	c.Assert(rep.drRecoverCount, Equals, 20)
+	c.Assert(rep.estimateProgress(), Equals, float32(1.0))
 
 	// split, region gap happened during the scan
 	rep.drRecoverCount, rep.drRecoverKey = 0, nil
 	cluster.PutRegion(r1)
 	rep.updateProgress()
-	re.Equal(1, rep.drRecoverCount)
-	re.NotEqual(float32(1.0), rep.estimateProgress())
+	c.Assert(rep.drRecoverCount, Equals, 1)
+	c.Assert(rep.estimateProgress(), Not(Equals), float32(1.0))
 	// region gap missing
 	cluster.PutRegion(r2)
 	rep.updateProgress()
-	re.Equal(20, rep.drRecoverCount)
-	re.Equal(float32(1.0), rep.estimateProgress())
+	c.Assert(rep.drRecoverCount, Equals, 20)
+	c.Assert(rep.estimateProgress(), Equals, float32(1.0))
 }
 
-func genRegions(cluster *mockcluster.Cluster, stateID uint64, n int) []*core.RegionInfo {
+func (s *testReplicationMode) genRegions(cluster *mockcluster.Cluster, stateID uint64, n int) []*core.RegionInfo {
 	var regions []*core.RegionInfo
 	for i := 1; i <= n; i++ {
 		cluster.AddLeaderRegion(uint64(i), 1)

@@ -22,25 +22,22 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/codec"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage/endpoint"
 	"go.uber.org/zap"
-	"golang.org/x/exp/slices"
 )
 
 // RuleManager is responsible for the lifecycle of all placement Rules.
 // It is thread safe.
 type RuleManager struct {
-	storage endpoint.RuleStorage
-	syncutil.RWMutex
+	storage *core.Storage
+	sync.RWMutex
 	initialized bool
 	ruleConfig  *ruleConfig
 	ruleList    ruleList
@@ -53,7 +50,7 @@ type RuleManager struct {
 }
 
 // NewRuleManager creates a RuleManager instance.
-func NewRuleManager(storage endpoint.RuleStorage, storeSetInformer core.StoreSetInformer, opt *config.PersistOptions) *RuleManager {
+func NewRuleManager(storage *core.Storage, storeSetInformer core.StoreSetInformer, opt *config.PersistOptions) *RuleManager {
 	return &RuleManager{
 		storage:          storage,
 		storeSetInformer: storeSetInformer,
@@ -205,15 +202,9 @@ func (m *RuleManager) adjustRule(r *Rule, groupID string) (err error) {
 	if r.Role == Leader && r.Count > 1 {
 		return errs.ErrRuleContent.FastGenByArgs(fmt.Sprintf("define multiple leaders by count %d", r.Count))
 	}
-	if r.IsWitness && r.Count > 1 {
-		return errs.ErrRuleContent.FastGenByArgs(fmt.Sprintf("define multiple witness by count %d", r.Count))
-	}
 	for _, c := range r.LabelConstraints {
 		if !validateOp(c.Op) {
 			return errs.ErrRuleContent.FastGenByArgs(fmt.Sprintf("invalid op %s", c.Op))
-		}
-		if r.IsWitness && c.Key == core.EngineKey && slices.Contains(c.Values, core.EngineTiFlash) {
-			return errs.ErrRuleContent.FastGenByArgs("witness can't combine with tiflash")
 		}
 	}
 
@@ -315,14 +306,7 @@ func (m *RuleManager) GetRulesByKey(key []byte) []*Rule {
 func (m *RuleManager) GetRulesForApplyRegion(region *core.RegionInfo) []*Rule {
 	m.RLock()
 	defer m.RUnlock()
-	return m.ruleList.getRulesForApplyRange(region.GetStartKey(), region.GetEndKey())
-}
-
-// GetRulesForApplyRange returns the rules list that should be applied to a range.
-func (m *RuleManager) GetRulesForApplyRange(start, end []byte) []*Rule {
-	m.RLock()
-	defer m.RUnlock()
-	return m.ruleList.getRulesForApplyRange(start, end)
+	return m.ruleList.getRulesForApplyRegion(region.GetStartKey(), region.GetEndKey())
 }
 
 // FitRegion fits a region to the rules it matches.
@@ -334,7 +318,7 @@ func (m *RuleManager) FitRegion(storeSet StoreSet, region *core.RegionInfo) *Reg
 			return fit
 		}
 	}
-	fit := fitRegion(regionStores, region, rules, m.opt.IsWitnessAllowed())
+	fit := fitRegion(regionStores, region, rules)
 	fit.regionStores = regionStores
 	fit.rules = rules
 	return fit
@@ -701,9 +685,12 @@ func (m *RuleManager) IsInitialized() bool {
 // checkRule check the rule whether will have RuleFit after FitRegion
 // in order to reduce the calculation.
 func checkRule(rule *Rule, stores []*core.StoreInfo) bool {
-	return slice.AnyOf(stores, func(idx int) bool {
-		return MatchLabelConstraints(stores[idx], rule.LabelConstraints)
-	})
+	for _, store := range stores {
+		if MatchLabelConstraints(store, rule.LabelConstraints) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetKeyType will update keyType for adjustRule()

@@ -14,7 +14,7 @@
 
 package cache
 
-import "github.com/tikv/pd/pkg/utils/syncutil"
+import "sync"
 
 // Cache is an interface for cache system
 type Cache interface {
@@ -49,7 +49,7 @@ var (
 
 type threadSafeCache struct {
 	cache Cache
-	lock  syncutil.RWMutex
+	lock  sync.RWMutex
 }
 
 func newThreadSafeCache(cache Cache) Cache {

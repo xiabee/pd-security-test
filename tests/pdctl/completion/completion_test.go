@@ -17,22 +17,29 @@ package completion_test
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
 )
 
-func TestCompletion(t *testing.T) {
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&completionTestSuite{})
+
+type completionTestSuite struct{}
+
+func (s *completionTestSuite) TestCompletion(c *C) {
 	cmd := pdctlCmd.GetRootCmd()
 
 	// completion command
 	args := []string{"completion", "bash"}
 	_, err := pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	// completion command
 	args = []string{"completion", "zsh"}
 	_, err = pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 }

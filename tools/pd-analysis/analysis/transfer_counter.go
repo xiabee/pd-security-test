@@ -22,8 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
-	"github.com/tikv/pd/pkg/utils/syncutil"
 )
 
 // TransferCounter is to count transfer schedule for judging whether redundant
@@ -41,7 +39,7 @@ type TransferCounter struct {
 	graphMat          [][]uint64
 	indexArray        []uint64
 	unIndexMap        map[uint64]int
-	mutex             syncutil.Mutex
+	mutex             sync.Mutex
 	loopResultPath    [][]int
 	loopResultCount   []uint64
 }

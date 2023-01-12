@@ -16,13 +16,12 @@ package cache
 
 import (
 	"container/list"
-
-	"github.com/tikv/pd/pkg/utils/syncutil"
+	"sync"
 )
 
 // FIFO is 'First-In-First-Out' cache.
 type FIFO struct {
-	syncutil.RWMutex
+	sync.RWMutex
 
 	// maxCount is the maximum number of items.
 	// 0 means no limit.
@@ -86,32 +85,6 @@ func (c *FIFO) FromElems(key uint64) []*Item {
 		}
 	}
 
-	return elems
-}
-
-// FromLastSameElems returns continuous items that have the same comparable attribute with the the lastest one.
-func (c *FIFO) FromLastSameElems(checkFunc func(interface{}) (bool, string)) []*Item {
-	c.RLock()
-	defer c.RUnlock()
-
-	elems := make([]*Item, 0, c.ll.Len())
-	var lastItem interface{}
-	for ele := c.ll.Front(); ele != nil; ele = ele.Next() {
-		kv := ele.Value.(*Item)
-		if lastItem == nil {
-			elems = append(elems, kv)
-			lastItem = kv.Value
-			continue
-		}
-		ok1, value1 := checkFunc(kv.Value)
-		ok2, value2 := checkFunc(lastItem)
-		if ok1 && ok2 && value1 == value2 {
-			elems = append(elems, kv)
-			lastItem = kv.Value
-		} else {
-			break
-		}
-	}
 	return elems
 }
 

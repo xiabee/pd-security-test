@@ -17,19 +17,17 @@ package schedulers
 import (
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule"
-	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/plan"
-	"github.com/tikv/pd/server/storage/endpoint"
+	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/unrolled/render"
 )
 
@@ -65,7 +63,7 @@ func init() {
 		}
 	})
 
-	schedule.RegisterScheduler(GrantLeaderType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	schedule.RegisterScheduler(GrantLeaderType, func(opController *schedule.OperatorController, storage *core.Storage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		conf := &grantLeaderSchedulerConfig{StoreIDWithRanges: make(map[uint64][]core.KeyRange), storage: storage}
 		conf.cluster = opController.GetCluster()
 		if err := decoder(conf); err != nil {
@@ -76,10 +74,10 @@ func init() {
 }
 
 type grantLeaderSchedulerConfig struct {
-	mu                syncutil.RWMutex
-	storage           endpoint.ConfigStorage
+	mu                sync.RWMutex
+	storage           *core.Storage
 	StoreIDWithRanges map[uint64][]core.KeyRange `json:"store-id-ranges"`
-	cluster           schedule.Cluster
+	cluster           opt.Cluster
 }
 
 func (conf *grantLeaderSchedulerConfig) BuildWithArgs(args []string) error {
@@ -104,12 +102,8 @@ func (conf *grantLeaderSchedulerConfig) BuildWithArgs(args []string) error {
 func (conf *grantLeaderSchedulerConfig) Clone() *grantLeaderSchedulerConfig {
 	conf.mu.RLock()
 	defer conf.mu.RUnlock()
-	newStoreIDWithRanges := make(map[uint64][]core.KeyRange)
-	for k, v := range conf.StoreIDWithRanges {
-		newStoreIDWithRanges[k] = v
-	}
 	return &grantLeaderSchedulerConfig{
-		StoreIDWithRanges: newStoreIDWithRanges,
+		StoreIDWithRanges: conf.StoreIDWithRanges,
 	}
 }
 
@@ -204,7 +198,7 @@ func (s *grantLeaderScheduler) EncodeConfig() ([]byte, error) {
 	return schedule.EncodeConfig(s.conf)
 }
 
-func (s *grantLeaderScheduler) Prepare(cluster schedule.Cluster) error {
+func (s *grantLeaderScheduler) Prepare(cluster opt.Cluster) error {
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
 	var res error
@@ -216,7 +210,7 @@ func (s *grantLeaderScheduler) Prepare(cluster schedule.Cluster) error {
 	return res
 }
 
-func (s *grantLeaderScheduler) Cleanup(cluster schedule.Cluster) {
+func (s *grantLeaderScheduler) Cleanup(cluster opt.Cluster) {
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
 	for id := range s.conf.StoreIDWithRanges {
@@ -224,7 +218,7 @@ func (s *grantLeaderScheduler) Cleanup(cluster schedule.Cluster) {
 	}
 }
 
-func (s *grantLeaderScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
+func (s *grantLeaderScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 	allowed := s.OpController.OperatorCount(operator.OpLeader) < cluster.GetOpts().GetLeaderScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpLeader.String()).Inc()
@@ -232,15 +226,13 @@ func (s *grantLeaderScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool 
 	return allowed
 }
 
-func (s *grantLeaderScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (s *grantLeaderScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
 	ops := make([]*operator.Operator, 0, len(s.conf.StoreIDWithRanges))
-	pendingFilter := filter.NewRegionPendingFilter()
-	downFilter := filter.NewRegionDownFilter()
 	for id, ranges := range s.conf.StoreIDWithRanges {
-		region := filter.SelectOneRegion(cluster.RandFollowerRegions(id, ranges), nil, pendingFilter, downFilter)
+		region := cluster.RandFollowerRegion(id, ranges, schedule.IsRegionHealthy)
 		if region == nil {
 			schedulerCounter.WithLabelValues(s.GetName(), "no-follower").Inc()
 			continue
@@ -252,11 +244,11 @@ func (s *grantLeaderScheduler) Schedule(cluster schedule.Cluster, dryRun bool) (
 			continue
 		}
 		op.Counters = append(op.Counters, schedulerCounter.WithLabelValues(s.GetName(), "new-operator"))
-		op.SetPriorityLevel(core.High)
+		op.SetPriorityLevel(core.HighPriority)
 		ops = append(ops, op)
 	}
 
-	return ops, nil
+	return ops
 }
 
 type grantLeaderHandler struct {
@@ -352,8 +344,8 @@ func newGrantLeaderHandler(config *grantLeaderSchedulerConfig) http.Handler {
 		rd:     render.New(render.Options{IndentJSON: true}),
 	}
 	router := mux.NewRouter()
-	router.HandleFunc("/config", h.UpdateConfig).Methods(http.MethodPost)
-	router.HandleFunc("/list", h.ListConfig).Methods(http.MethodGet)
-	router.HandleFunc("/delete/{store_id}", h.DeleteConfig).Methods(http.MethodDelete)
+	router.HandleFunc("/config", h.UpdateConfig).Methods("POST")
+	router.HandleFunc("/list", h.ListConfig).Methods("GET")
+	router.HandleFunc("/delete/{store_id}", h.DeleteConfig).Methods("DELETE")
 	return router
 }

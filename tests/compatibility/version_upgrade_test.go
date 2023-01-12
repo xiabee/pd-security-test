@@ -19,27 +19,43 @@ import (
 	"testing"
 
 	"github.com/coreos/go-semver/semver"
-	"github.com/pingcap/errors"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/tests"
 )
 
-func TestStoreRegister(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cluster, err := tests.NewTestCluster(ctx, 1)
-	re.NoError(err)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&compatibilityTestSuite{})
+
+type compatibilityTestSuite struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (s *compatibilityTestSuite) SetUpSuite(c *C) {
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	server.EnableZap = true
+}
+
+func (s *compatibilityTestSuite) TearDownSuite(c *C) {
+	s.cancel()
+}
+
+func (s *compatibilityTestSuite) TestStoreRegister(c *C) {
+	cluster, err := tests.NewTestCluster(s.ctx, 1)
+	c.Assert(err, IsNil)
 	defer cluster.Destroy()
 
 	err = cluster.RunInitialServers()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	cluster.WaitLeader()
 	leaderServer := cluster.GetServer(cluster.GetLeader())
-	re.NoError(leaderServer.BootstrapCluster())
+	c.Assert(leaderServer.BootstrapCluster(), IsNil)
 
 	putStoreRequest := &pdpb.PutStoreRequest{
 		Header: &pdpb.RequestHeader{ClusterId: leaderServer.GetClusterID()},
@@ -52,21 +68,21 @@ func TestStoreRegister(t *testing.T) {
 
 	svr := &server.GrpcServer{Server: leaderServer.GetServer()}
 	_, err = svr.PutStore(context.Background(), putStoreRequest)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// FIX ME: read v0.0.0 in sometime
 	cluster.WaitLeader()
 	version := leaderServer.GetClusterVersion()
 	// Restart all PDs.
 	err = cluster.StopAll()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	err = cluster.RunInitialServers()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	cluster.WaitLeader()
 
 	leaderServer = cluster.GetServer(cluster.GetLeader())
-	re.NotNil(leaderServer)
+	c.Assert(leaderServer, NotNil)
 	newVersion := leaderServer.GetClusterVersion()
-	re.Equal(version, newVersion)
+	c.Assert(version, Equals, newVersion)
 
 	// putNewStore with old version
 	putStoreRequest = &pdpb.PutStoreRequest{
@@ -77,23 +93,19 @@ func TestStoreRegister(t *testing.T) {
 			Version: "1.0.1",
 		},
 	}
-	putStoreResponse, err := svr.PutStore(context.Background(), putStoreRequest)
-	re.NoError(err)
-	re.Error(errors.New(putStoreResponse.GetHeader().GetError().String()))
+	_, err = svr.PutStore(context.Background(), putStoreRequest)
+	c.Assert(err, NotNil)
 }
 
-func TestRollingUpgrade(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cluster, err := tests.NewTestCluster(ctx, 1)
-	re.NoError(err)
+func (s *compatibilityTestSuite) TestRollingUpgrade(c *C) {
+	cluster, err := tests.NewTestCluster(s.ctx, 1)
+	c.Assert(err, IsNil)
 	defer cluster.Destroy()
 	err = cluster.RunInitialServers()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	cluster.WaitLeader()
 	leaderServer := cluster.GetServer(cluster.GetLeader())
-	re.NoError(leaderServer.BootstrapCluster())
+	c.Assert(leaderServer.BootstrapCluster(), IsNil)
 
 	stores := []*pdpb.PutStoreRequest{
 		{
@@ -133,22 +145,21 @@ func TestRollingUpgrade(t *testing.T) {
 	svr := &server.GrpcServer{Server: leaderServer.GetServer()}
 	for _, store := range stores {
 		_, err = svr.PutStore(context.Background(), store)
-		re.NoError(err)
+		c.Assert(err, IsNil)
 	}
-	re.Equal(semver.Version{Major: 2, Minor: 0, Patch: 1}, leaderServer.GetClusterVersion())
+	c.Assert(leaderServer.GetClusterVersion(), Equals, semver.Version{Major: 2, Minor: 0, Patch: 1})
 	// rolling update
 	for i, store := range stores {
 		if i == 0 {
 			store.Store.State = metapb.StoreState_Tombstone
-			store.Store.NodeState = metapb.NodeState_Removed
 		}
 		store.Store.Version = "2.1.0"
 		resp, err := svr.PutStore(context.Background(), store)
-		re.NoError(err)
+		c.Assert(err, IsNil)
 		if i != len(stores)-1 {
-			re.Equal(semver.Version{Major: 2, Minor: 0, Patch: 1}, leaderServer.GetClusterVersion())
-			re.Nil(resp.GetHeader().GetError())
+			c.Assert(leaderServer.GetClusterVersion(), Equals, semver.Version{Major: 2, Minor: 0, Patch: 1})
+			c.Assert(resp.GetHeader().GetError(), IsNil)
 		}
 	}
-	re.Equal(semver.Version{Major: 2, Minor: 1}, leaderServer.GetClusterVersion())
+	c.Assert(leaderServer.GetClusterVersion(), Equals, semver.Version{Major: 2, Minor: 1})
 }

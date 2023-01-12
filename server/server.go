@@ -30,41 +30,32 @@ import (
 	"time"
 
 	"github.com/coreos/go-semver/semver"
+	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/diagnosticspb"
-	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/sysutil"
-	"github.com/tikv/pd/pkg/audit"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/ratelimit"
-	"github.com/tikv/pd/pkg/storage/kv"
+	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/grpcutil"
+	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/pkg/systimemon"
-	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/grpcutil"
-	"github.com/tikv/pd/pkg/utils/jsonutil"
-	"github.com/tikv/pd/pkg/utils/logutil"
-	"github.com/tikv/pd/pkg/utils/tsoutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/encryptionkm"
-	"github.com/tikv/pd/server/gc"
 	"github.com/tikv/pd/server/id"
-	"github.com/tikv/pd/server/keyspace"
+	"github.com/tikv/pd/server/kv"
 	"github.com/tikv/pd/server/member"
 	syncer "github.com/tikv/pd/server/region_syncer"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/hbstream"
 	"github.com/tikv/pd/server/schedule/placement"
-	"github.com/tikv/pd/server/storage"
-	"github.com/tikv/pd/server/storage/endpoint"
 	"github.com/tikv/pd/server/tso"
 	"github.com/tikv/pd/server/versioninfo"
 	"github.com/urfave/negroni"
@@ -83,15 +74,14 @@ const (
 	pdRootPath      = "/pd"
 	pdAPIPrefix     = "/pd/"
 	pdClusterIDPath = "/pd/cluster_id"
-	// idAllocPath for idAllocator to save persistent window's end.
-	idAllocPath  = "alloc_id"
-	idAllocLabel = "idalloc"
-
-	recoveringMarkPath = "cluster/markers/snapshot-recovering"
 )
 
-// EtcdStartTimeout the timeout of the startup etcd.
-var EtcdStartTimeout = time.Minute * 5
+var (
+	// EnableZap enable the zap logger in embed etcd.
+	EnableZap = false
+	// EtcdStartTimeout the timeout of the startup etcd.
+	EtcdStartTimeout = time.Minute * 5
+)
 
 // Server is the pd server.
 // nolint
@@ -105,12 +95,10 @@ type Server struct {
 	startTimestamp int64
 
 	// Configs and initial fields.
-	cfg                             *config.Config
-	serviceMiddlewareCfg            *config.ServiceMiddlewareConfig
-	etcdCfg                         *embed.Config
-	serviceMiddlewarePersistOptions *config.ServiceMiddlewarePersistOptions
-	persistOptions                  *config.PersistOptions
-	handler                         *Handler
+	cfg            *config.Config
+	etcdCfg        *embed.Config
+	persistOptions *config.PersistOptions
+	handler        *Handler
 
 	ctx              context.Context
 	serverLoopCtx    context.Context
@@ -134,11 +122,7 @@ type Server struct {
 	// for encryption
 	encryptionKeyManager *encryptionkm.KeyManager
 	// for storage operation.
-	storage storage.Storage
-	// safepoint manager
-	gcSafePointManager *gc.SafePointManager
-	// keyspace manager
-	keyspaceManager *keyspace.Manager
+	storage *core.Storage
 	// for basicCluster operation.
 	basicCluster *core.BasicCluster
 	// for tso.
@@ -155,21 +139,16 @@ type Server struct {
 	startCallbacks []func()
 	closeCallbacks []func()
 
+	// serviceSafePointLock is a lock for UpdateServiceGCSafePoint
+	serviceSafePointLock sync.Mutex
+
 	// hot region history info storeage
-	hotRegionStorage *storage.HotRegionStorage
+	hotRegionStorage *core.HotRegionStorage
 	// Store as map[string]*grpc.ClientConn
 	clientConns sync.Map
 	// tsoDispatcher is used to dispatch different TSO requests to
 	// the corresponding forwarding TSO channel.
 	tsoDispatcher sync.Map /* Store as map[string]chan *tsoRequest */
-
-	serviceRateLimiter *ratelimit.Limiter
-	serviceLabels      map[string][]apiutil.AccessPath
-	apiServiceLabelMap map[apiutil.AccessPath]string
-
-	serviceAuditBackendLabels map[string]*audit.BackendLabels
-
-	auditBackends []audit.Backend
 }
 
 // HandlerBuilder builds a server HTTP handler.
@@ -232,6 +211,8 @@ func combineBuilderServerHTTPService(ctx context.Context, svr *Server, serviceBu
 				// Deprecated
 				router.Path("/pd/health").Handler(handler)
 				// Deprecated
+				router.Path("/pd/diagnose").Handler(handler)
+				// Deprecated
 				router.Path("/pd/ping").Handler(handler)
 			}
 		}
@@ -246,30 +227,17 @@ func combineBuilderServerHTTPService(ctx context.Context, svr *Server, serviceBu
 func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...HandlerBuilder) (*Server, error) {
 	log.Info("PD Config", zap.Reflect("config", cfg))
 	rand.Seed(time.Now().UnixNano())
-	serviceMiddlewareCfg := config.NewServiceMiddlewareConfig()
 
 	s := &Server{
-		cfg:                             cfg,
-		persistOptions:                  config.NewPersistOptions(cfg),
-		serviceMiddlewareCfg:            serviceMiddlewareCfg,
-		serviceMiddlewarePersistOptions: config.NewServiceMiddlewarePersistOptions(serviceMiddlewareCfg),
-		member:                          &member.Member{},
-		ctx:                             ctx,
-		startTimestamp:                  time.Now().Unix(),
-		DiagnosticsServer:               sysutil.NewDiagnosticsServer(cfg.Log.File.Filename),
+		cfg:               cfg,
+		persistOptions:    config.NewPersistOptions(cfg),
+		member:            &member.Member{},
+		ctx:               ctx,
+		startTimestamp:    time.Now().Unix(),
+		DiagnosticsServer: sysutil.NewDiagnosticsServer(cfg.Log.File.Filename),
 	}
-	s.handler = newHandler(s)
 
-	// create audit backend
-	s.auditBackends = []audit.Backend{
-		audit.NewLocalLogBackend(true),
-		audit.NewPrometheusHistogramBackend(serviceAuditHistogram, false),
-	}
-	s.serviceRateLimiter = ratelimit.NewLimiter()
-	s.serviceAuditBackendLabels = make(map[string]*audit.BackendLabels)
-	s.serviceRateLimiter = ratelimit.NewLimiter()
-	s.serviceLabels = make(map[string][]apiutil.AccessPath)
-	s.apiServiceLabelMap = make(map[apiutil.AccessPath]string)
+	s.handler = newHandler(s)
 
 	// Adjust etcd config.
 	etcdCfg, err := s.cfg.GenEmbedEtcdConfig()
@@ -284,12 +252,18 @@ func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...Ha
 		etcdCfg.UserHandlers = userHandlers
 	}
 	etcdCfg.ServiceRegister = func(gs *grpc.Server) {
-		grpcServer := &GrpcServer{Server: s}
-		pdpb.RegisterPDServer(gs, grpcServer)
-		keyspacepb.RegisterKeyspaceServer(gs, &KeyspaceServer{GrpcServer: grpcServer})
+		pdpb.RegisterPDServer(gs, &GrpcServer{Server: s})
 		diagnosticspb.RegisterDiagnosticsServer(gs, s)
 	}
 	s.etcdCfg = etcdCfg
+	if EnableZap {
+		// The etcd master version has removed embed.Config.SetupLogging.
+		// Now logger is set up automatically based on embed.Config.Logger,
+		// Use zap logger in the test, otherwise will panic.
+		// Reference: https://go.etcd.io/etcd/blob/master/embed/config_logging.go#L45
+		s.etcdCfg.Logger = "zap"
+		s.etcdCfg.LogOutputs = []string{"stdout"}
+	}
 	s.lg = cfg.GetZapLogger()
 	s.logProps = cfg.GetZapLogProperties()
 	return s, nil
@@ -392,58 +366,41 @@ func (s *Server) startServer(ctx context.Context) error {
 	s.member.SetMemberDeployPath(s.member.ID())
 	s.member.SetMemberBinaryVersion(s.member.ID(), versioninfo.PDReleaseVersion)
 	s.member.SetMemberGitHash(s.member.ID(), versioninfo.PDGitHash)
-	s.idAllocator = id.NewAllocator(&id.AllocatorParams{
-		Client:    s.client,
-		RootPath:  s.rootPath,
-		AllocPath: idAllocPath,
-		Label:     idAllocLabel,
-		Member:    s.member.MemberValue(),
-	})
+	s.idAllocator = id.NewAllocator(s.client, s.rootPath, s.member.MemberValue())
 	s.tsoAllocatorManager = tso.NewAllocatorManager(
 		s.member, s.rootPath, s.cfg,
 		func() time.Duration { return s.persistOptions.GetMaxResetTSGap() })
 	// Set up the Global TSO Allocator here, it will be initialized once the PD campaigns leader successfully.
 	s.tsoAllocatorManager.SetUpAllocator(ctx, tso.GlobalDCLocation, s.member.GetLeadership())
-	// When disabled the Local TSO, we should clean up the Local TSO Allocator's meta info written in etcd if it exists.
-	if !s.cfg.EnableLocalTSO {
-		if err = s.tsoAllocatorManager.CleanUpDCLocation(); err != nil {
-			return err
-		}
-	}
 	if zone, exist := s.cfg.Labels[config.ZoneLabel]; exist && zone != "" && s.cfg.EnableLocalTSO {
 		if err = s.tsoAllocatorManager.SetLocalTSOConfig(zone); err != nil {
 			return err
 		}
 	}
-	s.encryptionKeyManager, err = encryptionkm.NewKeyManager(s.client, &s.cfg.Security.Encryption)
+	encryptionKeyManager, err := encryptionkm.NewKeyManager(s.client, &s.cfg.Security.Encryption)
 	if err != nil {
 		return err
 	}
-	regionStorage, err := storage.NewStorageWithLevelDBBackend(ctx, filepath.Join(s.cfg.DataDir, "region-meta"), s.encryptionKeyManager)
+	s.encryptionKeyManager = encryptionKeyManager
+	kvBase := kv.NewEtcdKVBase(s.client, s.rootPath)
+	path := filepath.Join(s.cfg.DataDir, "region-meta")
+	regionStorage, err := core.NewRegionStorage(ctx, path, encryptionKeyManager)
 	if err != nil {
 		return err
 	}
-	defaultStorage := storage.NewStorageWithEtcdBackend(s.client, s.rootPath)
-	s.storage = storage.NewCoreStorage(defaultStorage, regionStorage)
-	s.gcSafePointManager = gc.NewSafePointManager(s.storage)
-	keyspaceIDAllocator := id.NewAllocator(&id.AllocatorParams{
-		Client:    s.client,
-		RootPath:  s.rootPath,
-		AllocPath: endpoint.KeyspaceIDAlloc(),
-		Label:     keyspace.AllocLabel,
-		Member:    s.member.MemberValue(),
-		Step:      keyspace.AllocStep,
-	})
-	s.keyspaceManager, err = keyspace.NewKeyspaceManager(s.storage, keyspaceIDAllocator)
-	if err != nil {
-		return err
-	}
+
+	s.storage = core.NewStorage(
+		kvBase,
+		core.WithRegionStorage(regionStorage),
+		core.WithEncryptionKeyManager(encryptionKeyManager),
+	)
 	s.basicCluster = core.NewBasicCluster()
-	s.cluster = cluster.NewRaftCluster(ctx, s.clusterID, syncer.NewRegionSyncer(s), s.client, s.httpClient)
+	s.cluster = cluster.NewRaftCluster(ctx, s.GetClusterRootPath(), s.clusterID, syncer.NewRegionSyncer(s), s.client, s.httpClient)
 	s.hbStreams = hbstream.NewHeartbeatStreams(ctx, s.clusterID, s.cluster)
 	// initial hot_region_storage in here.
-	s.hotRegionStorage, err = storage.NewHotRegionsStorage(
-		ctx, filepath.Join(s.cfg.DataDir, "hot-region"), s.encryptionKeyManager, s.handler)
+	hotRegionPath := filepath.Join(s.cfg.DataDir, "hot-region")
+	s.hotRegionStorage, err = core.NewHotRegionsStorage(
+		ctx, hotRegionPath, encryptionKeyManager, s.handler)
 	if err != nil {
 		return err
 	}
@@ -545,16 +502,6 @@ func (s *Server) Run() error {
 	return nil
 }
 
-// SetServiceAuditBackendForHTTP is used to register service audit config for HTTP.
-func (s *Server) SetServiceAuditBackendForHTTP(route *mux.Route, labels ...string) {
-	if len(route.GetName()) == 0 {
-		return
-	}
-	if len(labels) > 0 {
-		s.SetServiceAuditBackendLabels(route.GetName(), labels)
-	}
-}
-
 // Context returns the context of server.
 func (s *Server) Context() context.Context {
 	return s.ctx
@@ -646,15 +593,13 @@ func (s *Server) bootstrapCluster(req *pdpb.BootstrapRequest) (*pdpb.BootstrapRe
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	clusterRootPath := endpoint.ClusterRootPath(s.rootPath)
+	clusterRootPath := s.GetClusterRootPath()
 
 	var ops []clientv3.Op
 	ops = append(ops, clientv3.OpPut(clusterRootPath, string(clusterValue)))
 
 	// Set bootstrap time
-	// Because we will write the cluster meta into etcd directly,
-	// so we need to handle the root key path manually here.
-	bootstrapKey := endpoint.AppendToRootPath(s.rootPath, endpoint.ClusterBootstrapTimeKey())
+	bootstrapKey := makeBootstrapTimeKey(clusterRootPath)
 	nano := time.Now().UnixNano()
 
 	timeData := typeutil.Uint64ToBytes(uint64(nano))
@@ -662,7 +607,7 @@ func (s *Server) bootstrapCluster(req *pdpb.BootstrapRequest) (*pdpb.BootstrapRe
 
 	// Set store meta
 	storeMeta := req.GetStore()
-	storePath := endpoint.AppendToRootPath(s.rootPath, endpoint.StorePath(storeMeta.GetId()))
+	storePath := makeStoreKey(clusterRootPath, storeMeta.GetId())
 	storeValue, err := storeMeta.Marshal()
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -675,7 +620,7 @@ func (s *Server) bootstrapCluster(req *pdpb.BootstrapRequest) (*pdpb.BootstrapRe
 	}
 
 	// Set region meta with region id.
-	regionPath := endpoint.AppendToRootPath(s.rootPath, endpoint.RegionPath(req.GetRegion().GetId()))
+	regionPath := makeRegionKey(clusterRootPath, req.GetRegion().GetId())
 	ops = append(ops, clientv3.OpPut(regionPath, string(regionValue)))
 
 	// TODO: we must figure out a better way to handle bootstrap failed, maybe intervene manually.
@@ -736,7 +681,7 @@ func (s *Server) GetClientScheme() string {
 
 // GetMemberInfo returns the server member information.
 func (s *Server) GetMemberInfo() *pdpb.Member {
-	return typeutil.DeepClone(s.member.Member(), core.MemberFactory)
+	return proto.Clone(s.member.Member()).(*pdpb.Member)
 }
 
 // GetHandler returns the handler for API.
@@ -770,18 +715,18 @@ func (s *Server) GetMember() *member.Member {
 }
 
 // GetStorage returns the backend storage of server.
-func (s *Server) GetStorage() storage.Storage {
+func (s *Server) GetStorage() *core.Storage {
 	return s.storage
 }
 
 // GetHistoryHotRegionStorage returns the backend storage of historyHotRegion.
-func (s *Server) GetHistoryHotRegionStorage() *storage.HotRegionStorage {
+func (s *Server) GetHistoryHotRegionStorage() *core.HotRegionStorage {
 	return s.hotRegionStorage
 }
 
 // SetStorage changes the storage only for test purpose.
 // When we use it, we should prevent calling GetStorage, otherwise, it may cause a data race problem.
-func (s *Server) SetStorage(storage storage.Storage) {
+func (s *Server) SetStorage(storage *core.Storage) {
 	s.storage = storage
 }
 
@@ -793,11 +738,6 @@ func (s *Server) GetBasicCluster() *core.BasicCluster {
 // GetPersistOptions returns the schedule option.
 func (s *Server) GetPersistOptions() *config.PersistOptions {
 	return s.persistOptions
-}
-
-// GetServiceMiddlewarePersistOptions returns the service middleware persist option.
-func (s *Server) GetServiceMiddlewarePersistOptions() *config.ServiceMiddlewarePersistOptions {
-	return s.serviceMiddlewarePersistOptions
 }
 
 // GetHBStreams returns the heartbeat streams.
@@ -813,11 +753,6 @@ func (s *Server) GetAllocator() id.Allocator {
 // GetTSOAllocatorManager returns the manager of TSO Allocator.
 func (s *Server) GetTSOAllocatorManager() *tso.AllocatorManager {
 	return s.tsoAllocatorManager
-}
-
-// GetKeyspaceManager returns the keyspace manager of server.
-func (s *Server) GetKeyspaceManager() *keyspace.Manager {
-	return s.keyspaceManager
 }
 
 // Name returns the unique etcd Name for this server in etcd cluster.
@@ -838,23 +773,10 @@ func (s *Server) StartTimestamp() int64 {
 // GetMembers returns PD server list.
 func (s *Server) GetMembers() ([]*pdpb.Member, error) {
 	if s.IsClosed() {
-		return nil, errs.ErrServerNotStarted.FastGenByArgs()
+		return nil, errors.New("server not started")
 	}
 	members, err := cluster.GetMembers(s.GetClient())
 	return members, err
-}
-
-// GetServiceMiddlewareConfig gets the service middleware config information.
-func (s *Server) GetServiceMiddlewareConfig() *config.ServiceMiddlewareConfig {
-	cfg := s.serviceMiddlewareCfg.Clone()
-	cfg.AuditConfig = *s.serviceMiddlewarePersistOptions.GetAuditConfig().Clone()
-	cfg.RateLimitConfig = *s.serviceMiddlewarePersistOptions.GetRateLimitConfig().Clone()
-	return cfg
-}
-
-// SetEnableLocalTSO sets enable-local-tso flag of Server. This function only for test.
-func (s *Server) SetEnableLocalTSO(enableLocalTSO bool) {
-	s.cfg.EnableLocalTSO = enableLocalTSO
 }
 
 // GetConfig gets the config information.
@@ -866,10 +788,11 @@ func (s *Server) GetConfig() *config.Config {
 	cfg.ReplicationMode = *s.persistOptions.GetReplicationModeConfig()
 	cfg.LabelProperty = s.persistOptions.GetLabelPropertyConfig().Clone()
 	cfg.ClusterVersion = *s.persistOptions.GetClusterVersion()
-	if s.storage == nil {
+	storage := s.GetStorage()
+	if storage == nil {
 		return cfg
 	}
-	sches, configs, err := s.storage.LoadAllScheduleConfig()
+	sches, configs, err := storage.LoadAllScheduleConfig()
 	if err != nil {
 		return cfg
 	}
@@ -942,7 +865,7 @@ func (s *Server) SetReplicationConfig(cfg config.ReplicationConfig) error {
 		} else {
 			// NOTE: can be removed after placement rules feature is enabled by default.
 			for _, s := range raftCluster.GetStores() {
-				if !s.IsRemoved() && s.IsTiFlash() {
+				if !s.IsTombstone() && core.IsStoreContainLabel(s.GetMeta(), core.EngineKey, core.EngineTiFlash) {
 					return errors.New("cannot disable placement rules with TiFlash nodes")
 				}
 			}
@@ -1001,76 +924,6 @@ func (s *Server) SetReplicationConfig(cfg config.ReplicationConfig) error {
 		return err
 	}
 	log.Info("replication config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
-	return nil
-}
-
-// GetAuditConfig gets the audit config information.
-func (s *Server) GetAuditConfig() *config.AuditConfig {
-	return s.serviceMiddlewarePersistOptions.GetAuditConfig().Clone()
-}
-
-// SetAuditConfig sets the audit config.
-func (s *Server) SetAuditConfig(cfg config.AuditConfig) error {
-	old := s.serviceMiddlewarePersistOptions.GetAuditConfig()
-	s.serviceMiddlewarePersistOptions.SetAuditConfig(&cfg)
-	if err := s.serviceMiddlewarePersistOptions.Persist(s.storage); err != nil {
-		s.serviceMiddlewarePersistOptions.SetAuditConfig(old)
-		log.Error("failed to update Audit config",
-			zap.Reflect("new", cfg),
-			zap.Reflect("old", old),
-			errs.ZapError(err))
-		return err
-	}
-	log.Info("Audit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
-	return nil
-}
-
-// UpdateRateLimitConfig is used to update rate-limit config which will reserve old limiter-config
-func (s *Server) UpdateRateLimitConfig(key, label string, value ratelimit.DimensionConfig) error {
-	cfg := s.GetServiceMiddlewareConfig()
-	rateLimitCfg := make(map[string]ratelimit.DimensionConfig)
-	for label, item := range cfg.LimiterConfig {
-		rateLimitCfg[label] = item
-	}
-	rateLimitCfg[label] = value
-	return s.UpdateRateLimit(&cfg.RateLimitConfig, key, &rateLimitCfg)
-}
-
-// UpdateRateLimit is used to update rate-limit config which will overwrite limiter-config
-func (s *Server) UpdateRateLimit(cfg *config.RateLimitConfig, key string, value interface{}) error {
-	updated, found, err := jsonutil.AddKeyValue(cfg, key, value)
-	if err != nil {
-		return err
-	}
-
-	if !found {
-		return errors.Errorf("config item %s not found", key)
-	}
-
-	if updated {
-		err = s.SetRateLimitConfig(*cfg)
-	}
-	return err
-}
-
-// GetRateLimitConfig gets the rate limit config information.
-func (s *Server) GetRateLimitConfig() *config.RateLimitConfig {
-	return s.serviceMiddlewarePersistOptions.GetRateLimitConfig().Clone()
-}
-
-// SetRateLimitConfig sets the rate limit config.
-func (s *Server) SetRateLimitConfig(cfg config.RateLimitConfig) error {
-	old := s.serviceMiddlewarePersistOptions.GetRateLimitConfig()
-	s.serviceMiddlewarePersistOptions.SetRateLimitConfig(&cfg)
-	if err := s.serviceMiddlewarePersistOptions.Persist(s.storage); err != nil {
-		s.serviceMiddlewarePersistOptions.SetRateLimitConfig(old)
-		log.Error("failed to update Rate Limit config",
-			zap.Reflect("new", cfg),
-			zap.Reflect("old", old),
-			errs.ZapError(err))
-		return err
-	}
-	log.Info("Rate Limit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
 	return nil
 }
 
@@ -1200,6 +1053,16 @@ func (s *Server) GetTLSConfig() *grpcutil.TLSConfig {
 	return &s.cfg.Security.TLSConfig
 }
 
+// GetServerRootPath returns the server root path.
+func (s *Server) GetServerRootPath() string {
+	return s.rootPath
+}
+
+// GetClusterRootPath returns the cluster root path.
+func (s *Server) GetClusterRootPath() string {
+	return path.Join(s.rootPath, "raft")
+}
+
 // GetRaftCluster gets Raft cluster.
 // If cluster has not been bootstrapped, return nil.
 func (s *Server) GetRaftCluster() *cluster.RaftCluster {
@@ -1238,72 +1101,6 @@ func (s *Server) GetRegions() []*core.RegionInfo {
 		return cluster.GetRegions()
 	}
 	return nil
-}
-
-// GetServiceLabels returns ApiAccessPaths by given service label
-// TODO: this function will be used for updating api rate limit config
-func (s *Server) GetServiceLabels(serviceLabel string) []apiutil.AccessPath {
-	if apis, ok := s.serviceLabels[serviceLabel]; ok {
-		return apis
-	}
-	return nil
-}
-
-// GetAPIAccessServiceLabel returns service label by given access path
-// TODO: this function will be used for updating api rate limit config
-func (s *Server) GetAPIAccessServiceLabel(accessPath apiutil.AccessPath) string {
-	if servicelabel, ok := s.apiServiceLabelMap[accessPath]; ok {
-		return servicelabel
-	}
-	accessPathNoMethod := apiutil.NewAccessPath(accessPath.Path, "")
-	if servicelabel, ok := s.apiServiceLabelMap[accessPathNoMethod]; ok {
-		return servicelabel
-	}
-	return ""
-}
-
-// AddServiceLabel is used to add the relationship between service label and api access path
-// TODO: this function will be used for updating api rate limit config
-func (s *Server) AddServiceLabel(serviceLabel string, accessPath apiutil.AccessPath) {
-	if slice, ok := s.serviceLabels[serviceLabel]; ok {
-		slice = append(slice, accessPath)
-		s.serviceLabels[serviceLabel] = slice
-	} else {
-		slice = []apiutil.AccessPath{accessPath}
-		s.serviceLabels[serviceLabel] = slice
-	}
-
-	s.apiServiceLabelMap[accessPath] = serviceLabel
-}
-
-// GetAuditBackend returns audit backends
-func (s *Server) GetAuditBackend() []audit.Backend {
-	return s.auditBackends
-}
-
-// GetServiceAuditBackendLabels returns audit backend labels by serviceLabel
-func (s *Server) GetServiceAuditBackendLabels(serviceLabel string) *audit.BackendLabels {
-	return s.serviceAuditBackendLabels[serviceLabel]
-}
-
-// SetServiceAuditBackendLabels is used to add audit backend labels for service by service label
-func (s *Server) SetServiceAuditBackendLabels(serviceLabel string, labels []string) {
-	s.serviceAuditBackendLabels[serviceLabel] = &audit.BackendLabels{Labels: labels}
-}
-
-// GetServiceRateLimiter is used to get rate limiter
-func (s *Server) GetServiceRateLimiter() *ratelimit.Limiter {
-	return s.serviceRateLimiter
-}
-
-// IsInRateLimitAllowList returns whethis given service label is in allow lost
-func (s *Server) IsInRateLimitAllowList(serviceLabel string) bool {
-	return s.serviceRateLimiter.IsInAllowList(serviceLabel)
-}
-
-// UpdateServiceRateLimiter is used to update RateLimiter
-func (s *Server) UpdateServiceRateLimiter(serviceLabel string, opts ...ratelimit.Option) ratelimit.UpdateStatus {
-	return s.serviceRateLimiter.Update(serviceLabel, opts...)
 }
 
 // GetClusterStatus gets cluster status.
@@ -1451,23 +1248,23 @@ func (s *Server) campaignLeader() {
 	})
 
 	// maintain the PD leadership, after this, TSO can be service.
-	s.member.KeepLeader(ctx)
+	go s.member.KeepLeader(ctx)
 	log.Info("campaign pd leader ok", zap.String("campaign-pd-leader-name", s.Name()))
 
-	allocator, err := s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
+	alllocator, err := s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
 	if err != nil {
 		log.Error("failed to get the global TSO allocator", errs.ZapError(err))
 		return
 	}
 	log.Info("initializing the global TSO allocator")
-	if err := allocator.Initialize(0); err != nil {
+	if err := alllocator.Initialize(0); err != nil {
 		log.Error("failed to initialize the global TSO allocator", errs.ZapError(err))
 		return
 	}
 	defer func() {
 		s.tsoAllocatorManager.ResetAllocatorGroup(tso.GlobalDCLocation)
 		failpoint.Inject("updateAfterResetTSO", func() {
-			if err = allocator.UpdateTSO(); err != nil {
+			if err = alllocator.UpdateTSO(); err != nil {
 				panic(err)
 			}
 		})
@@ -1557,29 +1354,14 @@ func (s *Server) reloadConfigFromKV() error {
 	if err != nil {
 		return err
 	}
-	err = s.serviceMiddlewarePersistOptions.Reload(s.storage)
-	if err != nil {
-		return err
-	}
-	s.loadRateLimitConfig()
-	useRegionStorage := s.persistOptions.IsUseRegionStorage()
-	regionStorage := storage.TrySwitchRegionStorage(s.storage, useRegionStorage)
-	if regionStorage != nil {
-		if useRegionStorage {
-			log.Info("server enable region storage")
-		} else {
-			log.Info("server disable region storage")
-		}
+	if s.persistOptions.IsUseRegionStorage() {
+		s.storage.SwitchToRegionStorage()
+		log.Info("server enable region storage")
+	} else {
+		s.storage.SwitchToDefaultStorage()
+		log.Info("server disable region storage")
 	}
 	return nil
-}
-
-func (s *Server) loadRateLimitConfig() {
-	cfg := s.serviceMiddlewarePersistOptions.GetRateLimitConfig().LimiterConfig
-	for key := range cfg {
-		value := cfg[key]
-		s.serviceRateLimiter.Update(key, ratelimit.UpdateDimensionConfig(&value))
-	}
 }
 
 // ReplicateFileToMember is used to synchronize state to a member.
@@ -1610,7 +1392,6 @@ func (s *Server) ReplicateFileToMember(ctx context.Context, member *pdpb.Member,
 
 // PersistFile saves a file in DataDir.
 func (s *Server) PersistFile(name string, data []byte) error {
-	log.Info("persist file", zap.String("name", name), zap.Binary("data", data))
 	return os.WriteFile(filepath.Join(s.GetConfig().DataDir, name), data, 0644) // #nosec
 }
 
@@ -1629,88 +1410,7 @@ func (s *Server) SaveTTLConfig(data map[string]interface{}, ttl time.Duration) e
 	return nil
 }
 
-// IsTTLConfigExist returns true if the ttl config is existed for a given config.
-func (s *Server) IsTTLConfigExist(key string) bool {
-	if config.IsSupportedTTLConfig(key) {
-		if _, ok := s.persistOptions.GetTTLData(key); ok {
-			return true
-		}
-	}
-	return false
-}
-
-// MarkSnapshotRecovering mark pd that we're recovering
-// tikv will get this state during BR EBS restore.
-// we write this info into etcd for simplicity, the key only stays inside etcd temporary
-// during BR EBS restore in which period the cluster is not able to serve request.
-// and is deleted after BR EBS restore is done.
-func (s *Server) MarkSnapshotRecovering() error {
-	log.Info("mark snapshot recovering")
-	markPath := endpoint.AppendToRootPath(s.rootPath, recoveringMarkPath)
-	// the value doesn't matter, set to a static string
-	_, err := kv.NewSlowLogTxn(s.client).
-		If(clientv3.Compare(clientv3.CreateRevision(markPath), "=", 0)).
-		Then(clientv3.OpPut(markPath, "on")).
-		Commit()
-	// if other client already marked, return success too
-	return err
-}
-
-// IsSnapshotRecovering check whether recovering-mark marked
-func (s *Server) IsSnapshotRecovering(ctx context.Context) (bool, error) {
-	markPath := endpoint.AppendToRootPath(s.rootPath, recoveringMarkPath)
-	resp, err := s.client.Get(ctx, markPath)
-	if err != nil {
-		return false, err
-	}
-	return len(resp.Kvs) > 0, nil
-}
-
-// UnmarkSnapshotRecovering unmark recovering mark
-func (s *Server) UnmarkSnapshotRecovering(ctx context.Context) error {
-	log.Info("unmark snapshot recovering")
-	markPath := endpoint.AppendToRootPath(s.rootPath, recoveringMarkPath)
-	_, err := s.client.Delete(ctx, markPath)
-	// if other client already unmarked, return success too
-	return err
-}
-
-// RecoverAllocID recover alloc id. set current base id to input id
-func (s *Server) RecoverAllocID(ctx context.Context, id uint64) error {
-	return s.idAllocator.SetBase(id)
-}
-
-// GetGlobalTS returns global tso.
-func (s *Server) GetGlobalTS() (uint64, error) {
-	ts, err := s.tsoAllocatorManager.GetGlobalTSO()
-	if err != nil {
-		return 0, err
-	}
-	return tsoutil.GenerateTS(ts), nil
-}
-
-// GetExternalTS returns external timestamp.
-func (s *Server) GetExternalTS() uint64 {
-	return s.GetRaftCluster().GetExternalTS()
-}
-
-// SetExternalTS returns external timestamp.
-func (s *Server) SetExternalTS(externalTS uint64) error {
-	globalTS, err := s.GetGlobalTS()
-	if err != nil {
-		return err
-	}
-	if tsoutil.CompareTimestampUint64(externalTS, globalTS) == 1 {
-		desc := "the external timestamp should not be larger than global ts"
-		log.Error(desc, zap.Uint64("request timestamp", externalTS), zap.Uint64("global ts", globalTS))
-		return errors.New(desc)
-	}
-	currentExternalTS := s.GetRaftCluster().GetExternalTS()
-	if tsoutil.CompareTimestampUint64(externalTS, currentExternalTS) != 1 {
-		desc := "the external timestamp should be larger than now"
-		log.Error(desc, zap.Uint64("request timestamp", externalTS), zap.Uint64("current external timestamp", currentExternalTS))
-		return errors.New(desc)
-	}
-	s.GetRaftCluster().SetExternalTS(externalTS)
-	return nil
+// SplitAndScatterRegions TODO
+func (s *Server) SplitAndScatterRegions(context context.Context, r *pdpb.SplitAndScatterRegionsRequest) (*pdpb.SplitAndScatterRegionsResponse, error) {
+	return nil, errors.New("no implemented")
 }

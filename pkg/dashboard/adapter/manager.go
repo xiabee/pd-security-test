@@ -16,6 +16,7 @@ package adapter
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -24,7 +25,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/logutil"
+	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/cluster"
 )
@@ -112,12 +113,15 @@ func (m *Manager) updateInfo() {
 		return
 	}
 
+	allHasClientUrls := true
 	for _, member := range m.members {
 		if len(member.GetClientUrls()) == 0 {
-			log.Warn("failed to get member client urls")
-			m.members = nil
-			return
+			allHasClientUrls = false
 		}
+	}
+	if !allHasClientUrls {
+		log.Warn("failed to get member client urls")
+		m.members = nil
 	}
 }
 
@@ -166,22 +170,26 @@ func (m *Manager) needResetAddress(addr string) bool {
 }
 
 func (m *Manager) setNewAddress() {
-	// select the sever with minimum member ID(avoid the PD leader if possible) to run dashboard.
-	minMemberIdx := 0
-	if len(m.members) > 1 {
-		leaderID := m.srv.GetMemberInfo().GetMemberId()
-		for idx, member := range m.members {
-			curMemberID := member.GetMemberId()
-			if curMemberID != leaderID && curMemberID < m.members[minMemberIdx].GetMemberId() {
-				minMemberIdx = idx
+	// get new dashboard address
+	members := m.members
+	var addr string
+	switch len(members) {
+	case 1:
+		addr = members[0].GetClientUrls()[0]
+	default:
+		addr = members[0].GetClientUrls()[0]
+		leaderID := m.srv.GetMemberInfo().MemberId
+		sort.Slice(members, func(i, j int) bool { return members[i].GetMemberId() < members[j].GetMemberId() })
+		for _, member := range members {
+			if member.MemberId != leaderID {
+				addr = member.GetClientUrls()[0]
 				break
 			}
 		}
 	}
-
 	// set new dashboard address
 	cfg := m.srv.GetPersistOptions().GetPDServerConfig().Clone()
-	cfg.DashboardAddress = m.members[minMemberIdx].GetClientUrls()[0]
+	cfg.DashboardAddress = addr
 	if err := m.srv.SetPDServerConfig(*cfg); err != nil {
 		log.Warn("failed to set persist options")
 	}

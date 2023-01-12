@@ -30,12 +30,11 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/cache"
+	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/core/storelimit"
-	"github.com/tikv/pd/server/storage/endpoint"
 	"go.etcd.io/etcd/clientv3"
 )
 
@@ -135,13 +134,6 @@ func (o *PersistOptions) GetLocationLabels() []string {
 	return o.GetReplicationConfig().LocationLabels
 }
 
-// SetLocationLabels sets the location labels.
-func (o *PersistOptions) SetLocationLabels(labels []string) {
-	v := o.GetReplicationConfig().Clone()
-	v.LocationLabels = labels
-	o.SetReplicationConfig(v)
-}
-
 // GetIsolationLevel returns the isolation label for each region.
 func (o *PersistOptions) GetIsolationLevel() string {
 	return o.GetReplicationConfig().IsolationLevel
@@ -200,8 +192,6 @@ const (
 	hotRegionScheduleLimitKey      = "schedule.hot-region-schedule-limit"
 	schedulerMaxWaitingOperatorKey = "schedule.scheduler-max-waiting-operator"
 	enableLocationReplacement      = "schedule.enable-location-replacement"
-	// it's related to schedule, but it's not an explicit config
-	enableTiKVSplitRegion = "schedule.enable-tikv-split-region"
 )
 
 var supportedTTLConfigs = []string{
@@ -216,7 +206,6 @@ var supportedTTLConfigs = []string{
 	hotRegionScheduleLimitKey,
 	schedulerMaxWaitingOperatorKey,
 	enableLocationReplacement,
-	enableTiKVSplitRegion,
 	"default-add-peer",
 	"default-remove-peer",
 }
@@ -247,17 +236,8 @@ func (o *PersistOptions) GetMaxMergeRegionSize() uint64 {
 }
 
 // GetMaxMergeRegionKeys returns the max number of keys.
-// It returns size * 10000 if the key of max-merge-region-Keys doesn't exist.
 func (o *PersistOptions) GetMaxMergeRegionKeys() uint64 {
-	keys, exist, err := o.getTTLUint(maxMergeRegionKeysKey)
-	if exist && err == nil {
-		return keys
-	}
-	size, exist, err := o.getTTLUint(maxMergeRegionSizeKey)
-	if exist && err == nil {
-		return size * 10000
-	}
-	return o.GetScheduleConfig().GetMaxMergeRegionKeys()
+	return o.getTTLUintOr(maxMergeRegionKeysKey, o.GetScheduleConfig().MaxMergeRegionKeys)
 }
 
 // GetSplitMergeInterval returns the interval between finishing split and starting to merge.
@@ -269,49 +249,6 @@ func (o *PersistOptions) GetSplitMergeInterval() time.Duration {
 func (o *PersistOptions) SetSplitMergeInterval(splitMergeInterval time.Duration) {
 	v := o.GetScheduleConfig().Clone()
 	v.SplitMergeInterval = typeutil.Duration{Duration: splitMergeInterval}
-	o.SetScheduleConfig(v)
-}
-
-// GetSwitchWitnessInterval returns the interval between promote to non-witness and starting to switch to witness.
-func (o *PersistOptions) GetSwitchWitnessInterval() time.Duration {
-	return o.GetScheduleConfig().SwitchWitnessInterval.Duration
-}
-
-// IsDiagnosticAllowed returns whether is enable to use diagnostic.
-func (o *PersistOptions) IsDiagnosticAllowed() bool {
-	return o.GetScheduleConfig().EnableDiagnostic
-}
-
-// SetEnableDiagnostic to set the option for diagnose. It's only used to test.
-func (o *PersistOptions) SetEnableDiagnostic(enable bool) {
-	v := o.GetScheduleConfig().Clone()
-	v.EnableDiagnostic = enable
-	o.SetScheduleConfig(v)
-}
-
-// IsWitnessAllowed returns whether is enable to use witness.
-func (o *PersistOptions) IsWitnessAllowed() bool {
-	return o.GetScheduleConfig().EnableWitness
-}
-
-// SetEnableWitness to set the option for witness. It's only used to test.
-func (o *PersistOptions) SetEnableWitness(enable bool) {
-	v := o.GetScheduleConfig().Clone()
-	v.EnableWitness = enable
-	o.SetScheduleConfig(v)
-}
-
-// SetMaxMergeRegionSize sets the max merge region size.
-func (o *PersistOptions) SetMaxMergeRegionSize(maxMergeRegionSize uint64) {
-	v := o.GetScheduleConfig().Clone()
-	v.MaxMergeRegionSize = maxMergeRegionSize
-	o.SetScheduleConfig(v)
-}
-
-// SetMaxMergeRegionKeys sets the max merge region keys.
-func (o *PersistOptions) SetMaxMergeRegionKeys(maxMergeRegionKeys uint64) {
-	v := o.GetScheduleConfig().Clone()
-	v.MaxMergeRegionKeys = maxMergeRegionKeys
 	o.SetScheduleConfig(v)
 }
 
@@ -379,11 +316,6 @@ func (o *PersistOptions) GetPatrolRegionInterval() time.Duration {
 // GetMaxStoreDownTime returns the max down time of a store.
 func (o *PersistOptions) GetMaxStoreDownTime() time.Duration {
 	return o.GetScheduleConfig().MaxStoreDownTime.Duration
-}
-
-// GetMaxStorePreparingTime returns the max preparing time of a store.
-func (o *PersistOptions) GetMaxStorePreparingTime() time.Duration {
-	return o.GetScheduleConfig().MaxStorePreparingTime.Duration
 }
 
 // GetLeaderScheduleLimit returns the limit for leader schedule.
@@ -551,23 +483,16 @@ func (o *PersistOptions) IsRemoveExtraReplicaEnabled() bool {
 	return o.GetScheduleConfig().EnableRemoveExtraReplica
 }
 
-// IsTikvRegionSplitEnabled returns whether tikv split region is disabled.
-func (o *PersistOptions) IsTikvRegionSplitEnabled() bool {
-	return o.getTTLBoolOr(enableTiKVSplitRegion, o.GetScheduleConfig().EnableTiKVSplitRegion)
-}
-
 // IsLocationReplacementEnabled returns if location replace is enabled.
 func (o *PersistOptions) IsLocationReplacementEnabled() bool {
-	return o.getTTLBoolOr(enableLocationReplacement, o.GetScheduleConfig().EnableLocationReplacement)
-}
-
-// GetMaxMovableHotPeerSize returns the max movable hot peer size.
-func (o *PersistOptions) GetMaxMovableHotPeerSize() int64 {
-	size := o.GetScheduleConfig().MaxMovableHotPeerSize
-	if size <= 0 {
-		size = defaultMaxMovableHotPeerSize
+	if v, ok := o.getTTLData(enableLocationReplacement); ok {
+		result, err := strconv.ParseBool(v)
+		if err == nil {
+			return result
+		}
+		log.Warn("failed to parse " + enableLocationReplacement + " from PersistOptions's ttl storage")
 	}
-	return size
+	return o.GetScheduleConfig().EnableLocationReplacement
 }
 
 // IsDebugMetricsEnabled returns if debug metrics is enabled.
@@ -578,13 +503,6 @@ func (o *PersistOptions) IsDebugMetricsEnabled() bool {
 // IsUseJointConsensus returns if using joint consensus as a operator step is enabled.
 func (o *PersistOptions) IsUseJointConsensus() bool {
 	return o.GetScheduleConfig().EnableJointConsensus
-}
-
-// SetEnableUseJointConsensus to set the option for using joint consensus. It's only used to test.
-func (o *PersistOptions) SetEnableUseJointConsensus(enable bool) {
-	v := o.GetScheduleConfig().Clone()
-	v.EnableJointConsensus = enable
-	o.SetScheduleConfig(v)
 }
 
 // IsTraceRegionFlow returns if the region flow is tracing.
@@ -670,7 +588,7 @@ func (o *PersistOptions) DeleteLabelProperty(typ, labelKey, labelValue string) {
 }
 
 // Persist saves the configuration to the storage.
-func (o *PersistOptions) Persist(storage endpoint.ConfigStorage) error {
+func (o *PersistOptions) Persist(storage *core.Storage) error {
 	cfg := &Config{
 		Schedule:        *o.GetScheduleConfig(),
 		Replication:     *o.GetReplicationConfig(),
@@ -687,7 +605,7 @@ func (o *PersistOptions) Persist(storage endpoint.ConfigStorage) error {
 }
 
 // Reload reloads the configuration from the storage.
-func (o *PersistOptions) Reload(storage endpoint.ConfigStorage) error {
+func (o *PersistOptions) Reload(storage *core.Storage) error {
 	cfg := &Config{}
 	// pass nil to initialize cfg to default values (all items undefined)
 	cfg.Adjust(nil, true)
@@ -734,11 +652,6 @@ func (o *PersistOptions) CheckLabelProperty(typ string, labels []*metapb.StoreLa
 	return false
 }
 
-// GetMinResolvedTSPersistenceInterval gets the interval for PD to save min resolved ts.
-func (o *PersistOptions) GetMinResolvedTSPersistenceInterval() time.Duration {
-	return o.GetPDServerConfig().MinResolvedTSPersistenceInterval.Duration
-}
-
 const ttlConfigPrefix = "/config/ttl"
 
 // SetTTLData set temporary configuration
@@ -755,7 +668,7 @@ func (o *PersistOptions) SetTTLData(parCtx context.Context, client *clientv3.Cli
 }
 
 func (o *PersistOptions) getTTLUint(key string) (uint64, bool, error) {
-	stringForm, ok := o.GetTTLData(key)
+	stringForm, ok := o.getTTLData(key)
 	if !ok {
 		return 0, false, nil
 	}
@@ -773,28 +686,8 @@ func (o *PersistOptions) getTTLUintOr(key string, defaultValue uint64) uint64 {
 	return defaultValue
 }
 
-func (o *PersistOptions) getTTLBool(key string) (result bool, contains bool, err error) {
-	stringForm, ok := o.GetTTLData(key)
-	if !ok {
-		return
-	}
-	result, err = strconv.ParseBool(stringForm)
-	contains = true
-	return
-}
-
-func (o *PersistOptions) getTTLBoolOr(key string, defaultValue bool) bool {
-	if v, ok, err := o.getTTLBool(key); ok {
-		if err == nil {
-			return v
-		}
-		log.Warn("failed to parse " + key + " from PersistOptions's ttl storage")
-	}
-	return defaultValue
-}
-
 func (o *PersistOptions) getTTLFloat(key string) (float64, bool, error) {
-	stringForm, ok := o.GetTTLData(key)
+	stringForm, ok := o.getTTLData(key)
 	if !ok {
 		return 0, false, nil
 	}
@@ -812,8 +705,7 @@ func (o *PersistOptions) getTTLFloatOr(key string, defaultValue float64) float64
 	return defaultValue
 }
 
-// GetTTLData returns if there is a TTL data for a given key.
-func (o *PersistOptions) GetTTLData(key string) (string, bool) {
+func (o *PersistOptions) getTTLData(key string) (string, bool) {
 	if o.ttl == nil {
 		return "", false
 	}

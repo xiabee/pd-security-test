@@ -19,12 +19,11 @@ import (
 	"crypto/cipher"
 	"reflect"
 
+	"github.com/gogo/protobuf/proto"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/typeutil"
-	"github.com/tikv/pd/server/core"
 )
 
 // processRegionKeys encrypt or decrypt the start key and end key of the region in-place,
@@ -72,7 +71,7 @@ func EncryptRegion(region *metapb.Region, keyManager KeyManager) (*metapb.Region
 		return nil, err
 	}
 	// Deep copy region before altering it.
-	outRegion := typeutil.DeepClone(region, core.RegionFactory)
+	outRegion := proto.Clone(region).(*metapb.Region)
 	// Encrypt and update in-place.
 	err = processRegionKeys(outRegion, key, iv)
 	if err != nil {

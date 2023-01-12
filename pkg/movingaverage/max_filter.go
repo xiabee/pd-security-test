@@ -14,7 +14,7 @@
 
 package movingaverage
 
-import "github.com/elliotchance/pie/v2"
+import "github.com/montanaflynn/stats"
 
 // MaxFilter works as a maximum filter with specified window size.
 // There are at most `size` data points for calculating.
@@ -47,7 +47,8 @@ func (r *MaxFilter) Get() float64 {
 	if r.count < r.size {
 		records = r.records[:r.count]
 	}
-	return pie.Max(records)
+	max, _ := stats.Max(records)
+	return max
 }
 
 // Reset cleans the data set.

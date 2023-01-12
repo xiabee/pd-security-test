@@ -15,16 +15,17 @@
 package statistics
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/server/core"
 )
 
-func TestGetLoads(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testRegionInfoSuite{})
+
+type testRegionInfoSuite struct{}
+
+func (s *testRegionInfoSuite) TestGetLoads(c *C) {
 	queryStats := &pdpb.QueryStats{
 		Get:                    5,
 		Coprocessor:            6,
@@ -44,24 +45,24 @@ func TestGetLoads(t *testing.T) {
 		core.SetWrittenKeys(4),
 		core.SetQueryStats(queryStats))
 	loads := regionA.GetLoads()
-	re.Len(loads, int(RegionStatCount))
-	re.Equal(float64(regionA.GetBytesRead()), loads[RegionReadBytes])
-	re.Equal(float64(regionA.GetKeysRead()), loads[RegionReadKeys])
-	re.Equal(float64(regionA.GetReadQueryNum()), loads[RegionReadQueryNum])
+	c.Assert(loads, HasLen, int(RegionStatCount))
+	c.Assert(float64(regionA.GetBytesRead()), Equals, loads[RegionReadBytes])
+	c.Assert(float64(regionA.GetKeysRead()), Equals, loads[RegionReadKeys])
+	c.Assert(float64(regionA.GetReadQueryNum()), Equals, loads[RegionReadQuery])
 	readQuery := float64(queryStats.Coprocessor + queryStats.Get + queryStats.Scan)
-	re.Equal(float64(regionA.GetReadQueryNum()), readQuery)
-	re.Equal(float64(regionA.GetBytesWritten()), loads[RegionWriteBytes])
-	re.Equal(float64(regionA.GetKeysWritten()), loads[RegionWriteKeys])
-	re.Equal(float64(regionA.GetWriteQueryNum()), loads[RegionWriteQueryNum])
+	c.Assert(float64(regionA.GetReadQueryNum()), Equals, readQuery)
+	c.Assert(float64(regionA.GetBytesWritten()), Equals, loads[RegionWriteBytes])
+	c.Assert(float64(regionA.GetKeysWritten()), Equals, loads[RegionWriteKeys])
+	c.Assert(float64(regionA.GetWriteQueryNum()), Equals, loads[RegionWriteQuery])
 	writeQuery := float64(queryStats.Put + queryStats.Delete + queryStats.DeleteRange + queryStats.AcquirePessimisticLock + queryStats.Rollback + queryStats.Prewrite + queryStats.Commit)
-	re.Equal(float64(regionA.GetWriteQueryNum()), writeQuery)
+	c.Assert(float64(regionA.GetWriteQueryNum()), Equals, writeQuery)
 
 	loads = regionA.GetWriteLoads()
-	re.Len(loads, int(RegionStatCount))
-	re.Equal(0.0, loads[RegionReadBytes])
-	re.Equal(0.0, loads[RegionReadKeys])
-	re.Equal(0.0, loads[RegionReadQueryNum])
-	re.Equal(float64(regionA.GetBytesWritten()), loads[RegionWriteBytes])
-	re.Equal(float64(regionA.GetKeysWritten()), loads[RegionWriteKeys])
-	re.Equal(float64(regionA.GetWriteQueryNum()), loads[RegionWriteQueryNum])
+	c.Assert(loads, HasLen, int(RegionStatCount))
+	c.Assert(0.0, Equals, loads[RegionReadBytes])
+	c.Assert(0.0, Equals, loads[RegionReadKeys])
+	c.Assert(0.0, Equals, loads[RegionReadQuery])
+	c.Assert(float64(regionA.GetBytesWritten()), Equals, loads[RegionWriteBytes])
+	c.Assert(float64(regionA.GetKeysWritten()), Equals, loads[RegionWriteKeys])
+	c.Assert(float64(regionA.GetWriteQueryNum()), Equals, loads[RegionWriteQuery])
 }

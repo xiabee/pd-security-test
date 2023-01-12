@@ -16,15 +16,14 @@ package schedulers
 
 import (
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/mux"
+	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/placement"
-	"github.com/tikv/pd/server/storage/endpoint"
 	"github.com/unrolled/render"
 )
 
@@ -37,8 +36,8 @@ const (
 var allRoles = []string{roleLeader, roleFollower, roleLearner}
 
 type shuffleRegionSchedulerConfig struct {
-	syncutil.RWMutex
-	storage endpoint.ConfigStorage
+	sync.RWMutex
+	storage *core.Storage
 
 	Ranges []core.KeyRange `json:"ranges"`
 	Roles  []string        `json:"roles"` // can include `leader`, `follower`, `learner`.
@@ -70,8 +69,8 @@ func (conf *shuffleRegionSchedulerConfig) IsRoleAllow(role string) bool {
 
 func (conf *shuffleRegionSchedulerConfig) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	router := mux.NewRouter()
-	router.HandleFunc("/roles", conf.handleGetRoles).Methods(http.MethodGet)
-	router.HandleFunc("/roles", conf.handleSetRoles).Methods(http.MethodPost)
+	router.HandleFunc("/roles", conf.handleGetRoles).Methods("GET")
+	router.HandleFunc("/roles", conf.handleSetRoles).Methods("POST")
 	router.ServeHTTP(w, r)
 }
 

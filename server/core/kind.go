@@ -19,10 +19,9 @@ type PriorityLevel int
 
 // Built-in priority level
 const (
-	Low PriorityLevel = iota
-	Medium
-	High
-	Urgent
+	LowPriority PriorityLevel = iota
+	NormalPriority
+	HighPriority
 )
 
 // ScheduleKind distinguishes resources and schedule policy.

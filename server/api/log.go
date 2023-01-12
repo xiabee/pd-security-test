@@ -20,7 +20,7 @@ import (
 	"net/http"
 
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/utils/logutil"
+	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 )
@@ -37,17 +37,17 @@ func newLogHandler(svr *server.Server, rd *render.Render) *logHandler {
 	}
 }
 
-// @Tags     admin
-// @Summary  Set log level.
-// @Accept   json
-// @Param    level  body  string  true  "json params"
-// @Produce  json
-// @Success  200  {string}  string  "The log level is updated."
-// @Failure  400  {string}  string  "The input is invalid."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Failure  503  {string}  string  "PD server has no leader."
-// @Router   /admin/log [post]
-func (h *logHandler) SetLogLevel(w http.ResponseWriter, r *http.Request) {
+// @Tags admin
+// @Summary Set log level.
+// @Accept json
+// @Param level body string true "json params"
+// @Produce json
+// @Success 200 {string} string "The log level is updated."
+// @Failure 400 {string} string "The input is invalid."
+// @Failure 500 {string} string "PD server failed to proceed the request."
+// @Failure 503 {string} string "PD server has no leader."
+// @Router /admin/log [post]
+func (h *logHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	var level string
 	data, err := io.ReadAll(r.Body)
 	r.Body.Close()

@@ -16,17 +16,17 @@ package encryptionkm
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/election"
 	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/syncutil"
+	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/server/election"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/mvcc/mvccpb"
 	"go.uber.org/zap"
@@ -59,7 +59,7 @@ type KeyManager struct {
 	helper keyManagerHelper
 	// Mutex for updating keys. Used for both of LoadKeys() and rotateKeyIfNeeded().
 	mu struct {
-		syncutil.Mutex
+		sync.Mutex
 		// PD leadership of the current PD node. Only the PD leader will rotate data keys,
 		// or change current encryption method.
 		// Guarded by mu.
@@ -344,10 +344,9 @@ func (m *KeyManager) loadKeys() error {
 }
 
 // rotateKeyIfNeeded rotate key if one of the following condition is meet.
-//   - Encryption method is changed.
-//   - Current key is exposed.
-//   - Current key expired.
-//
+//   * Encryption method is changed.
+//   * Current key is exposed.
+//   * Current key expired.
 // Otherwise re-save all keys to finish master key rotation if forceUpdate = true.
 // Require mu lock to be held.
 func (m *KeyManager) rotateKeyIfNeeded(forceUpdate bool) error {

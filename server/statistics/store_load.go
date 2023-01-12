@@ -22,20 +22,22 @@ import (
 
 // StoreLoadDetail records store load information.
 type StoreLoadDetail struct {
-	*StoreSummaryInfo
+	Info     *StoreSummaryInfo
 	LoadPred *StoreLoadPred
 	HotPeers []*HotPeerStat
 }
 
+// GetID return the ID of store.
+func (li *StoreLoadDetail) GetID() uint64 {
+	return li.Info.Store.GetID()
+}
+
 // ToHotPeersStat abstracts load information to HotPeersStat.
 func (li *StoreLoadDetail) ToHotPeersStat() *HotPeersStat {
-	storeByteRate, storeKeyRate, storeQueryRate := li.LoadPred.Current.Loads[ByteDim],
-		li.LoadPred.Current.Loads[KeyDim], li.LoadPred.Current.Loads[QueryDim]
+	totalLoads := make([]float64, RegionStatCount)
 	if len(li.HotPeers) == 0 {
 		return &HotPeersStat{
-			StoreByteRate:  storeByteRate,
-			StoreKeyRate:   storeKeyRate,
-			StoreQueryRate: storeQueryRate,
+			TotalLoads:     totalLoads,
 			TotalBytesRate: 0.0,
 			TotalKeysRate:  0.0,
 			TotalQueryRate: 0.0,
@@ -43,18 +45,28 @@ func (li *StoreLoadDetail) ToHotPeersStat() *HotPeersStat {
 			Stats:          make([]HotPeerStatShow, 0),
 		}
 	}
-	var byteRate, keyRate, queryRate float64
+	kind := Write
+	if li.HotPeers[0].Kind == Read {
+		kind = Read
+	}
+
 	peers := make([]HotPeerStatShow, 0, len(li.HotPeers))
 	for _, peer := range li.HotPeers {
 		if peer.HotDegree > 0 {
-			peers = append(peers, toHotPeerStatShow(peer))
-			byteRate += peer.GetLoad(ByteDim)
-			keyRate += peer.GetLoad(KeyDim)
-			queryRate += peer.GetLoad(QueryDim)
+			peers = append(peers, toHotPeerStatShow(peer, kind))
+			for i := range totalLoads {
+				totalLoads[i] += peer.GetLoad(RegionStatKind(i))
+			}
 		}
 	}
 
+	b, k, q := GetRegionStatKind(kind, ByteDim), GetRegionStatKind(kind, KeyDim), GetRegionStatKind(kind, QueryDim)
+	byteRate, keyRate, queryRate := totalLoads[b], totalLoads[k], totalLoads[q]
+	storeByteRate, storeKeyRate, storeQueryRate := li.LoadPred.Current.Loads[ByteDim],
+		li.LoadPred.Current.Loads[KeyDim], li.LoadPred.Current.Loads[QueryDim]
+
 	return &HotPeersStat{
+		TotalLoads:     totalLoads,
 		TotalBytesRate: byteRate,
 		TotalKeysRate:  keyRate,
 		TotalQueryRate: queryRate,
@@ -66,48 +78,57 @@ func (li *StoreLoadDetail) ToHotPeersStat() *HotPeersStat {
 	}
 }
 
-// IsUniform returns true if the stores are uniform.
-func (li *StoreLoadDetail) IsUniform(dim int, threshold float64) bool {
-	return li.LoadPred.Stddev.Loads[dim] < threshold
+func toHotPeerStatShow(p *HotPeerStat, kind RWType) HotPeerStatShow {
+	b, k, q := GetRegionStatKind(kind, ByteDim), GetRegionStatKind(kind, KeyDim), GetRegionStatKind(kind, QueryDim)
+	byteRate := p.Loads[b]
+	keyRate := p.Loads[k]
+	queryRate := p.Loads[q]
+	return HotPeerStatShow{
+		StoreID:        p.StoreID,
+		RegionID:       p.RegionID,
+		HotDegree:      p.HotDegree,
+		ByteRate:       byteRate,
+		KeyRate:        keyRate,
+		QueryRate:      queryRate,
+		AntiCount:      p.AntiCount,
+		LastUpdateTime: p.LastUpdateTime,
+	}
 }
 
-func toHotPeerStatShow(p *HotPeerStat) HotPeerStatShow {
-	byteRate := p.GetLoad(ByteDim)
-	keyRate := p.GetLoad(KeyDim)
-	queryRate := p.GetLoad(QueryDim)
-	return HotPeerStatShow{
-		StoreID:   p.StoreID,
-		Stores:    p.GetStores(),
-		IsLeader:  p.IsLeader(),
-		RegionID:  p.RegionID,
-		HotDegree: p.HotDegree,
-		ByteRate:  byteRate,
-		KeyRate:   keyRate,
-		QueryRate: queryRate,
-		AntiCount: p.AntiCount,
+// GetRegionStatKind gets region statistics kind.
+func GetRegionStatKind(rwTy RWType, dim int) RegionStatKind {
+	switch {
+	case rwTy == Read && dim == ByteDim:
+		return RegionReadBytes
+	case rwTy == Read && dim == KeyDim:
+		return RegionReadKeys
+	case rwTy == Write && dim == ByteDim:
+		return RegionWriteBytes
+	case rwTy == Write && dim == KeyDim:
+		return RegionWriteKeys
+	case rwTy == Write && dim == QueryDim:
+		return RegionWriteQuery
+	case rwTy == Read && dim == QueryDim:
+		return RegionReadQuery
 	}
+	return 0
 }
 
 // StoreSummaryInfo records the summary information of store.
 type StoreSummaryInfo struct {
-	*core.StoreInfo
-	isTiFlash  bool
+	Store      *core.StoreInfo
+	IsTiFlash  bool
 	PendingSum *Influence
 }
 
-// Influence records operator influence.
-type Influence struct {
-	Loads []float64
-	Count float64
-}
-
 // SummaryStoreInfos return a mapping from store to summary information.
-func SummaryStoreInfos(stores []*core.StoreInfo) map[uint64]*StoreSummaryInfo {
+func SummaryStoreInfos(cluster core.StoreSetInformer) map[uint64]*StoreSummaryInfo {
+	stores := cluster.GetStores()
 	infos := make(map[uint64]*StoreSummaryInfo, len(stores))
 	for _, store := range stores {
 		info := &StoreSummaryInfo{
-			StoreInfo:  store,
-			isTiFlash:  store.IsTiFlash(),
+			Store:      store,
+			IsTiFlash:  core.IsStoreContainLabel(store.GetMeta(), core.EngineKey, core.EngineTiFlash),
 			PendingSum: nil,
 		}
 		infos[store.GetID()] = info
@@ -132,14 +153,10 @@ func (s *StoreSummaryInfo) AddInfluence(infl *Influence, w float64) {
 	s.PendingSum.Count += infl.Count * w
 }
 
-// IsTiFlash returns true if the store is TiFlash.
-func (s *StoreSummaryInfo) IsTiFlash() bool {
-	return s.isTiFlash
-}
-
-// SetEngineAsTiFlash set whether store is TiFlash, it is only used in tests.
-func (s *StoreSummaryInfo) SetEngineAsTiFlash() {
-	s.isTiFlash = true
+// Influence records operator influence.
+type Influence struct {
+	Loads []float64
+	Count float64
 }
 
 // StoreLoad records the current load.
@@ -159,11 +176,11 @@ func (load StoreLoad) ToLoadPred(rwTy RWType, infl *Influence) *StoreLoadPred {
 		case Read:
 			future.Loads[ByteDim] += infl.Loads[RegionReadBytes]
 			future.Loads[KeyDim] += infl.Loads[RegionReadKeys]
-			future.Loads[QueryDim] += infl.Loads[RegionReadQueryNum]
+			future.Loads[QueryDim] += infl.Loads[RegionReadQuery]
 		case Write:
 			future.Loads[ByteDim] += infl.Loads[RegionWriteBytes]
 			future.Loads[KeyDim] += infl.Loads[RegionWriteKeys]
-			future.Loads[QueryDim] += infl.Loads[RegionWriteQueryNum]
+			future.Loads[QueryDim] += infl.Loads[RegionWriteQuery]
 		}
 		future.Count += infl.Count
 	}
@@ -178,7 +195,6 @@ type StoreLoadPred struct {
 	Current StoreLoad
 	Future  StoreLoad
 	Expect  StoreLoad
-	Stddev  StoreLoad
 }
 
 // Min returns the min load between current and future.

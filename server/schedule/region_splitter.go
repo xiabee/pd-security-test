@@ -24,17 +24,17 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/utils/logutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/opt"
 	"go.uber.org/zap"
 )
 
 const (
 	watchInterval = 100 * time.Millisecond
-	timeout       = time.Minute
+	timeout       = 1 * time.Minute
 )
 
 // SplitRegionsHandler used to handle region splitting
@@ -44,7 +44,7 @@ type SplitRegionsHandler interface {
 }
 
 // NewSplitRegionsHandler return SplitRegionsHandler
-func NewSplitRegionsHandler(cluster Cluster, oc *OperatorController) SplitRegionsHandler {
+func NewSplitRegionsHandler(cluster opt.Cluster, oc *OperatorController) SplitRegionsHandler {
 	return &splitRegionsHandler{
 		cluster: cluster,
 		oc:      oc,
@@ -53,12 +53,12 @@ func NewSplitRegionsHandler(cluster Cluster, oc *OperatorController) SplitRegion
 
 // RegionSplitter handles split regions
 type RegionSplitter struct {
-	cluster Cluster
+	cluster opt.Cluster
 	handler SplitRegionsHandler
 }
 
 // NewRegionSplitter return a region splitter
-func NewRegionSplitter(cluster Cluster, handler SplitRegionsHandler) *RegionSplitter {
+func NewRegionSplitter(cluster opt.Cluster, handler SplitRegionsHandler) *RegionSplitter {
 	return &RegionSplitter{
 		cluster: cluster,
 		handler: handler,
@@ -166,7 +166,7 @@ func (r *RegionSplitter) checkRegionValid(region *core.RegionInfo) bool {
 	if r.cluster.IsRegionHot(region) {
 		return false
 	}
-	if !filter.IsRegionReplicated(r.cluster, region) {
+	if !IsRegionReplicated(r.cluster, region) {
 		r.cluster.AddSuspectRegions(region.GetID())
 		return false
 	}
@@ -177,7 +177,7 @@ func (r *RegionSplitter) checkRegionValid(region *core.RegionInfo) bool {
 }
 
 type splitRegionsHandler struct {
-	cluster Cluster
+	cluster opt.Cluster
 	oc      *OperatorController
 }
 

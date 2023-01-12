@@ -24,16 +24,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/docker/go-units"
 	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/grpcutil"
-	"github.com/tikv/pd/pkg/utils/logutil"
-	"github.com/tikv/pd/pkg/utils/metricutil"
-	"github.com/tikv/pd/pkg/utils/syncutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/grpcutil"
+	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/metricutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core/storelimit"
 	"github.com/tikv/pd/server/versioninfo"
 
@@ -49,7 +48,6 @@ import (
 )
 
 // Config is the pd server configuration.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type Config struct {
 	flagSet *flag.FlagSet
 
@@ -91,9 +89,8 @@ type Config struct {
 	TSOSaveInterval typeutil.Duration `toml:"tso-save-interval" json:"tso-save-interval"`
 
 	// The interval to update physical part of timestamp. Usually, this config should not be set.
-	// At most 1<<18 (262144) TSOs can be generated in the interval. The smaller the value, the
-	// more TSOs provided, and at the same time consuming more CPU time.
-	// This config is only valid in 1ms to 10s. If it's configured too long or too short, it will
+	// It's only useful for test purposes.
+	// This config is only valid in 50ms to 10s. If it's configured too long or too short, it will
 	// be automatically clamped to the range.
 	TSOUpdatePhysicalInterval typeutil.Duration `toml:"tso-update-physical-interval" json:"tso-update-physical-interval"`
 
@@ -205,12 +202,8 @@ const (
 	defaultLeaderLease             = int64(3)
 	defaultCompactionMode          = "periodic"
 	defaultAutoCompactionRetention = "1h"
-	defaultQuotaBackendBytes       = typeutil.ByteSize(8 * units.GiB) // 8GB
-
-	// The default max bytes for grpc message
-	// Unsafe recovery report is included in store heartbeat, and assume that each peer report occupies about 500B at most,
-	// then 150MB can fit for store reports that have about 300k regions which is something of a huge amount of region on one TiKV.
-	defaultMaxRequestBytes = uint(150 * units.MiB) // 150MB
+	defaultQuotaBackendBytes       = typeutil.ByteSize(8 * 1024 * 1024 * 1024) // 8GB
+	defaultMaxRequestBytes         = uint(1.5 * 1024 * 1024)                   // 1.5MB
 
 	defaultName                = "pd"
 	defaultClientUrls          = "http://127.0.0.1:2379"
@@ -239,28 +232,22 @@ const (
 	defaultMaxResetTSGap     = 24 * time.Hour
 	defaultKeyType           = "table"
 
-	// DefaultMinResolvedTSPersistenceInterval is the default value of min resolved ts persistent interval.
-	DefaultMinResolvedTSPersistenceInterval = time.Second
-
 	defaultStrictlyMatchLabel   = false
 	defaultEnablePlacementRules = true
 	defaultEnableGRPCGateway    = true
 	defaultDisableErrorVerbose  = true
-	defaultEnableWitness        = false
 
 	defaultDashboardAddress = "auto"
 
 	defaultDRWaitStoreTimeout = time.Minute
+	defaultDRWaitSyncTimeout  = time.Minute
+	defaultDRWaitAsyncTimeout = 2 * time.Minute
 
 	defaultTSOSaveInterval = time.Duration(defaultLeaderLease) * time.Second
 	// DefaultTSOUpdatePhysicalInterval is the default value of the config `TSOUpdatePhysicalInterval`.
 	DefaultTSOUpdatePhysicalInterval = 50 * time.Millisecond
 	maxTSOUpdatePhysicalInterval     = 10 * time.Second
-	minTSOUpdatePhysicalInterval     = 1 * time.Millisecond
-
-	defaultLogFormat = "text"
-
-	defaultMaxMovableHotPeerSize = int64(512)
+	minTSOUpdatePhysicalInterval     = 50 * time.Millisecond
 )
 
 // Special keys for Labels
@@ -291,7 +278,7 @@ func initByLDFlags(edition string) {
 
 // StoreLimit is the default limit of adding peer and removing peer when putting stores.
 type StoreLimit struct {
-	mu syncutil.RWMutex
+	mu sync.RWMutex
 	// AddPeer is the default rate of adding peers for store limit (per minute).
 	AddPeer float64
 	// RemovePeer is the default rate of removing peers for store limit (per minute).
@@ -604,10 +591,6 @@ func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
 
 	c.Security.Encryption.Adjust()
 
-	if len(c.Log.Format) == 0 {
-		c.Log.Format = defaultLogFormat
-	}
-
 	return nil
 }
 
@@ -638,7 +621,6 @@ func (c *Config) configFromFile(path string) (*toml.MetaData, error) {
 }
 
 // ScheduleConfig is the schedule configuration.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type ScheduleConfig struct {
 	// If the snapshot count of one store is greater than this value,
 	// it will never be used as a source or target store.
@@ -651,8 +633,6 @@ type ScheduleConfig struct {
 	MaxMergeRegionKeys uint64 `toml:"max-merge-region-keys" json:"max-merge-region-keys"`
 	// SplitMergeInterval is the minimum interval time to permit merge after split.
 	SplitMergeInterval typeutil.Duration `toml:"split-merge-interval" json:"split-merge-interval"`
-	// SwitchWitnessInterval is the minimum interval that allows a peer to become a witness again after it is promoted to non-witness.
-	SwitchWitnessInterval typeutil.Duration `toml:"switch-witness-interval" json:"swtich-witness-interval"`
 	// EnableOneWayMerge is the option to enable one way merge. This means a Region can only be merged into the next region of it.
 	EnableOneWayMerge bool `toml:"enable-one-way-merge" json:"enable-one-way-merge,string"`
 	// EnableCrossTableMerge is the option to enable cross table merge. This means two Regions can be merged with different table IDs.
@@ -663,9 +643,6 @@ type ScheduleConfig struct {
 	// MaxStoreDownTime is the max duration after which
 	// a store will be considered to be down if it hasn't reported heartbeats.
 	MaxStoreDownTime typeutil.Duration `toml:"max-store-down-time" json:"max-store-down-time"`
-	// MaxStorePreparingTime is the max duration after which
-	// a store will be considered to be preparing.
-	MaxStorePreparingTime typeutil.Duration `toml:"max-store-preparing-time" json:"max-store-preparing-time"`
 	// LeaderScheduleLimit is the max coexist leader schedules.
 	LeaderScheduleLimit uint64 `toml:"leader-schedule-limit" json:"leader-schedule-limit"`
 	// LeaderSchedulePolicy is the option to balance leader, there are some policies supported: ["count", "size"], default: "count"
@@ -743,9 +720,6 @@ type ScheduleConfig struct {
 	EnableDebugMetrics bool `toml:"enable-debug-metrics" json:"enable-debug-metrics,string"`
 	// EnableJointConsensus is the option to enable using joint consensus as a operator step.
 	EnableJointConsensus bool `toml:"enable-joint-consensus" json:"enable-joint-consensus,string"`
-	// EnableTiKVSplitRegion is the option to enable tikv split region.
-	// on ebs-based BR we need to disable it with TTL
-	EnableTiKVSplitRegion bool `toml:"enable-tikv-split-region" json:"enable-tikv-split-region,string"`
 
 	// Schedulers support for loading customized schedulers
 	Schedulers SchedulerConfigs `toml:"schedulers" json:"schedulers-v2"` // json v2 is for the sake of compatible upgrade
@@ -766,16 +740,6 @@ type ScheduleConfig struct {
 
 	// The day of hot regions data to be reserved. 0 means close.
 	HotRegionsReservedDays uint64 `toml:"hot-regions-reserved-days" json:"hot-regions-reserved-days"`
-
-	// MaxMovableHotPeerSize is the threshold of region size for balance hot region and split bucket scheduler.
-	// Hot region must be split before moved if it's region size is greater than MaxMovableHotPeerSize.
-	MaxMovableHotPeerSize int64 `toml:"max-movable-hot-peer-size" json:"max-movable-hot-peer-size,omitempty"`
-
-	// EnableDiagnostic is the the option to enable using diagnostic
-	EnableDiagnostic bool `toml:"enable-diagnostic" json:"enable-diagnostic,string"`
-
-	// EnableWitness is the option to enable using witness
-	EnableWitness bool `toml:"enable-witness" json:"enable-witness,string"`
 }
 
 // Clone returns a cloned scheduling configuration.
@@ -800,9 +764,8 @@ const (
 	defaultMaxSnapshotCount          = 64
 	defaultMaxPendingPeerCount       = 64
 	defaultMaxMergeRegionSize        = 20
-	defaultSplitMergeInterval        = time.Hour
-	defaultSwitchWitnessInterval     = time.Hour
-	defaultEnableDiagnostic          = false
+	defaultMaxMergeRegionKeys        = 200000
+	defaultSplitMergeInterval        = 1 * time.Hour
 	defaultPatrolRegionInterval      = 10 * time.Millisecond
 	defaultMaxStoreDownTime          = 30 * time.Minute
 	defaultLeaderScheduleLimit       = 4
@@ -821,12 +784,9 @@ const (
 	defaultLeaderSchedulePolicy        = "count"
 	defaultStoreLimitMode              = "manual"
 	defaultEnableJointConsensus        = true
-	defaultEnableTiKVSplitRegion       = true
 	defaultEnableCrossTableMerge       = true
 	defaultHotRegionsWriteInterval     = 10 * time.Minute
 	defaultHotRegionsReservedDays      = 7
-	// It means we skip the preparing stage after the 48 hours no matter if the store has finished preparing stage.
-	defaultMaxStorePreparingTime = 48 * time.Hour
 )
 
 func (c *ScheduleConfig) adjust(meta *configMetaData, reloading bool) error {
@@ -839,12 +799,13 @@ func (c *ScheduleConfig) adjust(meta *configMetaData, reloading bool) error {
 	if !meta.IsDefined("max-merge-region-size") {
 		adjustUint64(&c.MaxMergeRegionSize, defaultMaxMergeRegionSize)
 	}
+	if !meta.IsDefined("max-merge-region-keys") {
+		adjustUint64(&c.MaxMergeRegionKeys, defaultMaxMergeRegionKeys)
+	}
 	adjustDuration(&c.SplitMergeInterval, defaultSplitMergeInterval)
-	adjustDuration(&c.SwitchWitnessInterval, defaultSwitchWitnessInterval)
 	adjustDuration(&c.PatrolRegionInterval, defaultPatrolRegionInterval)
 	adjustDuration(&c.MaxStoreDownTime, defaultMaxStoreDownTime)
 	adjustDuration(&c.HotRegionsWriteInterval, defaultHotRegionsWriteInterval)
-	adjustDuration(&c.MaxStorePreparingTime, defaultMaxStorePreparingTime)
 	if !meta.IsDefined("leader-schedule-limit") {
 		adjustUint64(&c.LeaderScheduleLimit, defaultLeaderScheduleLimit)
 	}
@@ -878,21 +839,11 @@ func (c *ScheduleConfig) adjust(meta *configMetaData, reloading bool) error {
 	if !meta.IsDefined("enable-joint-consensus") {
 		c.EnableJointConsensus = defaultEnableJointConsensus
 	}
-	if !meta.IsDefined("enable-tikv-split-region") {
-		c.EnableTiKVSplitRegion = defaultEnableTiKVSplitRegion
-	}
 	if !meta.IsDefined("enable-cross-table-merge") {
 		c.EnableCrossTableMerge = defaultEnableCrossTableMerge
 	}
 	adjustFloat64(&c.LowSpaceRatio, defaultLowSpaceRatio)
 	adjustFloat64(&c.HighSpaceRatio, defaultHighSpaceRatio)
-	if !meta.IsDefined("enable-diagnostic") {
-		c.EnableDiagnostic = defaultEnableDiagnostic
-	}
-
-	if !meta.IsDefined("enable-witness") {
-		c.EnableWitness = defaultEnableWitness
-	}
 
 	// new cluster:v2, old cluster:v1
 	if !meta.IsDefined("region-score-formula-version") && !reloading {
@@ -933,15 +884,6 @@ func (c *ScheduleConfig) migrateConfigurationMap() map[string][2]*bool {
 		"remove-extra-replica":    {&c.DisableRemoveExtraReplica, &c.EnableRemoveExtraReplica},
 		"location-replacement":    {&c.DisableLocationReplacement, &c.EnableLocationReplacement},
 	}
-}
-
-// GetMaxMergeRegionKeys returns the max merge keys.
-// it should keep consistent with tikv: https://github.com/tikv/tikv/pull/12484
-func (c *ScheduleConfig) GetMaxMergeRegionKeys() uint64 {
-	if keys := c.MaxMergeRegionKeys; keys != 0 {
-		return keys
-	}
-	return c.MaxMergeRegionSize * 10000
 }
 
 func (c *ScheduleConfig) parseDeprecatedFlag(meta *configMetaData, name string, old, new bool) (bool, error) {
@@ -991,9 +933,6 @@ func (c *ScheduleConfig) Validate() error {
 	}
 	if c.LowSpaceRatio <= c.HighSpaceRatio {
 		return errors.New("low-space-ratio should be larger than high-space-ratio")
-	}
-	if c.LeaderSchedulePolicy != "count" && c.LeaderSchedulePolicy != "size" {
-		return errors.Errorf("leader-schedule-policy %v is invalid", c.LeaderSchedulePolicy)
 	}
 	for _, scheduleConfig := range c.Schedulers {
 		if !IsSchedulerRegistered(scheduleConfig.Type) {
@@ -1053,7 +992,6 @@ var DefaultSchedulers = SchedulerConfigs{
 	{Type: "balance-region"},
 	{Type: "balance-leader"},
 	{Type: "hot-region"},
-	{Type: "split-bucket"},
 }
 
 // IsDefaultScheduler checks whether the scheduler is enable by default.
@@ -1067,7 +1005,6 @@ func IsDefaultScheduler(typ string) bool {
 }
 
 // ReplicationConfig is the replication configuration.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type ReplicationConfig struct {
 	// MaxReplicas is the number of replicas for each region.
 	MaxReplicas uint64 `toml:"max-replicas" json:"max-replicas"`
@@ -1139,7 +1076,6 @@ func (c *ReplicationConfig) adjust(meta *configMetaData) error {
 }
 
 // PDServerConfig is the configuration for pd server.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type PDServerConfig struct {
 	// UseRegionStorage enables the independent region storage.
 	UseRegionStorage bool `toml:"use-region-storage" json:"use-region-storage,string"`
@@ -1160,8 +1096,6 @@ type PDServerConfig struct {
 	TraceRegionFlow bool `toml:"trace-region-flow" json:"trace-region-flow,string,omitempty"`
 	// FlowRoundByDigit used to discretization processing flow information.
 	FlowRoundByDigit int `toml:"flow-round-by-digit" json:"flow-round-by-digit"`
-	// MinResolvedTSPersistenceInterval is the interval to save the min resolved ts.
-	MinResolvedTSPersistenceInterval typeutil.Duration `toml:"min-resolved-ts-persistence-interval" json:"min-resolved-ts-persistence-interval"`
 }
 
 func (c *PDServerConfig) adjust(meta *configMetaData) error {
@@ -1183,9 +1117,6 @@ func (c *PDServerConfig) adjust(meta *configMetaData) error {
 	}
 	if !meta.IsDefined("flow-round-by-digit") {
 		adjustInt(&c.FlowRoundByDigit, defaultFlowRoundByDigit)
-	}
-	if !meta.IsDefined("min-resolved-ts-persistence-interval") {
-		adjustDuration(&c.MinResolvedTSPersistenceInterval, DefaultMinResolvedTSPersistenceInterval)
 	}
 	c.migrateConfigurationFromFile(meta)
 	return c.Validate()
@@ -1234,9 +1165,6 @@ func (c *PDServerConfig) Validate() error {
 			return err
 		}
 	}
-	if c.KeyType != "table" && c.KeyType != "raw" && c.KeyType != "txn" {
-		return errors.Errorf("key-type %v is invalid", c.KeyType)
-	}
 	if c.FlowRoundByDigit < 0 {
 		return errs.ErrConfigItem.GenWithStack("flow round by digit cannot be negative number")
 	}
@@ -1255,7 +1183,6 @@ type StoreLabel struct {
 const RejectLeader = "reject-leader"
 
 // LabelPropertyConfig is the config section to set properties to store labels.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type LabelPropertyConfig map[string][]StoreLabel
 
 // Clone returns a cloned label property configuration.
@@ -1397,7 +1324,6 @@ func (c *DashboardConfig) adjust(meta *configMetaData) {
 }
 
 // ReplicationModeConfig is the configuration for the replication policy.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type ReplicationModeConfig struct {
 	ReplicationMode string                      `toml:"replication-mode" json:"replication-mode"` // can be 'dr-auto-sync' or 'majority', default value is 'majority'
 	DRAutoSync      DRAutoSyncReplicationConfig `toml:"dr-auto-sync" json:"dr-auto-sync"`         // used when ReplicationMode is 'dr-auto-sync'
@@ -1434,12 +1360,19 @@ type DRAutoSyncReplicationConfig struct {
 	PrimaryReplicas  int               `toml:"primary-replicas" json:"primary-replicas"`
 	DRReplicas       int               `toml:"dr-replicas" json:"dr-replicas"`
 	WaitStoreTimeout typeutil.Duration `toml:"wait-store-timeout" json:"wait-store-timeout"`
-	PauseRegionSplit bool              `toml:"pause-region-split" json:"pause-region-split,string"`
+	WaitSyncTimeout  typeutil.Duration `toml:"wait-sync-timeout" json:"wait-sync-timeout"`
+	WaitAsyncTimeout typeutil.Duration `toml:"wait-async-timeout" json:"wait-async-timeout"`
 }
 
 func (c *DRAutoSyncReplicationConfig) adjust(meta *configMetaData) {
 	if !meta.IsDefined("wait-store-timeout") {
 		c.WaitStoreTimeout = typeutil.NewDuration(defaultDRWaitStoreTimeout)
+	}
+	if !meta.IsDefined("wait-sync-timeout") {
+		c.WaitSyncTimeout = typeutil.NewDuration(defaultDRWaitSyncTimeout)
+	}
+	if !meta.IsDefined("wait-async-timeout") {
+		c.WaitAsyncTimeout = typeutil.NewDuration(defaultDRWaitAsyncTimeout)
 	}
 }
 

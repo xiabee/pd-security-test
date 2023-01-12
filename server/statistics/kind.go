@@ -14,54 +14,6 @@
 
 package statistics
 
-import (
-	"github.com/tikv/pd/server/core"
-)
-
-const (
-	// BytePriority indicates hot-region-scheduler prefer byte dim
-	BytePriority = "byte"
-	// KeyPriority indicates hot-region-scheduler prefer key dim
-	KeyPriority = "key"
-	// QueryPriority indicates hot-region-scheduler prefer query dim
-	QueryPriority = "query"
-)
-
-// Indicator dims.
-const (
-	ByteDim int = iota
-	KeyDim
-	QueryDim
-	DimLen
-)
-
-// StringToDim return dim according to string.
-func StringToDim(name string) int {
-	switch name {
-	case BytePriority:
-		return ByteDim
-	case KeyPriority:
-		return KeyDim
-	case QueryPriority:
-		return QueryDim
-	}
-	return ByteDim
-}
-
-// DimToString return string according to dim.
-func DimToString(dim int) string {
-	switch dim {
-	case ByteDim:
-		return BytePriority
-	case KeyDim:
-		return KeyPriority
-	case QueryDim:
-		return QueryPriority
-	default:
-		return ""
-	}
-}
-
 // RegionStatKind represents the statistics type of region.
 type RegionStatKind int
 
@@ -69,10 +21,10 @@ type RegionStatKind int
 const (
 	RegionReadBytes RegionStatKind = iota
 	RegionReadKeys
-	RegionReadQueryNum
+	RegionReadQuery
 	RegionWriteBytes
 	RegionWriteKeys
-	RegionWriteQueryNum
+	RegionWriteQuery
 
 	RegionStatCount
 )
@@ -87,9 +39,9 @@ func (k RegionStatKind) String() string {
 		return "write_bytes"
 	case RegionWriteKeys:
 		return "write_keys"
-	case RegionReadQueryNum:
+	case RegionReadQuery:
 		return "read_query"
-	case RegionWriteQueryNum:
+	case RegionWriteQuery:
 		return "write_query"
 	}
 	return "unknown RegionStatKind"
@@ -150,7 +102,8 @@ type sourceKind int
 
 const (
 	direct  sourceKind = iota // there is a corresponding peer in this store.
-	inherit                   // there is no corresponding peer in this store and we need to copy from other stores.
+	inherit                   // there is no a corresponding peer in this store and there is a peer just deleted.
+	adopt                     // there is no corresponding peer in this store and there is no peer just deleted, we need to copy from other stores.
 )
 
 func (k sourceKind) String() string {
@@ -159,6 +112,8 @@ func (k sourceKind) String() string {
 		return "direct"
 	case inherit:
 		return "inherit"
+	case adopt:
+		return "adopt"
 	}
 	return "unknown"
 }
@@ -172,8 +127,8 @@ const (
 	Read
 )
 
-func (rw RWType) String() string {
-	switch rw {
+func (k RWType) String() string {
+	switch k {
 	case Write:
 		return "write"
 	case Read:
@@ -182,77 +137,15 @@ func (rw RWType) String() string {
 	return "unimplemented"
 }
 
-var (
-	writeRegionStats = []RegionStatKind{RegionWriteBytes, RegionWriteKeys, RegionWriteQueryNum}
-	readRegionStats  = []RegionStatKind{RegionReadBytes, RegionReadKeys, RegionReadQueryNum}
-)
-
 // RegionStats returns hot items according to kind
-func (rw RWType) RegionStats() []RegionStatKind {
-	switch rw {
+func (k RWType) RegionStats() []RegionStatKind {
+	switch k {
 	case Write:
-		return writeRegionStats
+		return []RegionStatKind{RegionWriteBytes, RegionWriteKeys, RegionWriteQuery}
 	case Read:
-		return readRegionStats
+		return []RegionStatKind{RegionReadBytes, RegionReadKeys, RegionReadQuery}
 	}
 	return nil
-}
-
-// Inverse returns the opposite of kind.
-func (rw RWType) Inverse() RWType {
-	switch rw {
-	case Write:
-		return Read
-	default: // Case Read
-		return Write
-	}
-}
-
-// ReportInterval returns the report interval of read or write.
-func (rw RWType) ReportInterval() int {
-	switch rw {
-	case Write:
-		return WriteReportInterval
-	default: // Case Read
-		return ReadReportInterval
-	}
-}
-
-// DefaultAntiCount returns the default anti count of read or write.
-func (rw RWType) DefaultAntiCount() int {
-	switch rw {
-	case Write:
-		return HotRegionAntiCount
-	default: // Case Read
-		return HotRegionAntiCount * (RegionHeartBeatReportInterval / StoreHeartBeatReportInterval)
-	}
-}
-
-// GetLoadRatesFromPeer gets the load rates of the read or write type from PeerInfo.
-func (rw RWType) GetLoadRatesFromPeer(peer *core.PeerInfo) []float64 {
-	deltaLoads := peer.GetLoads()
-	interval := peer.GetInterval()
-	loads := make([]float64, DimLen)
-	for dim, k := range rw.RegionStats() {
-		loads[dim] = deltaLoads[k] / float64(interval)
-	}
-	return loads
-}
-
-// SetFullLoadRates set load rates to full as read or write type.
-func (rw RWType) SetFullLoadRates(full []float64, loads []float64) {
-	for dim, k := range rw.RegionStats() {
-		full[k] = loads[dim]
-	}
-}
-
-// ForeachRegionStats foreach all region stats of read and write.
-func ForeachRegionStats(f func(RWType, int, RegionStatKind)) {
-	for _, rwTy := range []RWType{Read, Write} {
-		for dim, kind := range rwTy.RegionStats() {
-			f(rwTy, dim, kind)
-		}
-	}
 }
 
 // ActionType indicates the action type for the stat item.

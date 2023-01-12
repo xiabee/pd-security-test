@@ -20,9 +20,9 @@ import (
 	"strings"
 	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -63,7 +63,7 @@ func newZapTestLogger(cfg *log.Config, opts ...zap.Option) verifyLogger {
 	// TestingWriter is used to write to memory.
 	// Used in the verify logger.
 	writer := newTestingWriter()
-	lg, _, _ := log.InitLoggerWithWriteSyncer(cfg, writer, writer, opts...)
+	lg, _, _ := log.InitLoggerWithWriteSyncer(cfg, writer, opts...)
 
 	return verifyLogger{
 		Logger: lg,
@@ -71,51 +71,56 @@ func newZapTestLogger(cfg *log.Config, opts ...zap.Option) verifyLogger {
 	}
 }
 
-func TestError(t *testing.T) {
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testErrorSuite{})
+
+type testErrorSuite struct{}
+
+func (s *testErrorSuite) TestError(c *C) {
 	conf := &log.Config{Level: "debug", File: log.FileLogConfig{}, DisableTimestamp: true}
 	lg := newZapTestLogger(conf)
 	log.ReplaceGlobals(lg.Logger, nil)
 
 	rfc := `[error="[PD:member:ErrEtcdLeaderNotFound]etcd leader not found`
 	log.Error("test", zap.Error(ErrEtcdLeaderNotFound.FastGenByArgs()))
-	re.Contains(lg.Message(), rfc)
+	c.Assert(strings.Contains(lg.Message(), rfc), IsTrue)
 	err := errors.New("test error")
 	log.Error("test", ZapError(ErrEtcdLeaderNotFound, err))
-	rfc = `[error="[PD:member:ErrEtcdLeaderNotFound]test error`
-	re.Contains(lg.Message(), rfc)
+	rfc = `[error="[PD:member:ErrEtcdLeaderNotFound]test error"]`
+	c.Assert(strings.Contains(lg.Message(), rfc), IsTrue)
 }
 
-func TestErrorEqual(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testErrorSuite) TestErrorEqual(c *C) {
 	err1 := ErrSchedulerNotFound.FastGenByArgs()
 	err2 := ErrSchedulerNotFound.FastGenByArgs()
-	re.True(errors.ErrorEqual(err1, err2))
+	c.Assert(errors.ErrorEqual(err1, err2), IsTrue)
 
 	err := errors.New("test")
 	err1 = ErrSchedulerNotFound.Wrap(err).FastGenWithCause()
 	err2 = ErrSchedulerNotFound.Wrap(err).FastGenWithCause()
-	re.True(errors.ErrorEqual(err1, err2))
+	c.Assert(errors.ErrorEqual(err1, err2), IsTrue)
 
 	err1 = ErrSchedulerNotFound.FastGenByArgs()
 	err2 = ErrSchedulerNotFound.Wrap(err).FastGenWithCause()
-	re.False(errors.ErrorEqual(err1, err2))
+	c.Assert(errors.ErrorEqual(err1, err2), IsFalse)
 
 	err3 := errors.New("test")
 	err4 := errors.New("test")
 	err1 = ErrSchedulerNotFound.Wrap(err3).FastGenWithCause()
 	err2 = ErrSchedulerNotFound.Wrap(err4).FastGenWithCause()
-	re.True(errors.ErrorEqual(err1, err2))
+	c.Assert(errors.ErrorEqual(err1, err2), IsTrue)
 
 	err3 = errors.New("test1")
 	err4 = errors.New("test")
 	err1 = ErrSchedulerNotFound.Wrap(err3).FastGenWithCause()
 	err2 = ErrSchedulerNotFound.Wrap(err4).FastGenWithCause()
-	re.False(errors.ErrorEqual(err1, err2))
+	c.Assert(errors.ErrorEqual(err1, err2), IsFalse)
 }
 
-func TestZapError(t *testing.T) {
+func (s *testErrorSuite) TestZapError(c *C) {
 	err := errors.New("test")
 	log.Info("test", ZapError(err))
 	err1 := ErrSchedulerNotFound
@@ -123,9 +128,7 @@ func TestZapError(t *testing.T) {
 	log.Info("test", ZapError(err1, err))
 }
 
-func TestErrorWithStack(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testErrorSuite) TestErrorWithStack(c *C) {
 	conf := &log.Config{Level: "debug", File: log.FileLogConfig{}, DisableTimestamp: true}
 	lg := newZapTestLogger(conf)
 	log.ReplaceGlobals(lg.Logger, nil)
@@ -138,8 +141,8 @@ func TestErrorWithStack(t *testing.T) {
 	// This test is based on line number and the first log is in line 141, the second is in line 142.
 	// So they have the same length stack. Move this test to another place need to change the corresponding length.
 	idx1 := strings.Index(m1, "[stack=")
-	re.GreaterOrEqual(idx1, -1)
+	c.Assert(idx1, GreaterEqual, -1)
 	idx2 := strings.Index(m2, "[stack=")
-	re.GreaterOrEqual(idx2, -1)
-	re.Len(m2[idx2:], len(m1[idx1:]))
+	c.Assert(idx2, GreaterEqual, -1)
+	c.Assert(len(m1[idx1:]), Equals, len(m2[idx2:]))
 }

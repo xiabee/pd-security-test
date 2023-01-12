@@ -16,12 +16,12 @@ package syncer
 
 import (
 	"strconv"
+	"sync"
 
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/storage/kv"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/kv"
 	"go.uber.org/zap"
 )
 
@@ -31,7 +31,7 @@ const (
 )
 
 type historyBuffer struct {
-	syncutil.RWMutex
+	sync.RWMutex
 	index      uint64
 	records    []*core.RegionInfo
 	head       int
