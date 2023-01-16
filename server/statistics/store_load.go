@@ -22,22 +22,22 @@ import (
 
 // StoreLoadDetail records store load information.
 type StoreLoadDetail struct {
-	Info     *StoreSummaryInfo
+	*StoreSummaryInfo
 	LoadPred *StoreLoadPred
 	HotPeers []*HotPeerStat
-}
-
-// GetID return the ID of store.
-func (li *StoreLoadDetail) GetID() uint64 {
-	return li.Info.Store.GetID()
 }
 
 // ToHotPeersStat abstracts load information to HotPeersStat.
 func (li *StoreLoadDetail) ToHotPeersStat() *HotPeersStat {
 	totalLoads := make([]float64, RegionStatCount)
+	storeByteRate, storeKeyRate, storeQueryRate := li.LoadPred.Current.Loads[ByteDim],
+		li.LoadPred.Current.Loads[KeyDim], li.LoadPred.Current.Loads[QueryDim]
 	if len(li.HotPeers) == 0 {
 		return &HotPeersStat{
 			TotalLoads:     totalLoads,
+			StoreByteRate:  storeByteRate,
+			StoreKeyRate:   storeKeyRate,
+			StoreQueryRate: storeQueryRate,
 			TotalBytesRate: 0.0,
 			TotalKeysRate:  0.0,
 			TotalQueryRate: 0.0,
@@ -62,8 +62,6 @@ func (li *StoreLoadDetail) ToHotPeersStat() *HotPeersStat {
 
 	b, k, q := GetRegionStatKind(kind, ByteDim), GetRegionStatKind(kind, KeyDim), GetRegionStatKind(kind, QueryDim)
 	byteRate, keyRate, queryRate := totalLoads[b], totalLoads[k], totalLoads[q]
-	storeByteRate, storeKeyRate, storeQueryRate := li.LoadPred.Current.Loads[ByteDim],
-		li.LoadPred.Current.Loads[KeyDim], li.LoadPred.Current.Loads[QueryDim]
 
 	return &HotPeersStat{
 		TotalLoads:     totalLoads,
@@ -116,19 +114,24 @@ func GetRegionStatKind(rwTy RWType, dim int) RegionStatKind {
 
 // StoreSummaryInfo records the summary information of store.
 type StoreSummaryInfo struct {
-	Store      *core.StoreInfo
-	IsTiFlash  bool
+	*core.StoreInfo
+	isTiFlash  bool
 	PendingSum *Influence
 }
 
+// Influence records operator influence.
+type Influence struct {
+	Loads []float64
+	Count float64
+}
+
 // SummaryStoreInfos return a mapping from store to summary information.
-func SummaryStoreInfos(cluster core.StoreSetInformer) map[uint64]*StoreSummaryInfo {
-	stores := cluster.GetStores()
+func SummaryStoreInfos(stores []*core.StoreInfo) map[uint64]*StoreSummaryInfo {
 	infos := make(map[uint64]*StoreSummaryInfo, len(stores))
 	for _, store := range stores {
 		info := &StoreSummaryInfo{
-			Store:      store,
-			IsTiFlash:  core.IsStoreContainLabel(store.GetMeta(), core.EngineKey, core.EngineTiFlash),
+			StoreInfo:  store,
+			isTiFlash:  store.IsTiFlash(),
 			PendingSum: nil,
 		}
 		infos[store.GetID()] = info
@@ -153,10 +156,21 @@ func (s *StoreSummaryInfo) AddInfluence(infl *Influence, w float64) {
 	s.PendingSum.Count += infl.Count * w
 }
 
-// Influence records operator influence.
-type Influence struct {
-	Loads []float64
-	Count float64
+// IsTiFlash returns true if the store is TiFlash.
+func (s *StoreSummaryInfo) IsTiFlash() bool {
+	return s.isTiFlash
+}
+
+// GetPendingInfluence returns the current pending influence.
+func GetPendingInfluence(stores []*core.StoreInfo) map[uint64]*Influence {
+	stInfos := SummaryStoreInfos(stores)
+	ret := make(map[uint64]*Influence, len(stInfos))
+	for id, info := range stInfos {
+		if info.PendingSum != nil {
+			ret[id] = info.PendingSum
+		}
+	}
+	return ret
 }
 
 // StoreLoad records the current load.

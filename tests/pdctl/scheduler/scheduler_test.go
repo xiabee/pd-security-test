@@ -135,6 +135,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 		"balance-region-scheduler":     true,
 		"balance-leader-scheduler":     true,
 		"balance-hot-region-scheduler": true,
+		"split-bucket-scheduler":       true,
 	}
 	checkSchedulerCommand(nil, expected)
 
@@ -143,6 +144,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 	expected = map[string]bool{
 		"balance-leader-scheduler":     true,
 		"balance-hot-region-scheduler": true,
+		"split-bucket-scheduler":       true,
 	}
 	checkSchedulerCommand(args, expected)
 
@@ -154,6 +156,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 		expected = map[string]bool{
 			"balance-leader-scheduler":     true,
 			"balance-hot-region-scheduler": true,
+			"split-bucket-scheduler":       true,
 			schedulers[idx]:                true,
 		}
 		checkSchedulerCommand(args, expected)
@@ -168,6 +171,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 		expected = map[string]bool{
 			"balance-leader-scheduler":     true,
 			"balance-hot-region-scheduler": true,
+			"split-bucket-scheduler":       true,
 			schedulers[idx]:                true,
 		}
 		checkSchedulerCommand(args, expected)
@@ -181,6 +185,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 		expected = map[string]bool{
 			"balance-leader-scheduler":     true,
 			"balance-hot-region-scheduler": true,
+			"split-bucket-scheduler":       true,
 		}
 		checkSchedulerCommand(args, expected)
 
@@ -190,6 +195,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 		expected = map[string]bool{
 			"balance-leader-scheduler":     true,
 			"balance-hot-region-scheduler": true,
+			"split-bucket-scheduler":       true,
 			schedulers[idx]:                true,
 		}
 		checkSchedulerCommand(args, expected)
@@ -199,6 +205,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 		expected = map[string]bool{
 			"balance-leader-scheduler":     true,
 			"balance-hot-region-scheduler": true,
+			"split-bucket-scheduler":       true,
 			schedulers[idx]:                true,
 		}
 		checkSchedulerCommand(args, expected)
@@ -212,6 +219,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 		expected = map[string]bool{
 			"balance-leader-scheduler":     true,
 			"balance-hot-region-scheduler": true,
+			"split-bucket-scheduler":       true,
 			schedulers[idx]:                true,
 		}
 		checkSchedulerCommand(args, expected)
@@ -225,6 +233,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 		expected = map[string]bool{
 			"balance-leader-scheduler":     true,
 			"balance-hot-region-scheduler": true,
+			"split-bucket-scheduler":       true,
 		}
 		checkSchedulerCommand(args, expected)
 	}
@@ -233,6 +242,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 	checkSchedulerCommand([]string{"-u", pdAddr, "scheduler", "add", "shuffle-region-scheduler"}, map[string]bool{
 		"balance-leader-scheduler":     true,
 		"balance-hot-region-scheduler": true,
+		"split-bucket-scheduler":       true,
 		"shuffle-region-scheduler":     true,
 	})
 	var roles []string
@@ -248,6 +258,7 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 	checkSchedulerCommand([]string{"-u", pdAddr, "scheduler", "add", "grant-hot-region-scheduler", "1", "1,2,3"}, map[string]bool{
 		"balance-leader-scheduler":     true,
 		"balance-hot-region-scheduler": true,
+		"split-bucket-scheduler":       true,
 		"shuffle-region-scheduler":     true,
 		"grant-hot-region-scheduler":   true,
 	})
@@ -364,6 +375,28 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 	mustExec([]string{"-u", pdAddr, "scheduler", "remove", "balance-hot-region-scheduler"}, nil)
 	mustExec([]string{"-u", pdAddr, "scheduler", "add", "balance-hot-region-scheduler"}, nil)
 	c.Assert(conf1, DeepEquals, expected1)
+
+	// test balance leader config
+	conf = make(map[string]interface{})
+	conf1 = make(map[string]interface{})
+	mustExec([]string{"-u", pdAddr, "scheduler", "config", "balance-leader-scheduler", "show"}, &conf)
+	c.Assert(conf["batch"], Equals, 4.)
+	mustExec([]string{"-u", pdAddr, "scheduler", "config", "balance-leader-scheduler", "set", "batch", "3"}, nil)
+	mustExec([]string{"-u", pdAddr, "scheduler", "config", "balance-leader-scheduler"}, &conf1)
+	c.Assert(conf1["batch"], Equals, 3.)
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "add", "balance-leader-scheduler"}, nil)
+	c.Assert(strings.Contains(echo, "Success!"), IsFalse)
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "remove", "balance-leader-scheduler"}, nil)
+	c.Assert(strings.Contains(echo, "Success!"), IsTrue)
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "remove", "balance-leader-scheduler"}, nil)
+	c.Assert(strings.Contains(echo, "404"), IsTrue)
+	c.Assert(strings.Contains(echo, "PD:scheduler:ErrSchedulerNotFound]scheduler not found"), IsTrue)
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "config", "balance-leader-scheduler"}, nil)
+	c.Assert(strings.Contains(echo, "404"), IsTrue)
+	c.Assert(strings.Contains(echo, "scheduler not found"), IsTrue)
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "add", "balance-leader-scheduler"}, nil)
+	c.Assert(strings.Contains(echo, "Success!"), IsTrue)
+
 	// test show scheduler with paused and disabled status.
 	checkSchedulerWithStatusCommand := func(args []string, status string, expected []string) {
 		if args != nil {
@@ -398,4 +431,14 @@ func (s *schedulerTestSuite) TestScheduler(c *C) {
 	err = leaderServer.GetServer().SetScheduleConfig(*cfg)
 	c.Assert(err, IsNil)
 	checkSchedulerWithStatusCommand(nil, "disabled", nil)
+
+	// test split bucket scheduler
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "config", "split-bucket-scheduler"}, nil)
+	c.Assert(strings.Contains(echo, "\"degree\": 3"), IsTrue)
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "config", "split-bucket-scheduler", "set", "degree", "10"}, nil)
+	c.Assert(strings.Contains(echo, "Success"), IsTrue)
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "config", "split-bucket-scheduler"}, nil)
+	c.Assert(strings.Contains(echo, "\"degree\": 10"), IsTrue)
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "remove", "split-bucket-scheduler"}, nil)
+	c.Assert(strings.Contains(echo, "Success!"), IsTrue)
 }

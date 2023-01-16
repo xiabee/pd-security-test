@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/go-units"
 	"github.com/gogo/protobuf/proto"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
@@ -45,6 +46,7 @@ const (
 )
 
 // StoreInfo contains information about a store.
+// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type StoreInfo struct {
 	meta *metapb.Store
 	*storeStats
@@ -59,16 +61,18 @@ type StoreInfo struct {
 	leaderWeight        float64
 	regionWeight        float64
 	limiter             map[storelimit.Type]*storelimit.StoreLimit
+	minResolvedTS       uint64
 }
 
 // NewStoreInfo creates StoreInfo with meta data.
 func NewStoreInfo(store *metapb.Store, opts ...StoreCreateOption) *StoreInfo {
 	storeInfo := &StoreInfo{
-		meta:         store,
-		storeStats:   newStoreStats(),
-		leaderWeight: 1.0,
-		regionWeight: 1.0,
-		limiter:      make(map[storelimit.Type]*storelimit.StoreLimit),
+		meta:          store,
+		storeStats:    newStoreStats(),
+		leaderWeight:  1.0,
+		regionWeight:  1.0,
+		limiter:       make(map[storelimit.Type]*storelimit.StoreLimit),
+		minResolvedTS: 0,
 	}
 	for _, opt := range opts {
 		opt(storeInfo)
@@ -93,6 +97,7 @@ func (s *StoreInfo) Clone(opts ...StoreCreateOption) *StoreInfo {
 		leaderWeight:        s.leaderWeight,
 		regionWeight:        s.regionWeight,
 		limiter:             s.limiter,
+		minResolvedTS:       s.minResolvedTS,
 	}
 
 	for _, opt := range opts {
@@ -117,6 +122,7 @@ func (s *StoreInfo) ShallowClone(opts ...StoreCreateOption) *StoreInfo {
 		leaderWeight:        s.leaderWeight,
 		regionWeight:        s.regionWeight,
 		limiter:             s.limiter,
+		minResolvedTS:       s.minResolvedTS,
 	}
 
 	for _, opt := range opts {
@@ -141,24 +147,39 @@ func (s *StoreInfo) IsAvailable(limitType storelimit.Type) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.limiter != nil && s.limiter[limitType] != nil {
-		return s.limiter[limitType].Available() >= storelimit.RegionInfluence[limitType]
+		return s.limiter[limitType].Available(storelimit.RegionInfluence[limitType])
 	}
 	return true
 }
 
-// IsUp checks if the store's state is Up.
+// IsTiFlash returns true if the store is tiflash.
+func (s *StoreInfo) IsTiFlash() bool {
+	return IsStoreContainLabel(s.GetMeta(), EngineKey, EngineTiFlash)
+}
+
+// IsUp returns true if store is serving or preparing.
 func (s *StoreInfo) IsUp() bool {
-	return s.GetState() == metapb.StoreState_Up
+	return s.IsServing() || s.IsPreparing()
 }
 
-// IsOffline checks if the store's state is Offline.
-func (s *StoreInfo) IsOffline() bool {
-	return s.GetState() == metapb.StoreState_Offline
+// IsPreparing checks if the store's state is preparing.
+func (s *StoreInfo) IsPreparing() bool {
+	return s.GetNodeState() == metapb.NodeState_Preparing
 }
 
-// IsTombstone checks if the store's state is Tombstone.
-func (s *StoreInfo) IsTombstone() bool {
-	return s.GetState() == metapb.StoreState_Tombstone
+// IsServing checks if the store's state is serving.
+func (s *StoreInfo) IsServing() bool {
+	return s.GetNodeState() == metapb.NodeState_Serving
+}
+
+// IsRemoving checks if the store's state is removing.
+func (s *StoreInfo) IsRemoving() bool {
+	return s.GetNodeState() == metapb.NodeState_Removing
+}
+
+// IsRemoved checks if the store's state is removed.
+func (s *StoreInfo) IsRemoved() bool {
+	return s.GetNodeState() == metapb.NodeState_Removed
 }
 
 // GetSlowScore returns the slow score of the store.
@@ -193,6 +214,16 @@ func (s *StoreInfo) GetMeta() *metapb.Store {
 // GetState returns the state of the store.
 func (s *StoreInfo) GetState() metapb.StoreState {
 	return s.meta.GetState()
+}
+
+// GetNodeState returns the state of the node.
+func (s *StoreInfo) GetNodeState() metapb.NodeState {
+	return s.meta.GetNodeState()
+}
+
+// GetStatusAddress returns the http address of the store.
+func (s *StoreInfo) GetStatusAddress() string {
+	return s.meta.GetStatusAddress()
 }
 
 // GetAddress returns the address of the store.
@@ -343,17 +374,21 @@ func (s *StoreInfo) regionScoreV1(highSpaceRatio, lowSpaceRatio float64, delta i
 }
 
 func (s *StoreInfo) regionScoreV2(delta int64, lowSpaceRatio float64) float64 {
-	A := float64(s.GetAvgAvailable()) / gb
-	C := float64(s.GetCapacity()) / gb
+	A := float64(s.GetAvgAvailable()) / units.GiB
+	C := float64(s.GetCapacity()) / units.GiB
+	// the used size always be accurate, it only statistics the raftDB|rocksDB|snap directory, so we use it directly.
+	U := float64(s.GetUsedSize()) / units.GiB
+	// the diff maybe not zero if the disk has other files.
+	diff := C - A - U
 	R := float64(s.GetRegionSize() + delta)
 	if R < 0 {
 		R = float64(s.GetRegionSize())
 	}
-	U := C - A
+
 	if s.GetRegionSize() != 0 {
 		U += U * (float64(delta)) / float64(s.GetRegionSize())
-		if U < C && U > 0 {
-			A = C - U
+		if A1 := C - U - diff; A1 > 0 && A1 < C {
+			A = A1
 		}
 	}
 	var (
@@ -459,6 +494,11 @@ func (s *StoreInfo) GetUptime() time.Duration {
 		return uptime
 	}
 	return 0
+}
+
+// GetMinResolvedTS returns min resolved ts.
+func (s *StoreInfo) GetMinResolvedTS() uint64 {
+	return s.minResolvedTS
 }
 
 var (
@@ -703,7 +743,7 @@ func (s *StoresInfo) UpdateStoreStatus(storeID uint64, leaderCount int, regionCo
 	}
 }
 
-// IsStoreContainLabel return if the store contains the given label.
+// IsStoreContainLabel returns if the store contains the given label.
 func IsStoreContainLabel(store *metapb.Store, key, value string) bool {
 	for _, l := range store.GetLabels() {
 		if l.GetKey() == key && l.GetValue() == value {
@@ -711,4 +751,11 @@ func IsStoreContainLabel(store *metapb.Store, key, value string) bool {
 		}
 	}
 	return false
+}
+
+// IsAvailableForMinResolvedTS returns if the store is available for min resolved ts.
+func IsAvailableForMinResolvedTS(s *StoreInfo) bool {
+	// If a store is tombstone or no leader, it is not meaningful for min resolved ts.
+	// And we will skip tiflash, because it does not report min resolved ts.
+	return !s.IsRemoved() && !s.IsTiFlash() && s.GetLeaderCount() != 0
 }

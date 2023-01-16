@@ -70,7 +70,7 @@ func (s *testMergeCheckerSuite) SetUpTest(c *C) {
 	s.cluster.SetLabelPropertyConfig(config.LabelPropertyConfig{
 		config.RejectLeader: {{Key: "reject", Value: "leader"}},
 	})
-	s.cluster.DisableFeature(versioninfo.JointConsensus)
+	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	stores := map[uint64][]string{
 		1: {}, 2: {}, 3: {}, 4: {}, 5: {}, 6: {},
 		7: {"reject", "leader"},
@@ -103,6 +103,16 @@ func (s *testMergeCheckerSuite) TestBasic(c *C) {
 	c.Assert(ops, IsNil)
 	// target region size is too large
 	s.cluster.PutRegion(s.regions[1].Clone(core.SetApproximateSize(600)))
+	ops = s.mc.Check(s.regions[2])
+	c.Assert(ops, IsNil)
+
+	// it can merge if the max region size of the store is greater than the target region size.
+	config := s.cluster.GetStoreConfig()
+	config.RegionMaxSize = "10Gib"
+
+	ops = s.mc.Check(s.regions[2])
+	c.Assert(ops, NotNil)
+	config.RegionMaxSize = "144Mib"
 	ops = s.mc.Check(s.regions[2])
 	c.Assert(ops, IsNil)
 	// change the size back
@@ -227,6 +237,18 @@ func (s *testMergeCheckerSuite) TestBasic(c *C) {
 	c.Assert(ops, IsNil)
 	ops = s.mc.Check(s.regions[3])
 	c.Assert(ops, IsNil)
+
+	s.cluster.SetSplitMergeInterval(500 * time.Millisecond)
+	ops = s.mc.Check(s.regions[2])
+	c.Assert(ops, IsNil)
+	ops = s.mc.Check(s.regions[3])
+	c.Assert(ops, IsNil)
+
+	time.Sleep(500 * time.Millisecond)
+	ops = s.mc.Check(s.regions[2])
+	c.Assert(ops, NotNil)
+	ops = s.mc.Check(s.regions[3])
+	c.Assert(ops, NotNil)
 }
 
 func (s *testMergeCheckerSuite) checkSteps(c *C, op *operator.Operator, steps []operator.OpStep) {
@@ -520,7 +542,7 @@ func (s *testMergeCheckerSuite) TestCache(c *C) {
 	s.cluster.SetMaxMergeRegionSize(2)
 	s.cluster.SetMaxMergeRegionKeys(2)
 	s.cluster.SetSplitMergeInterval(time.Hour)
-	s.cluster.DisableFeature(versioninfo.JointConsensus)
+	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	stores := map[uint64][]string{
 		1: {}, 2: {}, 3: {}, 4: {}, 5: {}, 6: {},
 	}

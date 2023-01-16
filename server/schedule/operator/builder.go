@@ -21,39 +21,49 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/id"
 	"github.com/tikv/pd/server/schedule/filter"
-	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/server/versioninfo"
 )
 
+// ClusterInformer provides the necessary information for building operator.
+type ClusterInformer interface {
+	GetBasicCluster() *core.BasicCluster
+	GetOpts() *config.PersistOptions
+	GetStoreConfig() *config.StoreConfig
+	GetRuleManager() *placement.RuleManager
+	GetAllocator() id.Allocator
+}
+
 // Builder is used to create operators. Usage:
-//
-//	op, err := NewBuilder(desc, cluster, region).
-//	            RemovePeer(store1).
-//	            AddPeer(peer1).
-//	            SetLeader(store2).
-//	            Build(kind)
-//
+//     op, err := NewBuilder(desc, cluster, region).
+//                 RemovePeer(store1).
+//                 AddPeer(peer1).
+//                 SetLeader(store2).
+//                 Build(kind)
 // The generated Operator will choose the most appropriate execution order
 // according to various constraints.
 type Builder struct {
 	// basic info
-	desc          string
-	cluster       opt.Cluster
-	regionID      uint64
-	regionEpoch   *metapb.RegionEpoch
-	rules         []*placement.Rule
-	expectedRoles map[uint64]placement.PeerRoleType
+	ClusterInformer
+	desc            string
+	regionID        uint64
+	regionEpoch     *metapb.RegionEpoch
+	rules           []*placement.Rule
+	expectedRoles   map[uint64]placement.PeerRoleType
+	approximateSize int64
 
 	// operation record
-	originPeers         peersMap
-	unhealthyPeers      peersMap
-	originLeaderStoreID uint64
-	targetPeers         peersMap
-	targetLeaderStoreID uint64
-	err                 error
+	originPeers          peersMap
+	unhealthyPeers       peersMap
+	originLeaderStoreID  uint64
+	targetPeers          peersMap
+	targetLeaderStoreID  uint64
+	targetLeaderStoreIDs []uint64 // This field is only used during multi-target evict leader, and will not be filtered during `Build`.
+	err                  error
 
 	// skip check flags
 	skipOriginJointStateCheck bool
@@ -89,12 +99,13 @@ func SkipPlacementRulesCheck(b *Builder) {
 }
 
 // NewBuilder creates a Builder.
-func NewBuilder(desc string, cluster opt.Cluster, region *core.RegionInfo, opts ...BuilderOption) *Builder {
+func NewBuilder(desc string, ci ClusterInformer, region *core.RegionInfo, opts ...BuilderOption) *Builder {
 	b := &Builder{
-		desc:        desc,
-		cluster:     cluster,
-		regionID:    region.GetID(),
-		regionEpoch: region.GetRegionEpoch(),
+		desc:            desc,
+		ClusterInformer: ci,
+		regionID:        region.GetID(),
+		regionEpoch:     region.GetRegionEpoch(),
+		approximateSize: region.GetApproximateSize(),
 	}
 
 	// options
@@ -131,8 +142,8 @@ func NewBuilder(desc string, cluster opt.Cluster, region *core.RegionInfo, opts 
 
 	// placement rules
 	var rules []*placement.Rule
-	if err == nil && !b.skipPlacementRulesCheck && cluster.GetOpts().IsPlacementRulesEnabled() {
-		fit := cluster.GetRuleManager().FitRegion(cluster, region)
+	if err == nil && !b.skipPlacementRulesCheck && b.GetOpts().IsPlacementRulesEnabled() {
+		fit := b.GetRuleManager().FitRegion(b.GetBasicCluster(), region)
 		for _, rf := range fit.RuleFits {
 			rules = append(rules, rf.Rule)
 		}
@@ -147,14 +158,14 @@ func NewBuilder(desc string, cluster opt.Cluster, region *core.RegionInfo, opts 
 	}
 
 	// build flags
-	supportJointConsensus := cluster.IsFeatureSupported(versioninfo.JointConsensus)
+	supportJointConsensus := versioninfo.IsFeatureSupported(b.GetOpts().GetClusterVersion(), versioninfo.JointConsensus)
 
 	b.rules = rules
 	b.originPeers = originPeers
 	b.unhealthyPeers = unhealthyPeers
 	b.originLeaderStoreID = originLeaderStoreID
 	b.targetPeers = originPeers.Copy()
-	b.useJointConsensus = supportJointConsensus && cluster.GetOpts().IsUseJointConsensus()
+	b.useJointConsensus = supportJointConsensus && b.GetOpts().IsUseJointConsensus()
 	b.err = err
 	return b
 }
@@ -249,6 +260,25 @@ func (b *Builder) SetLeader(storeID uint64) *Builder {
 	return b
 }
 
+// SetLeaders records all valid target leaders in Builder.
+func (b *Builder) SetLeaders(storeIDs []uint64) *Builder {
+	if b.err != nil {
+		return b
+	}
+	sort.Slice(storeIDs, func(i, j int) bool { return storeIDs[i] < storeIDs[j] })
+	for _, storeID := range storeIDs {
+		peer := b.targetPeers[storeID]
+		if peer == nil || core.IsLearner(peer) || b.unhealthyPeers[storeID] != nil {
+			continue
+		}
+		b.targetLeaderStoreIDs = append(b.targetLeaderStoreIDs, storeID)
+	}
+	// Don't need to check if there's valid target, because `targetLeaderStoreIDs`
+	// can be empty if this is not a multi-target evict leader operation. Besides,
+	// `targetLeaderStoreID` must be valid and there must be at least one valid target.
+	return b
+}
+
 // SetPeers resets the target peer list.
 //
 // If peer's ID is 0, the builder will allocate a new ID later. If current
@@ -338,7 +368,7 @@ func (b *Builder) Build(kind OpKind) (*Operator, error) {
 		return nil, b.err
 	}
 
-	return NewOperator(b.desc, brief, b.regionID, b.regionEpoch, kind, b.steps...), nil
+	return NewOperator(b.desc, brief, b.regionID, b.regionEpoch, kind, b.approximateSize, b.steps...), nil
 }
 
 // Initialize intermediate states.
@@ -399,7 +429,7 @@ func (b *Builder) prepareBuild() (string, error) {
 		if o == nil || (!b.useJointConsensus && !core.IsLearner(o) && core.IsLearner(n)) {
 			if n.GetId() == 0 {
 				// Allocate peer ID if need.
-				id, err := b.cluster.AllocID()
+				id, err := b.GetAllocator().Alloc()
 				if err != nil {
 					return "", err
 				}
@@ -428,8 +458,10 @@ func (b *Builder) prepareBuild() (string, error) {
 		}
 	}
 
-	if len(b.toAdd)+len(b.toRemove)+len(b.toPromote) <= 1 && len(b.toDemote) == 0 {
-		// if only one peer changed and the change type is not demote, joint consensus is not used
+	if len(b.toAdd)+len(b.toRemove)+len(b.toPromote) <= 1 && len(b.toDemote) == 0 &&
+		!(len(b.toRemove) == 1 && len(b.targetPeers) == 1) {
+		// If only one peer changed and the change type is not demote, joint consensus is not used.
+		// Unless the changed is 2 voters to 1 voter, see https://github.com/tikv/pd/issues/4411 .
 		b.useJointConsensus = false
 	}
 
@@ -455,6 +487,8 @@ func (b *Builder) brief() string {
 		return fmt.Sprintf("promote peer: store %s", b.toPromote)
 	case len(b.toDemote) > 0:
 		return fmt.Sprintf("demote peer: store %s", b.toDemote)
+	case len(b.targetLeaderStoreIDs) != 0:
+		return fmt.Sprintf("evict leader: from store %d to one in %v, or to %d (for compatibility)", b.originLeaderStoreID, b.targetLeaderStoreIDs, b.targetLeaderStoreID)
 	case b.originLeaderStoreID != b.targetLeaderStoreID:
 		return fmt.Sprintf("transfer leader: store %d to %d", b.originLeaderStoreID, b.targetLeaderStoreID)
 	default:
@@ -500,7 +534,7 @@ func (b *Builder) buildStepsWithJointConsensus(kind OpKind) (OpKind, error) {
 	if targetLeaderBefore, ok := b.originPeers[b.targetLeaderStoreID]; ok && !core.IsLearner(targetLeaderBefore) {
 		// target leader is a voter in `originPeers`, transfer leader first.
 		if b.originLeaderStoreID != b.targetLeaderStoreID {
-			b.execTransferLeader(b.targetLeaderStoreID)
+			b.execTransferLeader(b.targetLeaderStoreID, b.targetLeaderStoreIDs)
 			kind |= OpLeader
 		}
 		b.execChangePeerV2(true, false)
@@ -509,7 +543,7 @@ func (b *Builder) buildStepsWithJointConsensus(kind OpKind) (OpKind, error) {
 		// origin leader is none or a voter in `targetPeers`, change peers first.
 		b.execChangePeerV2(true, false)
 		if b.originLeaderStoreID != b.targetLeaderStoreID {
-			b.execTransferLeader(b.targetLeaderStoreID)
+			b.execTransferLeader(b.targetLeaderStoreID, b.targetLeaderStoreIDs)
 			kind |= OpLeader
 		}
 	} else {
@@ -570,8 +604,8 @@ func (b *Builder) preferLeaderRoleAsLeader(targetLeaderStoreID uint64) int {
 }
 
 func (b *Builder) preferUpStoreAsLeader(targetLeaderStoreID uint64) int {
-	store := b.cluster.GetStore(targetLeaderStoreID)
-	return typeutil.BoolToInt(store != nil && store.IsUp())
+	store := b.GetBasicCluster().GetStore(targetLeaderStoreID)
+	return typeutil.BoolToInt(store != nil && (store.IsPreparing() || store.IsServing()))
 }
 
 func (b *Builder) preferCurrentLeader(targetLeaderStoreID uint64) int {
@@ -597,7 +631,7 @@ func (b *Builder) buildStepsWithoutJointConsensus(kind OpKind) (OpKind, error) {
 			return kind, errors.New("fail to build operator: plan is empty, maybe no valid leader")
 		}
 		if plan.leaderBeforeAdd != 0 && plan.leaderBeforeAdd != b.currentLeaderStoreID {
-			b.execTransferLeader(plan.leaderBeforeAdd)
+			b.execTransferLeader(plan.leaderBeforeAdd, b.targetLeaderStoreIDs)
 			kind |= OpLeader
 		}
 		if plan.add != nil {
@@ -608,7 +642,7 @@ func (b *Builder) buildStepsWithoutJointConsensus(kind OpKind) (OpKind, error) {
 			b.execPromoteLearner(plan.promote)
 		}
 		if plan.leaderBeforeRemove != 0 && plan.leaderBeforeRemove != b.currentLeaderStoreID {
-			b.execTransferLeader(plan.leaderBeforeRemove)
+			b.execTransferLeader(plan.leaderBeforeRemove, b.targetLeaderStoreIDs)
 			kind |= OpLeader
 		}
 		if plan.remove != nil {
@@ -623,7 +657,7 @@ func (b *Builder) buildStepsWithoutJointConsensus(kind OpKind) (OpKind, error) {
 		b.currentLeaderStoreID != b.targetLeaderStoreID &&
 		b.currentPeers[b.targetLeaderStoreID] != nil {
 		// Transfer only when target leader is legal.
-		b.execTransferLeader(b.targetLeaderStoreID)
+		b.execTransferLeader(b.targetLeaderStoreID, b.targetLeaderStoreIDs)
 		kind |= OpLeader
 	}
 
@@ -633,9 +667,9 @@ func (b *Builder) buildStepsWithoutJointConsensus(kind OpKind) (OpKind, error) {
 	return kind, nil
 }
 
-func (b *Builder) execTransferLeader(id uint64) {
-	b.steps = append(b.steps, TransferLeader{FromStore: b.currentLeaderStoreID, ToStore: id})
-	b.currentLeaderStoreID = id
+func (b *Builder) execTransferLeader(targetStoreID uint64, targetStoreIDs []uint64) {
+	b.steps = append(b.steps, TransferLeader{FromStore: b.currentLeaderStoreID, ToStore: targetStoreID, ToStores: targetStoreIDs})
+	b.currentLeaderStoreID = targetStoreID
 }
 
 func (b *Builder) execPromoteLearner(peer *metapb.Peer) {
@@ -661,9 +695,9 @@ func (b *Builder) execAddPeer(peer *metapb.Peer) {
 func (b *Builder) execRemovePeer(peer *metapb.Peer) {
 	removeStoreID := peer.GetStoreId()
 	var isDownStore bool
-	store := b.cluster.GetStore(removeStoreID)
+	store := b.GetBasicCluster().GetStore(removeStoreID)
 	if store != nil {
-		isDownStore = store.DownTime() > b.cluster.GetOpts().GetMaxStoreDownTime()
+		isDownStore = store.DownTime() > b.GetOpts().GetMaxStoreDownTime()
 	}
 	b.steps = append(b.steps, RemovePeer{FromStore: removeStoreID, PeerID: peer.GetId(), IsDownStore: isDownStore})
 	delete(b.currentPeers, removeStoreID)
@@ -676,7 +710,7 @@ func (b *Builder) execChangePeerV2(needEnter bool, needTransferLeader bool) {
 
 		// Transfer Leader
 		if needTransferLeader && b.originLeaderStoreID != b.targetLeaderStoreID {
-			b.execTransferLeader(b.targetLeaderStoreID)
+			b.execTransferLeader(b.targetLeaderStoreID, b.targetLeaderStoreIDs)
 		}
 
 		return
@@ -708,7 +742,7 @@ func (b *Builder) execChangePeerV2(needEnter bool, needTransferLeader bool) {
 
 	// Transfer Leader
 	if needTransferLeader && b.originLeaderStoreID != b.targetLeaderStoreID {
-		b.execTransferLeader(b.targetLeaderStoreID)
+		b.execTransferLeader(b.targetLeaderStoreID, b.targetLeaderStoreIDs)
 	}
 
 	// TiKV will handle leave step if only single peer change in promote and demote when enter step is bypassed
@@ -729,7 +763,7 @@ func (b *Builder) allowLeader(peer *metapb.Peer, ignoreClusterLimit bool) bool {
 	if peer.GetStoreId() == b.currentLeaderStoreID {
 		return true
 	}
-	store := b.cluster.GetStore(peer.GetStoreId())
+	store := b.GetBasicCluster().GetStore(peer.GetStoreId())
 	if store == nil {
 		return false
 	}
@@ -740,7 +774,7 @@ func (b *Builder) allowLeader(peer *metapb.Peer, ignoreClusterLimit bool) bool {
 
 	stateFilter := &filter.StoreStateFilter{ActionScope: "operator-builder", TransferLeader: true}
 	// store state filter
-	if !stateFilter.Target(b.cluster.GetOpts(), store) {
+	if !stateFilter.Target(b.GetOpts(), store) {
 		return false
 	}
 
@@ -970,11 +1004,11 @@ func (b *Builder) comparePlan(best, next stepPlan) stepPlan {
 }
 
 func (b *Builder) labelMatch(x, y uint64) int {
-	sx, sy := b.cluster.GetStore(x), b.cluster.GetStore(y)
+	sx, sy := b.GetBasicCluster().GetStore(x), b.GetBasicCluster().GetStore(y)
 	if sx == nil || sy == nil {
 		return 0
 	}
-	labels := b.cluster.GetOpts().GetLocationLabels()
+	labels := b.GetOpts().GetLocationLabels()
 	for i, l := range labels {
 		if sx.GetLabelValue(l) != sy.GetLabelValue(l) {
 			return i
@@ -1006,8 +1040,8 @@ func (b *Builder) planPreferReplaceByNearest(p stepPlan) int {
 // Avoid generating snapshots from offline stores.
 func (b *Builder) planPreferUpStoreAsLeader(p stepPlan) int {
 	if p.add != nil {
-		store := b.cluster.GetStore(p.leaderBeforeAdd)
-		return typeutil.BoolToInt(store != nil && store.IsUp())
+		store := b.GetBasicCluster().GetStore(p.leaderBeforeAdd)
+		return typeutil.BoolToInt(store != nil && (store.IsPreparing() || store.IsServing()))
 	}
 	return 1
 }

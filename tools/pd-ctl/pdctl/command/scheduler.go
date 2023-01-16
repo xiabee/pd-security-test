@@ -117,7 +117,7 @@ func showSchedulerCommandFunc(cmd *cobra.Command, args []string) {
 	if flag := cmd.Flag("status"); flag != nil && flag.Value.String() != "" {
 		url = fmt.Sprintf("%s?status=%s", url, flag.Value.String())
 	}
-	r, err := doRequest(cmd, url, http.MethodGet)
+	r, err := doRequest(cmd, url, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Println(err)
 		return
@@ -144,6 +144,7 @@ func NewAddSchedulerCommand() *cobra.Command {
 	c.AddCommand(NewLabelSchedulerCommand())
 	c.AddCommand(NewEvictSlowStoreSchedulerCommand())
 	c.AddCommand(NewGrantHotRegionSchedulerCommand())
+	c.AddCommand(NewSplitBucketSchedulerCommand())
 	return c
 }
 
@@ -168,7 +169,7 @@ func NewEvictLeaderSchedulerCommand() *cobra.Command {
 }
 
 func checkSchedulerExist(cmd *cobra.Command, schedulerName string) (bool, error) {
-	r, err := doRequest(cmd, schedulersPrefix, http.MethodGet)
+	r, err := doRequest(cmd, schedulersPrefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Println(err)
 		return false, err
@@ -325,14 +326,30 @@ func NewLabelSchedulerCommand() *cobra.Command {
 	return c
 }
 
+// NewSplitBucketSchedulerCommand returns a command to add a split-bucket-scheduler.
+func NewSplitBucketSchedulerCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "split-bucket-scheduler",
+		Short: "add a scheduler to split bucket",
+		Run:   addSchedulerForSplitBucketCommandFunc,
+	}
+	return cmd
+}
+
 // NewGrantHotRegionSchedulerCommand returns a command to add a grant-hot-region-scheduler.
 func NewGrantHotRegionSchedulerCommand() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "grant-hot-region-scheduler <store_lead_id> <store_id_1,store_id_2>",
-		Short: "add a scheduler to grant hot region to fixed store",
+		Use:   "grant-hot-region-scheduler <store_leader_id> <store_leader_id,store_peer_id_1,store_peer_id_2>",
+		Short: "add a scheduler to grant hot region to fixed stores",
 		Run:   addSchedulerForGrantHotRegionCommandFunc,
 	}
 	return c
+}
+
+func addSchedulerForSplitBucketCommandFunc(cmd *cobra.Command, args []string) {
+	input := make(map[string]interface{})
+	input["name"] = cmd.Name()
+	postJSON(cmd, schedulersPrefix, input)
 }
 
 func addSchedulerForGrantHotRegionCommandFunc(cmd *cobra.Command, args []string) {
@@ -421,7 +438,7 @@ func removeSchedulerCommandFunc(cmd *cobra.Command, args []string) {
 		redirectRemoveSchedulerToDeleteConfig(cmd, grantLeaderSchedulerName, args)
 	default:
 		path := schedulersPrefix + "/" + args[0]
-		_, err := doRequest(cmd, path, http.MethodDelete)
+		_, err := doRequest(cmd, path, http.MethodDelete, http.Header{})
 		if err != nil {
 			cmd.Println(err)
 			return
@@ -442,7 +459,49 @@ func NewConfigSchedulerCommand() *cobra.Command {
 		newConfigHotRegionCommand(),
 		newConfigShuffleRegionCommand(),
 		newConfigGrantHotRegionCommand(),
+		newConfigBalanceLeaderCommand(),
+		newSplitBucketCommand(),
 	)
+	return c
+}
+
+func newConfigBalanceLeaderCommand() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "balance-leader-scheduler",
+		Short: "balance-leader-scheduler config",
+		Run:   listSchedulerConfigCommandFunc,
+	}
+
+	c.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "show the config item",
+		Run:   listSchedulerConfigCommandFunc,
+	}, &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "set the config item",
+		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
+	})
+
+	return c
+}
+
+func newSplitBucketCommand() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "split-bucket-scheduler",
+		Short: "split-bucket-scheduler config",
+		Run:   listSchedulerConfigCommandFunc,
+	}
+
+	c.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "list the config item",
+		Run:   listSchedulerConfigCommandFunc,
+	}, &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "set the config item",
+		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
+	})
+
 	return c
 }
 
@@ -552,7 +611,7 @@ func listSchedulerConfigCommandFunc(cmd *cobra.Command, args []string) {
 		p = cmd.Parent().Name()
 	}
 	path := path.Join(schedulerConfigPrefix, p, "list")
-	r, err := doRequest(cmd, path, http.MethodGet)
+	r, err := doRequest(cmd, path, http.MethodGet, http.Header{})
 	if err != nil {
 		if strings.Contains(err.Error(), "404") {
 			err = errors.New("[404] scheduler not found")
@@ -584,7 +643,7 @@ func showGrantHotRegionCommandFunc(cmd *cobra.Command, args []string) {
 	}
 	p := cmd.Name()
 	path := path.Join(schedulerConfigPrefix, p, "list")
-	r, err := doRequest(cmd, path, http.MethodGet)
+	r, err := doRequest(cmd, path, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Println(err)
 		return
@@ -654,7 +713,7 @@ func deleteStoreFromSchedulerConfig(cmd *cobra.Command, schedulerName string, ar
 		return
 	}
 	path := path.Join(schedulerConfigPrefix, "/", schedulerName, "delete", args[0])
-	_, err := doRequest(cmd, path, http.MethodDelete)
+	_, err := doRequest(cmd, path, http.MethodDelete, http.Header{})
 	if err != nil {
 		cmd.Println(err)
 		return
@@ -672,7 +731,7 @@ func showShuffleRegionSchedulerRolesCommandFunc(cmd *cobra.Command, args []strin
 		p = cmd.Parent().Name()
 	}
 	path := path.Join(schedulerConfigPrefix, p, "roles")
-	r, err := doRequest(cmd, path, http.MethodGet)
+	r, err := doRequest(cmd, path, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Println(err)
 		return
@@ -694,8 +753,8 @@ func setShuffleRegionSchedulerRolesCommandFunc(cmd *cobra.Command, args []string
 	}
 	b, _ := json.Marshal(roles)
 	path := path.Join(schedulerConfigPrefix, cmd.Parent().Name(), "roles")
-	_, err := doRequest(cmd, path, http.MethodPost,
-		WithBody("application/json", bytes.NewBuffer(b)))
+	_, err := doRequest(cmd, path, http.MethodPost, http.Header{"Content-Type": {"application/json"}},
+		WithBody(bytes.NewBuffer(b)))
 	if err != nil {
 		cmd.Println(err)
 		return

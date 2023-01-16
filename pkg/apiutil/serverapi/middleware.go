@@ -21,6 +21,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/server"
 	"github.com/urfave/negroni"
 	"go.uber.org/zap"
@@ -30,7 +31,6 @@ import (
 const (
 	RedirectorHeader    = "PD-Redirector"
 	AllowFollowerHandle = "PD-Allow-follower-handle"
-	FollowerHandle      = "PD-Follower-handle"
 )
 
 const (
@@ -90,9 +90,6 @@ func (h *redirector) ServeHTTP(w http.ResponseWriter, r *http.Request, next http
 	allowFollowerHandle := len(r.Header.Get(AllowFollowerHandle)) > 0
 	isLeader := h.s.GetMember().IsLeader()
 	if !h.s.IsClosed() && (allowFollowerHandle || isLeader) {
-		if !isLeader {
-			w.Header().Add(FollowerHandle, "true")
-		}
 		next(w, r)
 		return
 	}
@@ -170,7 +167,6 @@ func (p *customReverseProxies) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 		return
 	}
-
 	http.Error(w, errRedirectFailed, http.StatusInternalServerError)
 }
 
@@ -178,18 +174,9 @@ func copyHeader(dst, src http.Header) {
 	for k, vv := range src {
 		values := dst[k]
 		for _, v := range vv {
-			if !contains(values, v) {
+			if !slice.Contains(values, v) {
 				dst.Add(k, v)
 			}
 		}
 	}
-}
-
-func contains(s []string, x string) bool {
-	for _, n := range s {
-		if x == n {
-			return true
-		}
-	}
-	return false
 }

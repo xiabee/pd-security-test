@@ -65,10 +65,10 @@ func (i *idAllocator) alloc() uint64 {
 }
 
 func (s *regionSyncerTestSuite) TestRegionSyncer(c *C) {
-	c.Assert(failpoint.Enable("github.com/tikv/pd/server/core/regionStorageFastFlush", `return(true)`), IsNil)
-	c.Assert(failpoint.Enable("github.com/tikv/pd/server/core/noFastExitSync", `return(true)`), IsNil)
-	defer failpoint.Disable("github.com/tikv/pd/server/core/regionStorageFastFlush")
-	defer failpoint.Disable("github.com/tikv/pd/server/core/noFastExitSync")
+	c.Assert(failpoint.Enable("github.com/tikv/pd/server/storage/regionStorageFastFlush", `return(true)`), IsNil)
+	c.Assert(failpoint.Enable("github.com/tikv/pd/server/syncer/noFastExitSync", `return(true)`), IsNil)
+	defer failpoint.Disable("github.com/tikv/pd/server/storage/regionStorageFastFlush")
+	defer failpoint.Disable("github.com/tikv/pd/server/syncer/noFastExitSync")
 
 	cluster, err := tests.NewTestCluster(s.ctx, 3, func(conf *config.Config, serverName string) { conf.PDServerCfg.UseRegionStorage = true })
 	defer cluster.Destroy()
@@ -140,7 +140,7 @@ func (s *regionSyncerTestSuite) TestRegionSyncer(c *C) {
 	c.Assert(followerServer, NotNil)
 	cacheRegions := leaderServer.GetServer().GetBasicCluster().GetRegions()
 	c.Assert(cacheRegions, HasLen, regionLen)
-	testutil.WaitUntil(c, func(c *C) bool {
+	testutil.WaitUntil(c, func() bool {
 		for _, region := range cacheRegions {
 			r := followerServer.GetServer().GetBasicCluster().GetRegion(region.GetID())
 			if !(c.Check(r.GetMeta(), DeepEquals, region.GetMeta()) &&
@@ -164,6 +164,7 @@ func (s *regionSyncerTestSuite) TestRegionSyncer(c *C) {
 		c.Assert(r.GetMeta(), DeepEquals, region.GetMeta())
 		c.Assert(r.GetStat(), DeepEquals, region.GetStat())
 		c.Assert(r.GetLeader(), DeepEquals, region.GetLeader())
+		c.Assert(r.GetBuckets(), DeepEquals, region.GetBuckets())
 	}
 }
 
@@ -271,7 +272,16 @@ func initRegions(regionLen int) []*core.RegionInfo {
 				{Id: allocator.alloc(), StoreId: uint64(0)},
 			},
 		}
-		regions = append(regions, core.NewRegionInfo(r, r.Peers[0]))
+		region := core.NewRegionInfo(r, r.Peers[0])
+		if i < regionLen/2 {
+			buckets := &metapb.Buckets{
+				RegionId: r.Id,
+				Keys:     [][]byte{r.StartKey, r.EndKey},
+				Version:  1,
+			}
+			region.UpdateBuckets(buckets, region.GetBuckets())
+		}
+		regions = append(regions, region)
 	}
 	return regions
 }
