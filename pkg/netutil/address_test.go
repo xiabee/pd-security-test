@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,18 +18,12 @@ import (
 	"net/http"
 	"testing"
 
-	. "github.com/pingcap/check"
+	"github.com/stretchr/testify/require"
 )
 
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-var _ = Suite(&testNetSuite{})
-
-type testNetSuite struct{}
-
-func (s *testNetSuite) TestResolveLoopBackAddr(c *C) {
+func TestResolveLoopBackAddr(t *testing.T) {
+	t.Parallel()
+	re := require.New(t)
 	nodes := []struct {
 		address     string
 		backAddress string
@@ -41,24 +35,26 @@ func (s *testNetSuite) TestResolveLoopBackAddr(c *C) {
 	}
 
 	for _, n := range nodes {
-		c.Assert(ResolveLoopBackAddr(n.address, n.backAddress), Equals, "192.168.130.22:2379")
+		re.Equal("192.168.130.22:2379", ResolveLoopBackAddr(n.address, n.backAddress))
 	}
 }
 
-func (s *testNetSuite) TestIsEnableHttps(c *C) {
-	c.Assert(IsEnableHTTPS(http.DefaultClient), IsFalse)
+func TestIsEnableHttps(t *testing.T) {
+	t.Parallel()
+	re := require.New(t)
+	re.False(IsEnableHTTPS(http.DefaultClient))
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 			TLSClientConfig:   nil,
 		},
 	}
-	c.Assert(IsEnableHTTPS(httpClient), IsFalse)
+	re.False(IsEnableHTTPS(httpClient))
 	httpClient = &http.Client{
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 			TLSClientConfig:   &tls.Config{},
 		},
 	}
-	c.Assert(IsEnableHTTPS(httpClient), IsFalse)
+	re.False(IsEnableHTTPS(httpClient))
 }

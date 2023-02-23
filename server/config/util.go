@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
@@ -54,6 +55,11 @@ func ValidateLabels(labels []*metapb.StoreLabel) error {
 	return nil
 }
 
+// ValidateLabelKey checks the legality of the label key.
+func ValidateLabelKey(key string) error {
+	return validateFormat(key, keyFormat)
+}
+
 // ValidateURLWithScheme checks the format of the URL.
 func ValidateURLWithScheme(rawURL string) error {
 	u, err := url.ParseRequestURI(rawURL)
@@ -66,16 +72,16 @@ func ValidateURLWithScheme(rawURL string) error {
 	return nil
 }
 
-var schedulerMap = make(map[string]struct{})
+var schedulerMap sync.Map
 
 // RegisterScheduler registers the scheduler type.
 func RegisterScheduler(typ string) {
-	schedulerMap[typ] = struct{}{}
+	schedulerMap.Store(typ, struct{}{})
 }
 
 // IsSchedulerRegistered checks if the named scheduler type is registered.
 func IsSchedulerRegistered(name string) bool {
-	_, ok := schedulerMap[name]
+	_, ok := schedulerMap.Load(name)
 	return ok
 }
 

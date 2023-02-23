@@ -17,12 +17,13 @@ package operator
 import (
 	"context"
 	"encoding/hex"
-	"strings"
+	"testing"
 
-	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
@@ -30,39 +31,43 @@ import (
 	"github.com/tikv/pd/server/versioninfo"
 )
 
-var _ = Suite(&testCreateOperatorSuite{})
+type createOperatorTestSuite struct {
+	suite.Suite
 
-type testCreateOperatorSuite struct {
 	cluster *mockcluster.Cluster
 	ctx     context.Context
 	cancel  context.CancelFunc
 }
 
-func (s *testCreateOperatorSuite) SetUpTest(c *C) {
+func TestCreateOperatorTestSuite(t *testing.T) {
+	suite.Run(t, new(createOperatorTestSuite))
+}
+
+func (suite *createOperatorTestSuite) SetupTest() {
 	opts := config.NewTestOptions()
-	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.cluster = mockcluster.NewCluster(s.ctx, opts)
-	s.cluster.SetLabelPropertyConfig(config.LabelPropertyConfig{
+	suite.ctx, suite.cancel = context.WithCancel(context.Background())
+	suite.cluster = mockcluster.NewCluster(suite.ctx, opts)
+	suite.cluster.SetLabelPropertyConfig(config.LabelPropertyConfig{
 		config.RejectLeader: {{Key: "noleader", Value: "true"}},
 	})
-	s.cluster.SetLocationLabels([]string{"zone", "host"})
-	s.cluster.AddLabelsStore(1, 0, map[string]string{"zone": "z1", "host": "h1"})
-	s.cluster.AddLabelsStore(2, 0, map[string]string{"zone": "z1", "host": "h1"})
-	s.cluster.AddLabelsStore(3, 0, map[string]string{"zone": "z1", "host": "h1"})
-	s.cluster.AddLabelsStore(4, 0, map[string]string{"zone": "z1", "host": "h1"})
-	s.cluster.AddLabelsStore(5, 0, map[string]string{"zone": "z1", "host": "h1"})
-	s.cluster.AddLabelsStore(6, 0, map[string]string{"zone": "z1", "host": "h2"})
-	s.cluster.AddLabelsStore(7, 0, map[string]string{"zone": "z1", "host": "h2"})
-	s.cluster.AddLabelsStore(8, 0, map[string]string{"zone": "z2", "host": "h1"})
-	s.cluster.AddLabelsStore(9, 0, map[string]string{"zone": "z2", "host": "h2"})
-	s.cluster.AddLabelsStore(10, 0, map[string]string{"zone": "z3", "host": "h1", "noleader": "true"})
+	suite.cluster.SetLocationLabels([]string{"zone", "host"})
+	suite.cluster.AddLabelsStore(1, 0, map[string]string{"zone": "z1", "host": "h1"})
+	suite.cluster.AddLabelsStore(2, 0, map[string]string{"zone": "z1", "host": "h1"})
+	suite.cluster.AddLabelsStore(3, 0, map[string]string{"zone": "z1", "host": "h1"})
+	suite.cluster.AddLabelsStore(4, 0, map[string]string{"zone": "z1", "host": "h1"})
+	suite.cluster.AddLabelsStore(5, 0, map[string]string{"zone": "z1", "host": "h1"})
+	suite.cluster.AddLabelsStore(6, 0, map[string]string{"zone": "z1", "host": "h2"})
+	suite.cluster.AddLabelsStore(7, 0, map[string]string{"zone": "z1", "host": "h2"})
+	suite.cluster.AddLabelsStore(8, 0, map[string]string{"zone": "z2", "host": "h1"})
+	suite.cluster.AddLabelsStore(9, 0, map[string]string{"zone": "z2", "host": "h2"})
+	suite.cluster.AddLabelsStore(10, 0, map[string]string{"zone": "z3", "host": "h1", "noleader": "true"})
 }
 
-func (s *testCreateOperatorSuite) TearDownTest(c *C) {
-	s.cancel()
+func (suite *createOperatorTestSuite) TearDownTest() {
+	suite.cancel()
 }
 
-func (s *testCreateOperatorSuite) TestCreateSplitRegionOperator(c *C) {
+func (suite *createOperatorTestSuite) TestCreateSplitRegionOperator() {
 	type testCase struct {
 		startKey      []byte
 		endKey        []byte
@@ -71,7 +76,7 @@ func (s *testCreateOperatorSuite) TestCreateSplitRegionOperator(c *C) {
 		keys          [][]byte
 		expectedError bool
 	}
-	cases := []testCase{
+	testCases := []testCase{
 		{
 			startKey: []byte("a"),
 			endKey:   []byte("b"),
@@ -130,36 +135,36 @@ func (s *testCreateOperatorSuite) TestCreateSplitRegionOperator(c *C) {
 		},
 	}
 
-	for _, tc := range cases {
+	for _, testCase := range testCases {
 		region := core.NewRegionInfo(&metapb.Region{
 			Id:       1,
-			StartKey: tc.startKey,
-			EndKey:   tc.endKey,
-			Peers:    tc.originPeers,
-		}, tc.originPeers[0])
-		op, err := CreateSplitRegionOperator("test", region, 0, tc.policy, tc.keys)
-		if tc.expectedError {
-			c.Assert(err, NotNil)
+			StartKey: testCase.startKey,
+			EndKey:   testCase.endKey,
+			Peers:    testCase.originPeers,
+		}, testCase.originPeers[0])
+		op, err := CreateSplitRegionOperator("test", region, 0, testCase.policy, testCase.keys)
+		if testCase.expectedError {
+			suite.Error(err)
 			continue
 		}
-		c.Assert(err, IsNil)
-		c.Assert(op.Kind(), Equals, OpSplit)
-		c.Assert(op.steps, HasLen, 1)
+		suite.NoError(err)
+		suite.Equal(OpSplit, op.Kind())
+		suite.Len(op.steps, 1)
 		for i := 0; i < op.Len(); i++ {
 			switch step := op.Step(i).(type) {
 			case SplitRegion:
-				c.Assert(step.StartKey, DeepEquals, tc.startKey)
-				c.Assert(step.EndKey, DeepEquals, tc.endKey)
-				c.Assert(step.Policy, Equals, tc.policy)
-				c.Assert(step.SplitKeys, DeepEquals, tc.keys)
+				suite.Equal(testCase.startKey, step.StartKey)
+				suite.Equal(testCase.endKey, step.EndKey)
+				suite.Equal(testCase.policy, step.Policy)
+				suite.Equal(testCase.keys, step.SplitKeys)
 			default:
-				c.Errorf("unexpected type: %s", step.String())
+				suite.T().Errorf("unexpected type: %s", step.String())
 			}
 		}
 	}
 }
 
-func (s *testCreateOperatorSuite) TestCreateMergeRegionOperator(c *C) {
+func (suite *createOperatorTestSuite) TestCreateMergeRegionOperator() {
 	type testCase struct {
 		sourcePeers   []*metapb.Peer // first is leader
 		targetPeers   []*metapb.Peer // first is leader
@@ -167,7 +172,7 @@ func (s *testCreateOperatorSuite) TestCreateMergeRegionOperator(c *C) {
 		expectedError bool
 		prepareSteps  []OpStep
 	}
-	cases := []testCase{
+	testCases := []testCase{
 		{
 			[]*metapb.Peer{
 				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
@@ -232,66 +237,121 @@ func (s *testCreateOperatorSuite) TestCreateMergeRegionOperator(c *C) {
 			true,
 			nil,
 		},
+		{
+			[]*metapb.Peer{
+				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
+				{Id: 2, StoreId: 2, Role: metapb.PeerRole_Voter, IsWitness: true},
+			},
+			[]*metapb.Peer{
+				{Id: 4, StoreId: 1, Role: metapb.PeerRole_Voter},
+				{Id: 3, StoreId: 3, Role: metapb.PeerRole_Voter, IsWitness: true},
+			},
+			OpMerge | OpRegion,
+			false,
+			[]OpStep{
+				AddLearner{ToStore: 3, IsWitness: true},
+				ChangePeerV2Enter{
+					PromoteLearners: []PromoteLearner{{ToStore: 3, IsWitness: true}},
+					DemoteVoters:    []DemoteVoter{{ToStore: 2, IsWitness: true}},
+				},
+				ChangePeerV2Leave{
+					PromoteLearners: []PromoteLearner{{ToStore: 3, IsWitness: true}},
+					DemoteVoters:    []DemoteVoter{{ToStore: 2, IsWitness: true}},
+				},
+				RemovePeer{FromStore: 2},
+			},
+		},
+		{
+			[]*metapb.Peer{
+				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
+				{Id: 2, StoreId: 2, Role: metapb.PeerRole_Voter, IsWitness: true},
+				{Id: 3, StoreId: 3, Role: metapb.PeerRole_Voter},
+			},
+			[]*metapb.Peer{
+				{Id: 4, StoreId: 1, Role: metapb.PeerRole_Voter},
+				{Id: 6, StoreId: 3, Role: metapb.PeerRole_Voter, IsWitness: true},
+				{Id: 5, StoreId: 2, Role: metapb.PeerRole_Voter},
+			},
+			OpMerge | OpRegion,
+			false,
+			[]OpStep{
+				ChangePeerV2Enter{
+					DemoteVoters: []DemoteVoter{{ToStore: 2, PeerID: 2, IsWitness: true}},
+				},
+				BatchSwitchWitness{
+					ToWitnesses:    []BecomeWitness{{PeerID: 3, StoreID: 3}},
+					ToNonWitnesses: []BecomeNonWitness{{PeerID: 2, StoreID: 2}},
+				},
+				ChangePeerV2Enter{
+					PromoteLearners: []PromoteLearner{{PeerID: 2, ToStore: 2, IsWitness: false}},
+				},
+			},
+		},
 	}
 
-	for _, tc := range cases {
-		source := core.NewRegionInfo(&metapb.Region{Id: 68, Peers: tc.sourcePeers}, tc.sourcePeers[0])
-		target := core.NewRegionInfo(&metapb.Region{Id: 86, Peers: tc.targetPeers}, tc.targetPeers[0])
-		ops, err := CreateMergeRegionOperator("test", s.cluster, source, target, 0)
-		if tc.expectedError {
-			c.Assert(err, NotNil)
+	for _, testCase := range testCases {
+		source := core.NewRegionInfo(&metapb.Region{Id: 68, Peers: testCase.sourcePeers}, testCase.sourcePeers[0])
+		target := core.NewRegionInfo(&metapb.Region{Id: 86, Peers: testCase.targetPeers}, testCase.targetPeers[0])
+		ops, err := CreateMergeRegionOperator("test", suite.cluster, source, target, 0)
+		if testCase.expectedError {
+			suite.Error(err)
 			continue
 		}
-		c.Assert(err, IsNil)
-		c.Assert(ops, HasLen, 2)
-		c.Assert(ops[0].kind, Equals, tc.kind)
-		c.Assert(ops[0].Len(), Equals, len(tc.prepareSteps)+1)
-		c.Assert(ops[1].kind, Equals, tc.kind)
-		c.Assert(ops[1].Len(), Equals, 1)
-		c.Assert(ops[1].Step(0).(MergeRegion), DeepEquals, MergeRegion{source.GetMeta(), target.GetMeta(), true})
+		suite.NoError(err)
+		suite.Len(ops, 2)
+		suite.Equal(testCase.kind, ops[0].kind)
+		suite.Equal(len(testCase.prepareSteps)+1, ops[0].Len())
+		suite.Equal(testCase.kind, ops[1].kind)
+		suite.Equal(1, ops[1].Len())
+		suite.Equal(MergeRegion{source.GetMeta(), target.GetMeta(), true}, ops[1].Step(0).(MergeRegion))
 
-		expectedSteps := append(tc.prepareSteps, MergeRegion{source.GetMeta(), target.GetMeta(), false})
+		expectedSteps := append(testCase.prepareSteps, MergeRegion{source.GetMeta(), target.GetMeta(), false})
 		for i := 0; i < ops[0].Len(); i++ {
 			switch step := ops[0].Step(i).(type) {
 			case TransferLeader:
-				c.Assert(step.FromStore, Equals, expectedSteps[i].(TransferLeader).FromStore)
-				c.Assert(step.ToStore, Equals, expectedSteps[i].(TransferLeader).ToStore)
+				suite.Equal(expectedSteps[i].(TransferLeader).FromStore, step.FromStore)
+				suite.Equal(expectedSteps[i].(TransferLeader).ToStore, step.ToStore)
 			case AddLearner:
-				c.Assert(step.ToStore, Equals, expectedSteps[i].(AddLearner).ToStore)
+				suite.Equal(expectedSteps[i].(AddLearner).ToStore, step.ToStore)
+				suite.Equal(expectedSteps[i].(AddLearner).IsWitness, step.IsWitness)
 			case RemovePeer:
-				c.Assert(step.FromStore, Equals, expectedSteps[i].(RemovePeer).FromStore)
+				suite.Equal(expectedSteps[i].(RemovePeer).FromStore, step.FromStore)
 			case ChangePeerV2Enter:
-				c.Assert(len(step.PromoteLearners), Equals, len(expectedSteps[i].(ChangePeerV2Enter).PromoteLearners))
-				c.Assert(len(step.DemoteVoters), Equals, len(expectedSteps[i].(ChangePeerV2Enter).DemoteVoters))
+				suite.Len(step.PromoteLearners, len(expectedSteps[i].(ChangePeerV2Enter).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(expectedSteps[i].(ChangePeerV2Enter).DemoteVoters))
 				for j, p := range expectedSteps[i].(ChangePeerV2Enter).PromoteLearners {
-					c.Assert(step.PromoteLearners[j].ToStore, Equals, p.ToStore)
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
+					suite.Equal(p.IsWitness, step.PromoteLearners[j].IsWitness)
 				}
 				for j, d := range expectedSteps[i].(ChangePeerV2Enter).DemoteVoters {
-					c.Assert(step.DemoteVoters[j].ToStore, Equals, d.ToStore)
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
+					suite.Equal(d.IsWitness, step.DemoteVoters[j].IsWitness)
 				}
 			case ChangePeerV2Leave:
-				c.Assert(len(step.PromoteLearners), Equals, len(expectedSteps[i].(ChangePeerV2Leave).PromoteLearners))
-				c.Assert(len(step.DemoteVoters), Equals, len(expectedSteps[i].(ChangePeerV2Leave).DemoteVoters))
+				suite.Len(step.PromoteLearners, len(expectedSteps[i].(ChangePeerV2Leave).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(expectedSteps[i].(ChangePeerV2Leave).DemoteVoters))
 				for j, p := range expectedSteps[i].(ChangePeerV2Leave).PromoteLearners {
-					c.Assert(step.PromoteLearners[j].ToStore, Equals, p.ToStore)
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
+					suite.Equal(p.IsWitness, step.PromoteLearners[j].IsWitness)
 				}
 				for j, d := range expectedSteps[i].(ChangePeerV2Leave).DemoteVoters {
-					c.Assert(step.DemoteVoters[j].ToStore, Equals, d.ToStore)
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
+					suite.Equal(d.IsWitness, step.DemoteVoters[j].IsWitness)
 				}
 			case MergeRegion:
-				c.Assert(step, DeepEquals, expectedSteps[i].(MergeRegion))
+				suite.Equal(expectedSteps[i].(MergeRegion), step)
 			}
 		}
 	}
 }
 
-func (s *testCreateOperatorSuite) TestCreateTransferLeaderOperator(c *C) {
+func (suite *createOperatorTestSuite) TestCreateTransferLeaderOperator() {
 	type testCase struct {
 		originPeers         []*metapb.Peer // first is leader
 		targetLeaderStoreID uint64
 		isErr               bool
 	}
-	cases := []testCase{
+	testCases := []testCase{
 		{
 			originPeers: []*metapb.Peer{
 				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
@@ -359,36 +419,36 @@ func (s *testCreateOperatorSuite) TestCreateTransferLeaderOperator(c *C) {
 			isErr:               false,
 		},
 	}
-	for _, tc := range cases {
-		region := core.NewRegionInfo(&metapb.Region{Id: 1, Peers: tc.originPeers}, tc.originPeers[0])
-		op, err := CreateTransferLeaderOperator("test", s.cluster, region, tc.originPeers[0].StoreId, tc.targetLeaderStoreID, []uint64{}, 0)
+	for _, testCase := range testCases {
+		region := core.NewRegionInfo(&metapb.Region{Id: 1, Peers: testCase.originPeers}, testCase.originPeers[0])
+		op, err := CreateTransferLeaderOperator("test", suite.cluster, region, testCase.originPeers[0].StoreId, testCase.targetLeaderStoreID, []uint64{}, 0)
 
-		if tc.isErr {
-			c.Assert(err, NotNil)
+		if testCase.isErr {
+			suite.Error(err)
 			continue
 		}
 
-		c.Assert(err, IsNil)
-		c.Assert(op.Kind(), Equals, OpLeader)
-		c.Assert(op.steps, HasLen, 1)
+		suite.NoError(err)
+		suite.Equal(OpLeader, op.Kind())
+		suite.Len(op.steps, 1)
 		switch step := op.Step(0).(type) {
 		case TransferLeader:
-			c.Assert(step.FromStore, Equals, tc.originPeers[0].StoreId)
-			c.Assert(step.ToStore, Equals, tc.targetLeaderStoreID)
+			suite.Equal(testCase.originPeers[0].StoreId, step.FromStore)
+			suite.Equal(testCase.targetLeaderStoreID, step.ToStore)
 		default:
-			c.Errorf("unexpected type: %s", step.String())
+			suite.T().Errorf("unexpected type: %s", step.String())
 		}
 	}
 }
 
-func (s *testCreateOperatorSuite) TestCreateLeaveJointStateOperator(c *C) {
+func (suite *createOperatorTestSuite) TestCreateLeaveJointStateOperator() {
 	type testCase struct {
 		originPeers   []*metapb.Peer // first is leader
 		offlineStores []uint64
 		kind          OpKind
 		steps         []OpStep // empty means error
 	}
-	cases := []testCase{
+	testCases := []testCase{
 		{
 			originPeers: []*metapb.Peer{
 				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
@@ -520,43 +580,43 @@ func (s *testCreateOperatorSuite) TestCreateLeaveJointStateOperator(c *C) {
 		},
 	}
 
-	for _, tc := range cases {
-		for _, storeID := range tc.offlineStores {
-			s.cluster.SetStoreOffline(storeID)
+	for _, testCase := range testCases {
+		for _, storeID := range testCase.offlineStores {
+			suite.cluster.SetStoreOffline(storeID)
 		}
 
 		revertOffline := func() {
-			for _, storeID := range tc.offlineStores {
-				s.cluster.SetStoreUp(storeID)
+			for _, storeID := range testCase.offlineStores {
+				suite.cluster.SetStoreUp(storeID)
 			}
 		}
 
-		region := core.NewRegionInfo(&metapb.Region{Id: 1, Peers: tc.originPeers}, tc.originPeers[0])
-		op, err := CreateLeaveJointStateOperator("test", s.cluster, region)
-		if len(tc.steps) == 0 {
-			c.Assert(err, NotNil)
+		region := core.NewRegionInfo(&metapb.Region{Id: 1, Peers: testCase.originPeers}, testCase.originPeers[0])
+		op, err := CreateLeaveJointStateOperator("test", suite.cluster, region)
+		if len(testCase.steps) == 0 {
+			suite.Error(err)
 			revertOffline()
 			continue
 		}
-		c.Assert(err, IsNil)
-		c.Assert(op.Kind(), Equals, tc.kind)
-		c.Assert(len(op.steps), Equals, len(tc.steps))
+		suite.NoError(err)
+		suite.Equal(testCase.kind, op.Kind())
+		suite.Len(op.steps, len(testCase.steps))
 		for i := 0; i < op.Len(); i++ {
 			switch step := op.Step(i).(type) {
 			case TransferLeader:
-				c.Assert(step.FromStore, Equals, tc.steps[i].(TransferLeader).FromStore)
-				c.Assert(step.ToStore, Equals, tc.steps[i].(TransferLeader).ToStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).FromStore, step.FromStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).ToStore, step.ToStore)
 			case ChangePeerV2Leave:
-				c.Assert(len(step.PromoteLearners), Equals, len(tc.steps[i].(ChangePeerV2Leave).PromoteLearners))
-				c.Assert(len(step.DemoteVoters), Equals, len(tc.steps[i].(ChangePeerV2Leave).DemoteVoters))
-				for j, p := range tc.steps[i].(ChangePeerV2Leave).PromoteLearners {
-					c.Assert(step.PromoteLearners[j].ToStore, Equals, p.ToStore)
+				suite.Len(step.PromoteLearners, len(testCase.steps[i].(ChangePeerV2Leave).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(testCase.steps[i].(ChangePeerV2Leave).DemoteVoters))
+				for j, p := range testCase.steps[i].(ChangePeerV2Leave).PromoteLearners {
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
 				}
-				for j, d := range tc.steps[i].(ChangePeerV2Leave).DemoteVoters {
-					c.Assert(step.DemoteVoters[j].ToStore, Equals, d.ToStore)
+				for j, d := range testCase.steps[i].(ChangePeerV2Leave).DemoteVoters {
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
 				}
 			default:
-				c.Errorf("unexpected type: %s", step.String())
+				suite.T().Errorf("unexpected type: %s", step.String())
 			}
 		}
 
@@ -564,7 +624,7 @@ func (s *testCreateOperatorSuite) TestCreateLeaveJointStateOperator(c *C) {
 	}
 }
 
-func (s *testCreateOperatorSuite) TestCreateMoveRegionOperator(c *C) {
+func (suite *createOperatorTestSuite) TestCreateMoveRegionOperator() {
 	type testCase struct {
 		name            string
 		originPeers     []*metapb.Peer // first is leader
@@ -572,7 +632,7 @@ func (s *testCreateOperatorSuite) TestCreateMoveRegionOperator(c *C) {
 		steps           []OpStep
 		expectedError   error
 	}
-	tt := []testCase{
+	testCases := []testCase{
 		{
 			name: "move region partially with incoming voter, demote existed voter",
 			originPeers: []*metapb.Peer{
@@ -867,58 +927,59 @@ func (s *testCreateOperatorSuite) TestCreateMoveRegionOperator(c *C) {
 			},
 		},
 	}
-	for _, tc := range tt {
-		c.Log(tc.name)
-		region := core.NewRegionInfo(&metapb.Region{Id: 10, Peers: tc.originPeers}, tc.originPeers[0])
-		op, err := CreateMoveRegionOperator("test", s.cluster, region, OpAdmin, tc.targetPeerRoles)
+	for _, testCase := range testCases {
+		suite.T().Log((testCase.name))
+		region := core.NewRegionInfo(&metapb.Region{Id: 10, Peers: testCase.originPeers}, testCase.originPeers[0])
+		op, err := CreateMoveRegionOperator("test", suite.cluster, region, OpAdmin, testCase.targetPeerRoles)
 
-		if tc.expectedError == nil {
-			c.Assert(err, IsNil)
+		if testCase.expectedError == nil {
+			suite.NoError(err)
 		} else {
-			c.Assert(err, NotNil)
-			c.Assert(strings.Contains(err.Error(), tc.expectedError.Error()), IsTrue)
+			suite.Error(err)
+			suite.Contains(err.Error(), testCase.expectedError.Error())
 			continue
 		}
-		c.Assert(op, NotNil)
-		c.Assert(op.Len(), Equals, len(tc.steps))
+		suite.NotNil(op)
+
+		suite.Len(testCase.steps, op.Len())
 		// Since the peer id may be generated by allocator in runtime, we only check store id.
 		for i := 0; i < op.Len(); i++ {
 			switch step := op.Step(i).(type) {
 			case TransferLeader:
-				c.Assert(step.FromStore, Equals, tc.steps[i].(TransferLeader).FromStore)
-				c.Assert(step.ToStore, Equals, tc.steps[i].(TransferLeader).ToStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).FromStore, step.FromStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).ToStore, step.ToStore)
 			case ChangePeerV2Leave:
-				c.Assert(len(step.PromoteLearners), Equals, len(tc.steps[i].(ChangePeerV2Leave).PromoteLearners))
-				c.Assert(len(step.DemoteVoters), Equals, len(tc.steps[i].(ChangePeerV2Leave).DemoteVoters))
-				for j, p := range tc.steps[i].(ChangePeerV2Leave).PromoteLearners {
-					c.Assert(step.PromoteLearners[j].ToStore, Equals, p.ToStore)
+				suite.Len(step.PromoteLearners, len(testCase.steps[i].(ChangePeerV2Leave).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(testCase.steps[i].(ChangePeerV2Leave).DemoteVoters))
+				for j, p := range testCase.steps[i].(ChangePeerV2Leave).PromoteLearners {
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
 				}
-				for j, d := range tc.steps[i].(ChangePeerV2Leave).DemoteVoters {
-					c.Assert(step.DemoteVoters[j].ToStore, Equals, d.ToStore)
+				for j, d := range testCase.steps[i].(ChangePeerV2Leave).DemoteVoters {
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
 				}
 			case ChangePeerV2Enter:
-				c.Assert(len(step.PromoteLearners), Equals, len(tc.steps[i].(ChangePeerV2Enter).PromoteLearners))
-				c.Assert(len(step.DemoteVoters), Equals, len(tc.steps[i].(ChangePeerV2Enter).DemoteVoters))
-				for j, p := range tc.steps[i].(ChangePeerV2Enter).PromoteLearners {
-					c.Assert(step.PromoteLearners[j].ToStore, Equals, p.ToStore)
+				suite.Len(step.PromoteLearners, len(testCase.steps[i].(ChangePeerV2Enter).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(testCase.steps[i].(ChangePeerV2Enter).DemoteVoters))
+				for j, p := range testCase.steps[i].(ChangePeerV2Enter).PromoteLearners {
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
 				}
-				for j, d := range tc.steps[i].(ChangePeerV2Enter).DemoteVoters {
-					c.Assert(step.DemoteVoters[j].ToStore, Equals, d.ToStore)
+				for j, d := range testCase.steps[i].(ChangePeerV2Enter).DemoteVoters {
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
 				}
 			case AddLearner:
-				c.Assert(step.ToStore, Equals, tc.steps[i].(AddLearner).ToStore)
+				suite.Equal(testCase.steps[i].(AddLearner).ToStore, step.ToStore)
 			case PromoteLearner:
-				c.Assert(step.ToStore, Equals, tc.steps[i].(PromoteLearner).ToStore)
+				suite.Equal(testCase.steps[i].(PromoteLearner).ToStore, step.ToStore)
 			case RemovePeer:
-				c.Assert(step.FromStore, Equals, tc.steps[i].(RemovePeer).FromStore)
+				suite.Equal(testCase.steps[i].(RemovePeer).FromStore, step.FromStore)
 			default:
-				c.Errorf("unexpected type: %s", step.String())
+				suite.T().Errorf("unexpected type: %s", step.String())
 			}
 		}
 	}
 }
 
-func (s *testCreateOperatorSuite) TestMoveRegionWithoutJointConsensus(c *C) {
+func (suite *createOperatorTestSuite) TestMoveRegionWithoutJointConsensus() {
 	type testCase struct {
 		name            string
 		originPeers     []*metapb.Peer // first is leader
@@ -926,7 +987,7 @@ func (s *testCreateOperatorSuite) TestMoveRegionWithoutJointConsensus(c *C) {
 		steps           []OpStep
 		expectedError   error
 	}
-	tt := []testCase{
+	testCases := []testCase{
 		{
 			name: "move region partially with incoming voter, demote existed voter",
 			originPeers: []*metapb.Peer{
@@ -1040,53 +1101,50 @@ func (s *testCreateOperatorSuite) TestMoveRegionWithoutJointConsensus(c *C) {
 		},
 	}
 
-	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
-	for _, tc := range tt {
-		c.Log(tc.name)
-		region := core.NewRegionInfo(&metapb.Region{Id: 10, Peers: tc.originPeers}, tc.originPeers[0])
-		op, err := CreateMoveRegionOperator("test", s.cluster, region, OpAdmin, tc.targetPeerRoles)
+	suite.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	for _, testCase := range testCases {
+		suite.T().Log(testCase.name)
+		region := core.NewRegionInfo(&metapb.Region{Id: 10, Peers: testCase.originPeers}, testCase.originPeers[0])
+		op, err := CreateMoveRegionOperator("test", suite.cluster, region, OpAdmin, testCase.targetPeerRoles)
 
-		if tc.expectedError == nil {
-			c.Assert(err, IsNil)
+		if testCase.expectedError == nil {
+			suite.NoError(err)
 		} else {
-			c.Assert(err, NotNil)
-			c.Assert(strings.Contains(err.Error(), tc.expectedError.Error()), IsTrue)
+			suite.Error(err)
+			suite.Contains(err.Error(), testCase.expectedError.Error())
 			continue
 		}
-		c.Log(op)
-		c.Assert(op, NotNil)
-		c.Assert(op.Len(), Equals, len(tc.steps))
+		suite.NotNil(op)
+
+		suite.Len(testCase.steps, op.Len())
 		// Since the peer id may be generated by allocator in runtime, we only check store id.
 		for i := 0; i < op.Len(); i++ {
 			switch step := op.Step(i).(type) {
 			case TransferLeader:
-				c.Assert(step.FromStore, Equals, tc.steps[i].(TransferLeader).FromStore)
-				c.Assert(step.ToStore, Equals, tc.steps[i].(TransferLeader).ToStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).FromStore, step.FromStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).ToStore, step.ToStore)
 			case AddLearner:
-				c.Assert(step.ToStore, Equals, tc.steps[i].(AddLearner).ToStore)
+				suite.Equal(testCase.steps[i].(AddLearner).ToStore, step.ToStore)
 			case PromoteLearner:
-				c.Assert(step.ToStore, Equals, tc.steps[i].(PromoteLearner).ToStore)
+				suite.Equal(testCase.steps[i].(PromoteLearner).ToStore, step.ToStore)
 			case RemovePeer:
-				c.Assert(step.FromStore, Equals, tc.steps[i].(RemovePeer).FromStore)
+				suite.Equal(testCase.steps[i].(RemovePeer).FromStore, step.FromStore)
 			default:
-				c.Errorf("unexpected type: %s", step.String())
+				suite.T().Errorf("unexpected type: %s", step.String())
 			}
 		}
 	}
 }
 
-var _ = Suite(&testCreateOperatorWithRulesSuite{})
-
-type testCreateOperatorWithRulesSuite struct{}
-
 // Ref https://github.com/tikv/pd/issues/5401
-func (s *testCreateOperatorWithRulesSuite) TestCreateLeaveJointStateOperatorWithoutFitRules(c *C) {
+func TestCreateLeaveJointStateOperatorWithoutFitRules(t *testing.T) {
+	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	opts := config.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	err := cluster.SetRules([]*placement.Rule{
+	re.NoError(cluster.SetRules([]*placement.Rule{
 		{
 			GroupID:     "pd",
 			ID:          "default",
@@ -1111,8 +1169,7 @@ func (s *testCreateOperatorWithRulesSuite) TestCreateLeaveJointStateOperatorWith
 			Role:        placement.Voter,
 			Count:       1,
 		},
-	})
-	c.Assert(err, IsNil)
+	}))
 	cluster.AddRegionStore(1, 1)
 	cluster.AddRegionStore(2, 1)
 	cluster.AddRegionStore(3, 1)
@@ -1124,15 +1181,76 @@ func (s *testCreateOperatorWithRulesSuite) TestCreateLeaveJointStateOperatorWith
 
 	region := core.NewRegionInfo(&metapb.Region{Id: 1, Peers: originPeers, StartKey: []byte("a"), EndKey: []byte("c")}, originPeers[0])
 	op, err := CreateLeaveJointStateOperator("test", cluster, region)
-	c.Assert(err, IsNil)
-	c.Assert(op.kind, Equals, OpLeader)
-	c.Assert(op.steps, HasLen, 2)
+	re.NoError(err)
+	re.Equal(OpLeader, op.Kind())
+	re.Len(op.steps, 2)
 	step0 := op.steps[0].(TransferLeader)
-	c.Assert(step0.FromStore, Equals, uint64(3))
-	c.Assert(step0.ToStore, Equals, uint64(4))
+	re.Equal(uint64(3), step0.FromStore)
+	re.Equal(uint64(4), step0.ToStore)
 	step1 := op.steps[1].(ChangePeerV2Leave)
-	c.Assert(step1.PromoteLearners, HasLen, 1)
-	c.Assert(step1.DemoteVoters, HasLen, 1)
-	c.Assert(step1.PromoteLearners[0].ToStore, Equals, uint64(4))
-	c.Assert(step1.DemoteVoters[0].ToStore, Equals, uint64(3))
+	re.Len(step1.PromoteLearners, 1)
+	re.Len(step1.DemoteVoters, 1)
+	re.Equal(uint64(4), step1.PromoteLearners[0].ToStore)
+	re.Equal(uint64(3), step1.DemoteVoters[0].ToStore)
+}
+
+func (suite *createOperatorTestSuite) TestCreateNonWitnessPeerOperator() {
+	type testCase struct {
+		originPeers   []*metapb.Peer // first is leader
+		kind          OpKind
+		expectedError bool
+		prepareSteps  []OpStep
+	}
+	testCases := []testCase{
+		{
+			[]*metapb.Peer{
+				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
+				{Id: 2, StoreId: 2, Role: metapb.PeerRole_Learner, IsWitness: true},
+			},
+			OpRegion,
+			false,
+			[]OpStep{
+				BecomeNonWitness{StoreID: 2, PeerID: 2},
+			},
+		},
+		{
+			[]*metapb.Peer{
+				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
+				{Id: 2, StoreId: 2, Role: metapb.PeerRole_Voter, IsWitness: true},
+			},
+			OpRegion,
+			false,
+			[]OpStep{
+				ChangePeerV2Enter{
+					DemoteVoters: []DemoteVoter{{ToStore: 2, PeerID: 2, IsWitness: true}},
+				},
+				BecomeNonWitness{StoreID: 2, PeerID: 2},
+				ChangePeerV2Enter{
+					PromoteLearners: []PromoteLearner{{ToStore: 2, PeerID: 2, IsWitness: false}},
+				},
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		region := core.NewRegionInfo(&metapb.Region{Id: 68, Peers: testCase.originPeers}, testCase.originPeers[0])
+		op, err := CreateNonWitnessPeerOperator("test", suite.cluster, region, testCase.originPeers[1])
+		suite.NoError(err)
+		suite.NotNil(op)
+		suite.Equal(testCase.kind, op.kind)
+
+		expectedSteps := testCase.prepareSteps
+		for i := 0; i < op.Len(); i++ {
+			switch step := op.Step(i).(type) {
+			case ChangePeerV2Enter:
+				suite.Len(step.DemoteVoters, len(expectedSteps[i].(ChangePeerV2Enter).DemoteVoters))
+				for j, d := range expectedSteps[i].(ChangePeerV2Enter).DemoteVoters {
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
+				}
+			case BecomeNonWitness:
+				suite.Equal(step.StoreID, expectedSteps[i].(BecomeNonWitness).StoreID)
+				suite.Equal(step.PeerID, expectedSteps[i].(BecomeNonWitness).PeerID)
+			}
+		}
+	}
 }
