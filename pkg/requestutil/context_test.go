@@ -16,24 +16,30 @@ package requestutil
 
 import (
 	"context"
-	"net/http"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestRequestInfo(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testRequestContextSuite{})
+
+type testRequestContextSuite struct {
+}
+
+func (s *testRequestContextSuite) TestRequestInfo(c *C) {
 	ctx := context.Background()
 	_, ok := RequestInfoFrom(ctx)
-	re.False(ok)
+	c.Assert(ok, Equals, false)
 	timeNow := time.Now().Unix()
 	ctx = WithRequestInfo(ctx,
 		RequestInfo{
 			ServiceLabel:   "test label",
-			Method:         http.MethodPost,
+			Method:         "POST",
 			Component:      "pdctl",
 			IP:             "localhost",
 			URLParam:       "{\"id\"=1}",
@@ -41,27 +47,25 @@ func TestRequestInfo(t *testing.T) {
 			StartTimeStamp: timeNow,
 		})
 	result, ok := RequestInfoFrom(ctx)
-	re.NotNil(result)
-	re.True(ok)
-	re.Equal("test label", result.ServiceLabel)
-	re.Equal(http.MethodPost, result.Method)
-	re.Equal("pdctl", result.Component)
-	re.Equal("localhost", result.IP)
-	re.Equal("{\"id\"=1}", result.URLParam)
-	re.Equal("{\"state\"=\"Up\"}", result.BodyParam)
-	re.Equal(timeNow, result.StartTimeStamp)
+	c.Assert(result, NotNil)
+	c.Assert(ok, Equals, true)
+	c.Assert(result.ServiceLabel, Equals, "test label")
+	c.Assert(result.Method, Equals, "POST")
+	c.Assert(result.Component, Equals, "pdctl")
+	c.Assert(result.IP, Equals, "localhost")
+	c.Assert(result.URLParam, Equals, "{\"id\"=1}")
+	c.Assert(result.BodyParam, Equals, "{\"state\"=\"Up\"}")
+	c.Assert(result.StartTimeStamp, Equals, timeNow)
 }
 
-func TestEndTime(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testRequestContextSuite) TestEndTime(c *C) {
 	ctx := context.Background()
 	_, ok := EndTimeFrom(ctx)
-	re.False(ok)
+	c.Assert(ok, Equals, false)
 	timeNow := time.Now().Unix()
 	ctx = WithEndTime(ctx, timeNow)
 	result, ok := EndTimeFrom(ctx)
-	re.NotNil(result)
-	re.True(ok)
-	re.Equal(timeNow, result)
+	c.Assert(result, NotNil)
+	c.Assert(ok, Equals, true)
+	c.Assert(result, Equals, timeNow)
 }

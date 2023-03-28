@@ -15,17 +15,19 @@
 package statistics
 
 import (
-	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 )
 
-func TestStoreStatistics(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testStoreStatisticsSuite{})
+
+type testStoreStatisticsSuite struct{}
+
+func (t *testStoreStatisticsSuite) TestStoreStatistics(c *C) {
 	opt := config.NewTestOptions()
 	rep := opt.GetReplicationConfig().Clone()
 	rep.LocationLabels = []string{"zone", "host"}
@@ -60,23 +62,22 @@ func TestStoreStatistics(t *testing.T) {
 	}
 	stats := storeStats.stats
 
-	re.Equal(6, stats.Up)
-	re.Equal(7, stats.Preparing)
-	re.Equal(0, stats.Serving)
-	re.Equal(1, stats.Removing)
-	re.Equal(1, stats.Removed)
-	re.Equal(1, stats.Down)
-	re.Equal(1, stats.Offline)
-	re.Equal(0, stats.RegionCount)
-	re.Equal(0, stats.WitnessCount)
-	re.Equal(0, stats.Unhealthy)
-	re.Equal(0, stats.Disconnect)
-	re.Equal(1, stats.Tombstone)
-	re.Equal(8, stats.LowSpace)
-	re.Equal(2, stats.LabelCounter["zone:z1"])
-	re.Equal(2, stats.LabelCounter["zone:z2"])
-	re.Equal(2, stats.LabelCounter["zone:z3"])
-	re.Equal(4, stats.LabelCounter["host:h1"])
-	re.Equal(4, stats.LabelCounter["host:h2"])
-	re.Equal(2, stats.LabelCounter["zone:unknown"])
+	c.Assert(stats.Up, Equals, 6)
+	c.Assert(stats.Preparing, Equals, 7)
+	c.Assert(stats.Serving, Equals, 0)
+	c.Assert(stats.Removing, Equals, 1)
+	c.Assert(stats.Removed, Equals, 1)
+	c.Assert(stats.Down, Equals, 1)
+	c.Assert(stats.Offline, Equals, 1)
+	c.Assert(stats.RegionCount, Equals, 0)
+	c.Assert(stats.Unhealthy, Equals, 0)
+	c.Assert(stats.Disconnect, Equals, 0)
+	c.Assert(stats.Tombstone, Equals, 1)
+	c.Assert(stats.LowSpace, Equals, 8)
+	c.Assert(stats.LabelCounter["zone:z1"], Equals, 2)
+	c.Assert(stats.LabelCounter["zone:z2"], Equals, 2)
+	c.Assert(stats.LabelCounter["zone:z3"], Equals, 2)
+	c.Assert(stats.LabelCounter["host:h1"], Equals, 4)
+	c.Assert(stats.LabelCounter["host:h2"], Equals, 4)
+	c.Assert(stats.LabelCounter["zone:unknown"], Equals, 2)
 }

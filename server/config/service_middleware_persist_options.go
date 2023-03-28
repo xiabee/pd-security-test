@@ -25,15 +25,13 @@ import (
 // ServiceMiddlewarePersistOptions wraps all service middleware configurations that need to persist to storage and
 // allows to access them safely.
 type ServiceMiddlewarePersistOptions struct {
-	audit     atomic.Value
-	rateLimit atomic.Value
+	audit atomic.Value
 }
 
 // NewServiceMiddlewarePersistOptions creates a new ServiceMiddlewarePersistOptions instance.
 func NewServiceMiddlewarePersistOptions(cfg *ServiceMiddlewareConfig) *ServiceMiddlewarePersistOptions {
 	o := &ServiceMiddlewarePersistOptions{}
 	o.audit.Store(&cfg.AuditConfig)
-	o.rateLimit.Store(&cfg.RateLimitConfig)
 	return o
 }
 
@@ -52,26 +50,10 @@ func (o *ServiceMiddlewarePersistOptions) IsAuditEnabled() bool {
 	return o.GetAuditConfig().EnableAudit
 }
 
-// GetRateLimitConfig returns pd service middleware configurations.
-func (o *ServiceMiddlewarePersistOptions) GetRateLimitConfig() *RateLimitConfig {
-	return o.rateLimit.Load().(*RateLimitConfig)
-}
-
-// SetRateLimitConfig sets the PD service middleware configuration.
-func (o *ServiceMiddlewarePersistOptions) SetRateLimitConfig(cfg *RateLimitConfig) {
-	o.rateLimit.Store(cfg)
-}
-
-// IsRateLimitEnabled returns whether rate limit middleware is enabled
-func (o *ServiceMiddlewarePersistOptions) IsRateLimitEnabled() bool {
-	return o.GetRateLimitConfig().EnableRateLimit
-}
-
 // Persist saves the configuration to the storage.
 func (o *ServiceMiddlewarePersistOptions) Persist(storage endpoint.ServiceMiddlewareStorage) error {
 	cfg := &ServiceMiddlewareConfig{
-		AuditConfig:     *o.GetAuditConfig(),
-		RateLimitConfig: *o.GetRateLimitConfig(),
+		AuditConfig: *o.GetAuditConfig(),
 	}
 	err := storage.SaveServiceMiddlewareConfig(cfg)
 	failpoint.Inject("persistServiceMiddlewareFail", func() {
@@ -90,7 +72,6 @@ func (o *ServiceMiddlewarePersistOptions) Reload(storage endpoint.ServiceMiddlew
 	}
 	if isExist {
 		o.audit.Store(&cfg.AuditConfig)
-		o.rateLimit.Store(&cfg.RateLimitConfig)
 	}
 	return nil
 }

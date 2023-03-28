@@ -79,10 +79,10 @@ func ApplyOperator(mc *mockcluster.Cluster, op *operator.Operator) {
 		region = ApplyOperatorStep(region, op)
 	}
 	mc.PutRegion(region)
-	for id := range region.GetStoreIDs() {
+	for id := range region.GetStoreIds() {
 		mc.UpdateStoreStatus(id)
 	}
-	for id := range origin.GetStoreIDs() {
+	for id := range origin.GetStoreIds() {
 		mc.UpdateStoreStatus(id)
 	}
 }

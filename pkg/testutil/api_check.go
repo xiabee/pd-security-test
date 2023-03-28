@@ -18,67 +18,69 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
 	"github.com/tikv/pd/pkg/apiutil"
 )
 
 // Status is used to check whether http response code is equal given code
-func Status(re *require.Assertions, code int) func([]byte, int) {
+func Status(c *check.C, code int) func([]byte, int) {
 	return func(_ []byte, i int) {
-		re.Equal(code, i)
+		c.Assert(i, check.Equals, code)
 	}
 }
 
 // StatusOK is used to check whether http response code is equal http.StatusOK
-func StatusOK(re *require.Assertions) func([]byte, int) {
-	return Status(re, http.StatusOK)
+func StatusOK(c *check.C) func([]byte, int) {
+	return Status(c, http.StatusOK)
 }
 
 // StatusNotOK is used to check whether http response code is not equal http.StatusOK
-func StatusNotOK(re *require.Assertions) func([]byte, int) {
+func StatusNotOK(c *check.C) func([]byte, int) {
 	return func(_ []byte, i int) {
-		re.NotEqual(http.StatusOK, i)
+		c.Assert(i == http.StatusOK, check.IsFalse)
 	}
 }
 
 // ExtractJSON is used to check whether given data can be extracted successfully
-func ExtractJSON(re *require.Assertions, data interface{}) func([]byte, int) {
+func ExtractJSON(c *check.C, data interface{}) func([]byte, int) {
 	return func(res []byte, _ int) {
-		re.NoError(json.Unmarshal(res, data))
+		err := json.Unmarshal(res, data)
+		c.Assert(err, check.IsNil)
 	}
 }
 
 // StringContain is used to check whether response context contains given string
-func StringContain(re *require.Assertions, sub string) func([]byte, int) {
+func StringContain(c *check.C, sub string) func([]byte, int) {
 	return func(res []byte, _ int) {
-		re.Contains(string(res), sub)
+		c.Assert(strings.Contains(string(res), sub), check.IsTrue)
 	}
 }
 
 // StringEqual is used to check whether response context equal given string
-func StringEqual(re *require.Assertions, str string) func([]byte, int) {
+func StringEqual(c *check.C, str string) func([]byte, int) {
 	return func(res []byte, _ int) {
-		re.Contains(string(res), str)
+		c.Assert(strings.Contains(string(res), str), check.IsTrue)
 	}
 }
 
 // ReadGetJSON is used to do get request and check whether given data can be extracted successfully
-func ReadGetJSON(re *require.Assertions, client *http.Client, url string, data interface{}) error {
+func ReadGetJSON(c *check.C, client *http.Client, url string, data interface{}) error {
 	resp, err := apiutil.GetJSON(client, url, nil)
 	if err != nil {
 		return err
 	}
-	return checkResp(resp, StatusOK(re), ExtractJSON(re, data))
+	return checkResp(resp, StatusOK(c), ExtractJSON(c, data))
 }
 
 // ReadGetJSONWithBody is used to do get request with input and check whether given data can be extracted successfully
-func ReadGetJSONWithBody(re *require.Assertions, client *http.Client, url string, input []byte, data interface{}) error {
+func ReadGetJSONWithBody(c *check.C, client *http.Client, url string, input []byte, data interface{}) error {
 	resp, err := apiutil.GetJSON(client, url, input)
 	if err != nil {
 		return err
 	}
-	return checkResp(resp, StatusOK(re), ExtractJSON(re, data))
+	return checkResp(resp, StatusOK(c), ExtractJSON(c, data))
 }
 
 // CheckPostJSON is used to do post request and do check options

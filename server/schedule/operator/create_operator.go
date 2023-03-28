@@ -76,20 +76,12 @@ func CreateForceTransferLeaderOperator(desc string, ci ClusterInformer, region *
 // CreateMoveRegionOperator creates an operator that moves a region to specified stores.
 func CreateMoveRegionOperator(desc string, ci ClusterInformer, region *core.RegionInfo, kind OpKind, roles map[uint64]placement.PeerRoleType) (*Operator, error) {
 	// construct the peers from roles
-	oldPeers := region.GetPeers()
 	peers := make(map[uint64]*metapb.Peer)
-	i := 0
 	for storeID, role := range roles {
-		isWitness := false
-		if i < len(oldPeers) {
-			isWitness = oldPeers[i].GetIsWitness()
-		}
 		peers[storeID] = &metapb.Peer{
-			StoreId:   storeID,
-			Role:      role.MetaPeerRole(),
-			IsWitness: isWitness,
+			StoreId: storeID,
+			Role:    role.MetaPeerRole(),
 		}
-		i += 1
 	}
 	builder := NewBuilder(desc, ci, region).SetPeers(peers).SetExpectedRoles(roles)
 	return builder.Build(kind)
@@ -158,9 +150,8 @@ func CreateMergeRegionOperator(desc string, ci ClusterInformer, source *core.Reg
 		peers := make(map[uint64]*metapb.Peer)
 		for _, p := range target.GetPeers() {
 			peers[p.GetStoreId()] = &metapb.Peer{
-				StoreId:   p.GetStoreId(),
-				Role:      p.GetRole(),
-				IsWitness: p.GetIsWitness(),
+				StoreId: p.GetStoreId(),
+				Role:    p.GetRole(),
 			}
 		}
 		matchOp, err := NewBuilder("", ci, source).
@@ -198,7 +189,7 @@ func isRegionMatch(a, b *core.RegionInfo) bool {
 	}
 	for _, pa := range a.GetPeers() {
 		pb := b.GetStorePeer(pa.GetStoreId())
-		if pb == nil || core.IsLearner(pb) != core.IsLearner(pa) || core.IsWitness(pb) != core.IsWitness(pa) {
+		if pb == nil || core.IsLearner(pb) != core.IsLearner(pa) {
 			return false
 		}
 	}
@@ -291,18 +282,4 @@ func CreateLeaveJointStateOperator(desc string, ci ClusterInformer, origin *core
 
 	b.execChangePeerV2(false, true)
 	return NewOperator(b.desc, brief, b.regionID, b.regionEpoch, kind, origin.GetApproximateSize(), b.steps...), nil
-}
-
-// CreateWitnessPeerOperator creates an operator that set a follower or learner peer with witness
-func CreateWitnessPeerOperator(desc string, ci ClusterInformer, region *core.RegionInfo, peer *metapb.Peer) (*Operator, error) {
-	return NewBuilder(desc, ci, region).
-		BecomeWitness(peer.GetStoreId()).
-		Build(0)
-}
-
-// CreateNonWitnessPeerOperator creates an operator that set a peer with non-witness
-func CreateNonWitnessPeerOperator(desc string, ci ClusterInformer, region *core.RegionInfo, peer *metapb.Peer) (*Operator, error) {
-	return NewBuilder(desc, ci, region).
-		BecomeNonWitness(peer.GetStoreId()).
-		Build(0)
 }

@@ -15,25 +15,29 @@
 package ratelimit
 
 import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestConcurrencyLimiter(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+var _ = Suite(&testConcurrencyLimiterSuite{})
+
+type testConcurrencyLimiterSuite struct {
+}
+
+func (s *testConcurrencyLimiterSuite) TestConcurrencyLimiter(c *C) {
+	c.Parallel()
+
 	cl := newConcurrencyLimiter(10)
+
 	for i := 0; i < 10; i++ {
-		re.True(cl.allow())
+		c.Assert(cl.allow(), Equals, true)
 	}
-	re.False(cl.allow())
+	c.Assert(cl.allow(), Equals, false)
 	cl.release()
-	re.True(cl.allow())
-	re.Equal(uint64(10), cl.getLimit())
+	c.Assert(cl.allow(), Equals, true)
+	c.Assert(cl.getLimit(), Equals, uint64(10))
 	cl.setLimit(5)
-	re.Equal(uint64(5), cl.getLimit())
-	re.Equal(uint64(10), cl.getCurrent())
+	c.Assert(cl.getLimit(), Equals, uint64(5))
+	c.Assert(cl.getCurrent(), Equals, uint64(10))
 	cl.release()
-	re.Equal(uint64(9), cl.getCurrent())
+	c.Assert(cl.getCurrent(), Equals, uint64(9))
 }

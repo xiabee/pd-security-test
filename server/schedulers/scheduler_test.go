@@ -18,9 +18,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/docker/go-units"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server/config"
@@ -33,18 +32,28 @@ import (
 	"github.com/tikv/pd/server/versioninfo"
 )
 
-func TestShuffleLeader(t *testing.T) {
-	re := require.New(t)
+const (
+	KB = 1024
+	MB = 1024 * KB
+)
+
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testShuffleLeaderSuite{})
+
+type testShuffleLeaderSuite struct{}
+
+func (s *testShuffleLeaderSuite) TestShuffle(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
 
 	sl, err := schedule.CreateScheduler(ShuffleLeaderType, schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder(ShuffleLeaderType, []string{"", ""}))
-	re.NoError(err)
-	ops, _ := sl.Schedule(tc, false)
-	re.Empty(ops)
+	c.Assert(err, IsNil)
+	c.Assert(sl.Schedule(tc), IsNil)
 
 	// Add stores 1,2,3,4
 	tc.AddLeaderStore(1, 6)
@@ -58,17 +67,19 @@ func TestShuffleLeader(t *testing.T) {
 	tc.AddLeaderRegion(4, 4, 1, 2, 3)
 
 	for i := 0; i < 4; i++ {
-		ops, _ = sl.Schedule(tc, false)
-		re.NotEmpty(ops)
-		re.Equal(operator.OpLeader|operator.OpAdmin, ops[0].Kind())
+		op := sl.Schedule(tc)
+		c.Assert(op, NotNil)
+		c.Assert(op[0].Kind(), Equals, operator.OpLeader|operator.OpAdmin)
 	}
 }
 
-func TestRejectLeader(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testRejectLeaderSuite{})
+
+type testRejectLeaderSuite struct{}
+
+func (s *testRejectLeaderSuite) TestRejectLeader(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	opts := config.NewTestOptions()
 	opts.SetLabelPropertyConfig(config.LabelPropertyConfig{
 		config.RejectLeader: {{Key: "noleader", Value: "true"}},
@@ -87,45 +98,43 @@ func TestRejectLeader(t *testing.T) {
 	// The label scheduler transfers leader out of store1.
 	oc := schedule.NewOperatorController(ctx, nil, nil)
 	sl, err := schedule.CreateScheduler(LabelType, oc, storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder(LabelType, []string{"", ""}))
-	re.NoError(err)
-	ops, _ := sl.Schedule(tc, false)
-	testutil.CheckTransferLeaderFrom(re, ops[0], operator.OpLeader, 1)
+	c.Assert(err, IsNil)
+	op := sl.Schedule(tc)
+	testutil.CheckTransferLeaderFrom(c, op[0], operator.OpLeader, 1)
 
 	// If store3 is disconnected, transfer leader to store 2.
 	tc.SetStoreDisconnect(3)
-	ops, _ = sl.Schedule(tc, false)
-	testutil.CheckTransferLeader(re, ops[0], operator.OpLeader, 1, 2)
+	op = sl.Schedule(tc)
+	testutil.CheckTransferLeader(c, op[0], operator.OpLeader, 1, 2)
 
 	// As store3 is disconnected, store1 rejects leader. Balancer will not create
 	// any operators.
 	bs, err := schedule.CreateScheduler(BalanceLeaderType, oc, storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder(BalanceLeaderType, []string{"", ""}))
-	re.NoError(err)
-	ops, _ = bs.Schedule(tc, false)
-	re.Empty(ops)
+	c.Assert(err, IsNil)
+	op = bs.Schedule(tc)
+	c.Assert(op, HasLen, 0)
 
 	// Can't evict leader from store2, neither.
 	el, err := schedule.CreateScheduler(EvictLeaderType, oc, storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder(EvictLeaderType, []string{"2"}))
-	re.NoError(err)
-	ops, _ = el.Schedule(tc, false)
-	re.Empty(ops)
+	c.Assert(err, IsNil)
+	op = el.Schedule(tc)
+	c.Assert(op, IsNil)
 
 	// If the peer on store3 is pending, not transfer to store3 neither.
 	tc.SetStoreUp(3)
-	region := tc.GetRegion(1)
+	region := tc.Regions.GetRegion(1)
 	for _, p := range region.GetPeers() {
 		if p.GetStoreId() == 3 {
 			region = region.Clone(core.WithPendingPeers(append(region.GetPendingPeers(), p)))
 			break
 		}
 	}
-	origin, overlaps, rangeChanged := tc.SetRegionWithUpdate(region)
-	tc.UpdateSubTree(region, origin, overlaps, rangeChanged)
-	ops, _ = sl.Schedule(tc, false)
-	testutil.CheckTransferLeader(re, ops[0], operator.OpLeader, 1, 2)
+	tc.Regions.SetRegion(region)
+	op = sl.Schedule(tc)
+	testutil.CheckTransferLeader(c, op[0], operator.OpLeader, 1, 2)
 }
 
-func TestRemoveRejectLeader(t *testing.T) {
-	re := require.New(t)
+func (s *testRejectLeaderSuite) TestRemoveRejectLeader(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	opts := config.NewTestOptions()
@@ -134,14 +143,17 @@ func TestRemoveRejectLeader(t *testing.T) {
 	tc.AddRegionStore(2, 1)
 	oc := schedule.NewOperatorController(ctx, tc, nil)
 	el, err := schedule.CreateScheduler(EvictLeaderType, oc, storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder(EvictLeaderType, []string{"1"}))
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	tc.DeleteStore(tc.GetStore(1))
 	succ, _ := el.(*evictLeaderScheduler).conf.removeStore(1)
-	re.True(succ)
+	c.Assert(succ, IsTrue)
 }
 
-func TestShuffleHotRegionScheduleBalance(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testShuffleHotRegionSchedulerSuite{})
+
+type testShuffleHotRegionSchedulerSuite struct{}
+
+func (s *testShuffleHotRegionSchedulerSuite) TestBalance(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	opt := config.NewTestOptions()
@@ -150,14 +162,14 @@ func TestShuffleHotRegionScheduleBalance(t *testing.T) {
 	tc.SetLocationLabels([]string{"zone", "host"})
 	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	hb, err := schedule.CreateScheduler(ShuffleHotRegionType, schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder("shuffle-hot-region", []string{"", ""}))
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
-	checkBalance(re, tc, hb)
+	s.checkBalance(c, tc, hb)
 	tc.SetEnablePlacementRules(true)
-	checkBalance(re, tc, hb)
+	s.checkBalance(c, tc, hb)
 }
 
-func checkBalance(re *require.Assertions, tc *mockcluster.Cluster, hb schedule.Scheduler) {
+func (s *testShuffleHotRegionSchedulerSuite) checkBalance(c *C, tc *mockcluster.Cluster, hb schedule.Scheduler) {
 	// Add stores 1, 2, 3, 4, 5, 6  with hot peer counts 3, 2, 2, 2, 0, 0.
 	tc.AddLabelsStore(1, 3, map[string]string{"zone": "z1", "host": "h1"})
 	tc.AddLabelsStore(2, 2, map[string]string{"zone": "z2", "host": "h2"})
@@ -167,10 +179,10 @@ func checkBalance(re *require.Assertions, tc *mockcluster.Cluster, hb schedule.S
 	tc.AddLabelsStore(6, 0, map[string]string{"zone": "z4", "host": "h6"})
 
 	// Report store written bytes.
-	tc.UpdateStorageWrittenBytes(1, 7.5*units.MiB*statistics.StoreHeartBeatReportInterval)
-	tc.UpdateStorageWrittenBytes(2, 4.5*units.MiB*statistics.StoreHeartBeatReportInterval)
-	tc.UpdateStorageWrittenBytes(3, 4.5*units.MiB*statistics.StoreHeartBeatReportInterval)
-	tc.UpdateStorageWrittenBytes(4, 6*units.MiB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageWrittenBytes(1, 7.5*MB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageWrittenBytes(2, 4.5*MB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageWrittenBytes(3, 4.5*MB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageWrittenBytes(4, 6*MB*statistics.StoreHeartBeatReportInterval)
 	tc.UpdateStorageWrittenBytes(5, 0)
 	tc.UpdateStorageWrittenBytes(6, 0)
 
@@ -180,65 +192,68 @@ func checkBalance(re *require.Assertions, tc *mockcluster.Cluster, hb schedule.S
 	// |     1     |       1      |        2       |       3        |      512KB    |
 	// |     2     |       1      |        3       |       4        |      512KB    |
 	// |     3     |       1      |        2       |       4        |      512KB    |
-	tc.AddLeaderRegionWithWriteInfo(1, 1, 512*units.KiB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 3})
-	tc.AddLeaderRegionWithWriteInfo(2, 1, 512*units.KiB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{3, 4})
-	tc.AddLeaderRegionWithWriteInfo(3, 1, 512*units.KiB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 4})
+	tc.AddLeaderRegionWithWriteInfo(1, 1, 512*KB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 3})
+	tc.AddLeaderRegionWithWriteInfo(2, 1, 512*KB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{3, 4})
+	tc.AddLeaderRegionWithWriteInfo(3, 1, 512*KB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 4})
 	tc.SetHotRegionCacheHitsThreshold(0)
 
 	// try to get an operator
-	var ops []*operator.Operator
+	var op []*operator.Operator
 	for i := 0; i < 100; i++ {
-		ops, _ = hb.Schedule(tc, false)
-		if ops != nil {
+		op = hb.Schedule(tc)
+		if op != nil {
 			break
 		}
 	}
-	re.NotEmpty(ops)
-	re.Equal(ops[0].Step(ops[0].Len()-1).(operator.TransferLeader).ToStore, ops[0].Step(1).(operator.PromoteLearner).ToStore)
-	re.NotEqual(6, ops[0].Step(1).(operator.PromoteLearner).ToStore)
+	c.Assert(op, NotNil)
+	c.Assert(op[0].Step(1).(operator.PromoteLearner).ToStore, Equals, op[0].Step(op[0].Len()-1).(operator.TransferLeader).ToStore)
+	c.Assert(op[0].Step(1).(operator.PromoteLearner).ToStore, Not(Equals), 6)
 }
 
-func TestHotRegionScheduleAbnormalReplica(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testHotRegionSchedulerSuite{})
+
+type testHotRegionSchedulerSuite struct{}
+
+func (s *testHotRegionSchedulerSuite) TestAbnormalReplica(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetHotRegionScheduleLimit(0)
 	hb, err := schedule.CreateScheduler(statistics.Read.String(), schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), nil)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	tc.AddRegionStore(1, 3)
 	tc.AddRegionStore(2, 2)
 	tc.AddRegionStore(3, 2)
 
 	// Report store read bytes.
-	tc.UpdateStorageReadBytes(1, 7.5*units.MiB*statistics.StoreHeartBeatReportInterval)
-	tc.UpdateStorageReadBytes(2, 4.5*units.MiB*statistics.StoreHeartBeatReportInterval)
-	tc.UpdateStorageReadBytes(3, 4.5*units.MiB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageReadBytes(1, 7.5*MB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageReadBytes(2, 4.5*MB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageReadBytes(3, 4.5*MB*statistics.StoreHeartBeatReportInterval)
 
-	tc.AddRegionWithReadInfo(1, 1, 512*units.KiB*statistics.ReadReportInterval, 0, 0, statistics.ReadReportInterval, []uint64{2})
-	tc.AddRegionWithReadInfo(2, 2, 512*units.KiB*statistics.ReadReportInterval, 0, 0, statistics.ReadReportInterval, []uint64{1, 3})
-	tc.AddRegionWithReadInfo(3, 1, 512*units.KiB*statistics.ReadReportInterval, 0, 0, statistics.ReadReportInterval, []uint64{2, 3})
+	tc.AddRegionWithReadInfo(1, 1, 512*KB*statistics.ReadReportInterval, 0, 0, statistics.ReadReportInterval, []uint64{2})
+	tc.AddRegionWithReadInfo(2, 2, 512*KB*statistics.ReadReportInterval, 0, 0, statistics.ReadReportInterval, []uint64{1, 3})
+	tc.AddRegionWithReadInfo(3, 1, 512*KB*statistics.ReadReportInterval, 0, 0, statistics.ReadReportInterval, []uint64{2, 3})
 	tc.SetHotRegionCacheHitsThreshold(0)
-	re.True(tc.IsRegionHot(tc.GetRegion(1)))
-	re.False(hb.IsScheduleAllowed(tc))
+	c.Assert(tc.IsRegionHot(tc.GetRegion(1)), IsTrue)
+	c.Assert(hb.IsScheduleAllowed(tc), IsFalse)
 }
 
-func TestShuffleRegion(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testShuffleRegionSuite{})
+
+type testShuffleRegionSuite struct{}
+
+func (s *testShuffleRegionSuite) TestShuffle(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
 
 	sl, err := schedule.CreateScheduler(ShuffleRegionType, schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder(ShuffleRegionType, []string{"", ""}))
-	re.NoError(err)
-	re.True(sl.IsScheduleAllowed(tc))
-	ops, _ := sl.Schedule(tc, false)
-	re.Empty(ops)
+	c.Assert(err, IsNil)
+	c.Assert(sl.IsScheduleAllowed(tc), IsTrue)
+	c.Assert(sl.Schedule(tc), IsNil)
 
 	// Add stores 1, 2, 3, 4
 	tc.AddRegionStore(1, 6)
@@ -252,17 +267,15 @@ func TestShuffleRegion(t *testing.T) {
 	tc.AddLeaderRegion(4, 4, 1, 2)
 
 	for i := 0; i < 4; i++ {
-		ops, _ = sl.Schedule(tc, false)
-		re.NotEmpty(ops)
-		re.Equal(operator.OpRegion, ops[0].Kind())
+		op := sl.Schedule(tc)
+		c.Assert(op, NotNil)
+		c.Assert(op[0].Kind(), Equals, operator.OpRegion)
 	}
 }
 
-func TestShuffleRegionRole(t *testing.T) {
-	re := require.New(t)
+func (s *testShuffleRegionSuite) TestRole(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
 	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
@@ -302,31 +315,33 @@ func TestShuffleRegionRole(t *testing.T) {
 	tc.PutRegion(region)
 
 	sl, err := schedule.CreateScheduler(ShuffleRegionType, schedule.NewOperatorController(ctx, nil, nil), storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder(ShuffleRegionType, []string{"", ""}))
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	conf := sl.(*shuffleRegionScheduler).conf
 	conf.Roles = []string{"follower"}
-	ops, _ := sl.Schedule(tc, false)
-	re.Len(ops, 1)
-	testutil.CheckTransferPeer(re, ops[0], operator.OpKind(0), 2, 4) // transfer follower
+	ops := sl.Schedule(tc)
+	c.Assert(ops, HasLen, 1)
+	testutil.CheckTransferPeer(c, ops[0], operator.OpKind(0), 2, 4) // transfer follower
 	conf.Roles = []string{"learner"}
-	ops, _ = sl.Schedule(tc, false)
-	re.Len(ops, 1)
-	testutil.CheckTransferLearner(re, ops[0], operator.OpRegion, 3, 4)
+	ops = sl.Schedule(tc)
+	c.Assert(ops, HasLen, 1)
+	testutil.CheckTransferLearner(c, ops[0], operator.OpRegion, 3, 4) // transfer learner
 }
 
-func TestSpecialUseHotRegion(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testSpecialUseSuite{})
+
+type testSpecialUseSuite struct{}
+
+func (s *testSpecialUseSuite) TestSpecialUseHotRegion(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	oc := schedule.NewOperatorController(ctx, nil, nil)
 	storage := storage.NewStorageWithMemoryBackend()
 	cd := schedule.ConfigSliceDecoder(BalanceRegionType, []string{"", ""})
 	bs, err := schedule.CreateScheduler(BalanceRegionType, oc, storage, cd)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	hs, err := schedule.CreateScheduler(statistics.Write.String(), oc, storage, cd)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
@@ -344,42 +359,40 @@ func TestSpecialUseHotRegion(t *testing.T) {
 	tc.AddLeaderRegion(5, 1, 2, 3)
 
 	// balance region without label
-	ops, _ := bs.Schedule(tc, false)
-	re.Len(ops, 1)
-	testutil.CheckTransferPeer(re, ops[0], operator.OpKind(0), 1, 4)
+	ops := bs.Schedule(tc)
+	c.Assert(ops, HasLen, 1)
+	testutil.CheckTransferPeer(c, ops[0], operator.OpKind(0), 1, 4)
 
 	// cannot balance to store 4 and 5 with label
 	tc.AddLabelsStore(4, 0, map[string]string{"specialUse": "hotRegion"})
 	tc.AddLabelsStore(5, 0, map[string]string{"specialUse": "reserved"})
-	ops, _ = bs.Schedule(tc, false)
-	re.Empty(ops)
+	ops = bs.Schedule(tc)
+	c.Assert(ops, HasLen, 0)
 
 	// can only move peer to 4
-	tc.UpdateStorageWrittenBytes(1, 60*units.MiB*statistics.StoreHeartBeatReportInterval)
-	tc.UpdateStorageWrittenBytes(2, 6*units.MiB*statistics.StoreHeartBeatReportInterval)
-	tc.UpdateStorageWrittenBytes(3, 6*units.MiB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageWrittenBytes(1, 60*MB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageWrittenBytes(2, 6*MB*statistics.StoreHeartBeatReportInterval)
+	tc.UpdateStorageWrittenBytes(3, 6*MB*statistics.StoreHeartBeatReportInterval)
 	tc.UpdateStorageWrittenBytes(4, 0)
 	tc.UpdateStorageWrittenBytes(5, 0)
-	tc.AddLeaderRegionWithWriteInfo(1, 1, 512*units.KiB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 3})
-	tc.AddLeaderRegionWithWriteInfo(2, 1, 512*units.KiB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 3})
-	tc.AddLeaderRegionWithWriteInfo(3, 1, 512*units.KiB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 3})
-	tc.AddLeaderRegionWithWriteInfo(4, 2, 512*units.KiB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{1, 3})
-	tc.AddLeaderRegionWithWriteInfo(5, 3, 512*units.KiB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{1, 2})
-	ops, _ = hs.Schedule(tc, false)
-	re.Len(ops, 1)
-	testutil.CheckTransferPeer(re, ops[0], operator.OpHotRegion, 1, 4)
+	tc.AddLeaderRegionWithWriteInfo(1, 1, 512*KB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 3})
+	tc.AddLeaderRegionWithWriteInfo(2, 1, 512*KB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 3})
+	tc.AddLeaderRegionWithWriteInfo(3, 1, 512*KB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{2, 3})
+	tc.AddLeaderRegionWithWriteInfo(4, 2, 512*KB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{1, 3})
+	tc.AddLeaderRegionWithWriteInfo(5, 3, 512*KB*statistics.WriteReportInterval, 0, 0, statistics.WriteReportInterval, []uint64{1, 2})
+	ops = hs.Schedule(tc)
+	c.Assert(ops, HasLen, 1)
+	testutil.CheckTransferPeer(c, ops[0], operator.OpHotRegion, 1, 4)
 }
 
-func TestSpecialUseReserved(t *testing.T) {
-	re := require.New(t)
+func (s *testSpecialUseSuite) TestSpecialUseReserved(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	oc := schedule.NewOperatorController(ctx, nil, nil)
 	storage := storage.NewStorageWithMemoryBackend()
 	cd := schedule.ConfigSliceDecoder(BalanceRegionType, []string{"", ""})
 	bs, err := schedule.CreateScheduler(BalanceRegionType, oc, storage, cd)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(ctx, opt)
@@ -396,49 +409,69 @@ func TestSpecialUseReserved(t *testing.T) {
 	tc.AddLeaderRegion(5, 1, 2, 3)
 
 	// balance region without label
-	ops, _ := bs.Schedule(tc, false)
-	re.Len(ops, 1)
-	testutil.CheckTransferPeer(re, ops[0], operator.OpKind(0), 1, 4)
+	ops := bs.Schedule(tc)
+	c.Assert(ops, HasLen, 1)
+	testutil.CheckTransferPeer(c, ops[0], operator.OpKind(0), 1, 4)
 
 	// cannot balance to store 4 with label
 	tc.AddLabelsStore(4, 0, map[string]string{"specialUse": "reserved"})
-	ops, _ = bs.Schedule(tc, false)
-	re.Empty(ops)
+	ops = bs.Schedule(tc)
+	c.Assert(ops, HasLen, 0)
 }
 
-func TestBalanceLeaderWithConflictRule(t *testing.T) {
+var _ = Suite(&testBalanceLeaderSchedulerWithRuleEnabledSuite{})
+
+type testBalanceLeaderSchedulerWithRuleEnabledSuite struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	tc     *mockcluster.Cluster
+	lb     schedule.Scheduler
+	oc     *schedule.OperatorController
+	opt    *config.PersistOptions
+}
+
+func (s *testBalanceLeaderSchedulerWithRuleEnabledSuite) SetUpTest(c *C) {
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.opt = config.NewTestOptions()
+	s.tc = mockcluster.NewCluster(s.ctx, s.opt)
+	s.tc.SetEnablePlacementRules(true)
+	s.oc = schedule.NewOperatorController(s.ctx, nil, nil)
+	lb, err := schedule.CreateScheduler(BalanceLeaderType, s.oc, storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder(BalanceLeaderType, []string{"", ""}))
+	c.Assert(err, IsNil)
+	s.lb = lb
+}
+
+func (s *testBalanceLeaderSchedulerWithRuleEnabledSuite) TearDownTest(c *C) {
+	s.cancel()
+}
+
+func (s *testBalanceLeaderSchedulerWithRuleEnabledSuite) schedule() []*operator.Operator {
+	return s.lb.Schedule(s.tc)
+}
+
+func (s *testBalanceLeaderSchedulerWithRuleEnabledSuite) TestBalanceLeaderWithConflictRule(c *C) {
 	// Stores:     1    2    3
 	// Leaders:    1    0    0
 	// Region1:    L    F    F
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	opt := config.NewTestOptions()
-	tc := mockcluster.NewCluster(ctx, opt)
-	tc.SetEnablePlacementRules(true)
-	oc := schedule.NewOperatorController(ctx, nil, nil)
-	lb, err := schedule.CreateScheduler(BalanceLeaderType, oc, storage.NewStorageWithMemoryBackend(), schedule.ConfigSliceDecoder(BalanceLeaderType, []string{"", ""}))
-	re.NoError(err)
-	defer cancel()
-
-	tc.AddLeaderStore(1, 1)
-	tc.AddLeaderStore(2, 0)
-	tc.AddLeaderStore(3, 0)
-	tc.AddLeaderRegion(1, 1, 2, 3)
-	tc.SetStoreLabel(1, map[string]string{
+	s.tc.AddLeaderStore(1, 1)
+	s.tc.AddLeaderStore(2, 0)
+	s.tc.AddLeaderStore(3, 0)
+	s.tc.AddLeaderRegion(1, 1, 2, 3)
+	s.tc.SetStoreLabel(1, map[string]string{
 		"host": "a",
 	})
-	tc.SetStoreLabel(2, map[string]string{
+	s.tc.SetStoreLabel(2, map[string]string{
 		"host": "b",
 	})
-	tc.SetStoreLabel(3, map[string]string{
+	s.tc.SetStoreLabel(3, map[string]string{
 		"host": "c",
 	})
 
 	// Stores:     1    2    3
 	// Leaders:    16   0    0
 	// Region1:    L    F    F
-	tc.UpdateLeaderCount(1, 16)
-	testCases := []struct {
+	s.tc.UpdateLeaderCount(1, 16)
+	testcases := []struct {
 		name     string
 		rule     *placement.Rule
 		schedule bool
@@ -501,13 +534,13 @@ func TestBalanceLeaderWithConflictRule(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
-		re.Nil(tc.SetRule(testCase.rule))
-		ops, _ := lb.Schedule(tc, false)
-		if testCase.schedule {
-			re.Len(ops, 1)
+	for _, testcase := range testcases {
+		c.Logf(testcase.name)
+		c.Check(s.tc.SetRule(testcase.rule), IsNil)
+		if testcase.schedule {
+			c.Check(len(s.schedule()), Equals, 1)
 		} else {
-			re.Empty(ops)
+			c.Assert(s.schedule(), HasLen, 0)
 		}
 	}
 }

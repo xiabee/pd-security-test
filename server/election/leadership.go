@@ -55,7 +55,7 @@ type Leadership struct {
 	leaderValue string
 
 	keepAliveCtx        context.Context
-	keepAliveCancelFunc context.CancelFunc
+	keepAliceCancelFunc context.CancelFunc
 }
 
 // NewLeadership creates a new Leadership.
@@ -137,8 +137,8 @@ func (ls *Leadership) Keep(ctx context.Context) {
 	if ls == nil {
 		return
 	}
-	ls.keepAliveCtx, ls.keepAliveCancelFunc = context.WithCancel(ctx)
-	go ls.getLease().KeepAlive(ls.keepAliveCtx)
+	ls.keepAliveCtx, ls.keepAliceCancelFunc = context.WithCancel(ctx)
+	ls.getLease().KeepAlive(ls.keepAliveCtx)
 }
 
 // Check returns whether the leadership is still available.
@@ -230,8 +230,8 @@ func (ls *Leadership) Reset() {
 	if ls == nil || ls.getLease() == nil {
 		return
 	}
-	if ls.keepAliveCancelFunc != nil {
-		ls.keepAliveCancelFunc()
+	if ls.keepAliceCancelFunc != nil {
+		ls.keepAliceCancelFunc()
 	}
 	ls.getLease().Close()
 }

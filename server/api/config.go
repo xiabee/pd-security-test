@@ -15,6 +15,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,7 +29,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/apiutil"
-	"github.com/tikv/pd/pkg/jsonutil"
 	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/pkg/reflectutil"
 	"github.com/tikv/pd/server"
@@ -54,9 +54,7 @@ func newConfHandler(svr *server.Server, rd *render.Render) *confHandler {
 // @Success  200  {object}  config.Config
 // @Router   /config [get]
 func (h *confHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := h.svr.GetConfig()
-	cfg.Schedule.MaxMergeRegionKeys = cfg.Schedule.GetMaxMergeRegionKeys()
-	h.rd.JSON(w, http.StatusOK, cfg)
+	h.rd.JSON(w, http.StatusOK, h.svr.GetConfig())
 }
 
 // @Tags     config
@@ -166,7 +164,12 @@ func (h *confHandler) updateConfig(cfg *config.Config, key string, value interfa
 }
 
 func (h *confHandler) updateSchedule(config *config.Config, key string, value interface{}) error {
-	updated, found, err := jsonutil.AddKeyValue(&config.Schedule, key, value)
+	data, err := json.Marshal(map[string]interface{}{key: value})
+	if err != nil {
+		return err
+	}
+
+	updated, found, err := mergeConfig(&config.Schedule, data)
 	if err != nil {
 		return err
 	}
@@ -182,7 +185,12 @@ func (h *confHandler) updateSchedule(config *config.Config, key string, value in
 }
 
 func (h *confHandler) updateReplication(config *config.Config, key string, value interface{}) error {
-	updated, found, err := jsonutil.AddKeyValue(&config.Replication, key, value)
+	data, err := json.Marshal(map[string]interface{}{key: value})
+	if err != nil {
+		return err
+	}
+
+	updated, found, err := mergeConfig(&config.Replication, data)
 	if err != nil {
 		return err
 	}
@@ -204,7 +212,8 @@ func (h *confHandler) updateReplicationModeConfig(config *config.Config, key []s
 	if err != nil {
 		return err
 	}
-	updated, found, err := jsonutil.MergeJSONObject(&config.ReplicationMode, data)
+
+	updated, found, err := mergeConfig(&config.ReplicationMode, data)
 	if err != nil {
 		return err
 	}
@@ -220,7 +229,12 @@ func (h *confHandler) updateReplicationModeConfig(config *config.Config, key []s
 }
 
 func (h *confHandler) updatePDServerConfig(config *config.Config, key string, value interface{}) error {
-	updated, found, err := jsonutil.AddKeyValue(&config.PDServerCfg, key, value)
+	data, err := json.Marshal(map[string]interface{}{key: value})
+	if err != nil {
+		return err
+	}
+
+	updated, found, err := mergeConfig(&config.PDServerCfg, data)
 	if err != nil {
 		return err
 	}
@@ -272,15 +286,30 @@ func getConfigMap(cfg map[string]interface{}, key []string, value interface{}) m
 	return cfg
 }
 
+func mergeConfig(v interface{}, data []byte) (updated bool, found bool, err error) {
+	old, _ := json.Marshal(v)
+	if err := json.Unmarshal(data, v); err != nil {
+		return false, false, err
+	}
+	new, _ := json.Marshal(v)
+	if !bytes.Equal(old, new) {
+		return true, true, nil
+	}
+	m := make(map[string]interface{})
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false, false, err
+	}
+	found = reflectutil.FindSameFieldByJSON(v, m)
+	return false, found, nil
+}
+
 // @Tags     config
 // @Summary  Get schedule config.
 // @Produce  json
 // @Success  200  {object}  config.ScheduleConfig
 // @Router   /config/schedule [get]
 func (h *confHandler) GetScheduleConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := h.svr.GetScheduleConfig()
-	cfg.MaxMergeRegionKeys = cfg.GetMaxMergeRegionKeys()
-	h.rd.JSON(w, http.StatusOK, cfg)
+	h.rd.JSON(w, http.StatusOK, h.svr.GetScheduleConfig())
 }
 
 // @Tags     config

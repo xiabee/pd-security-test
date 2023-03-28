@@ -18,12 +18,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/apiutil"
 	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
@@ -31,156 +30,151 @@ import (
 	_ "github.com/tikv/pd/server/schedulers"
 )
 
-type scheduleTestSuite struct {
-	suite.Suite
+var _ = Suite(&testScheduleSuite{})
+
+type testScheduleSuite struct {
 	svr       *server.Server
 	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
-func TestScheduleTestSuite(t *testing.T) {
-	suite.Run(t, new(scheduleTestSuite))
+func (s *testScheduleSuite) SetUpSuite(c *C) {
+	s.svr, s.cleanup = mustNewServer(c)
+	mustWaitLeader(c, []*server.Server{s.svr})
+
+	addr := s.svr.GetAddr()
+	s.urlPrefix = fmt.Sprintf("%s%s/api/v1/schedulers", addr, apiPrefix)
+
+	mustBootstrapCluster(c, s.svr)
+	mustPutStore(c, s.svr, 1, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
+	mustPutStore(c, s.svr, 2, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
 }
 
-func (suite *scheduleTestSuite) SetupSuite() {
-	re := suite.Require()
-	suite.svr, suite.cleanup = mustNewServer(re)
-	server.MustWaitLeader(re, []*server.Server{suite.svr})
-
-	addr := suite.svr.GetAddr()
-	suite.urlPrefix = fmt.Sprintf("%s%s/api/v1/schedulers", addr, apiPrefix)
-
-	mustBootstrapCluster(re, suite.svr)
-	mustPutStore(re, suite.svr, 1, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
-	mustPutStore(re, suite.svr, 2, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
+func (s *testScheduleSuite) TearDownSuite(c *C) {
+	s.cleanup()
 }
 
-func (suite *scheduleTestSuite) TearDownSuite() {
-	suite.cleanup()
-}
-
-func (suite *scheduleTestSuite) TestOriginAPI() {
-	addURL := suite.urlPrefix
+func (s *testScheduleSuite) TestOriginAPI(c *C) {
+	addURL := s.urlPrefix
 	input := make(map[string]interface{})
 	input["name"] = "evict-leader-scheduler"
 	input["store_id"] = 1
 	body, err := json.Marshal(input)
-	suite.NoError(err)
-	re := suite.Require()
-	suite.NoError(tu.CheckPostJSON(testDialClient, addURL, body, tu.StatusOK(re)))
-	rc := suite.svr.GetRaftCluster()
-	suite.Len(rc.GetSchedulers(), 1)
+	c.Assert(err, IsNil)
+	c.Assert(tu.CheckPostJSON(testDialClient, addURL, body, tu.StatusOK(c)), IsNil)
+	rc := s.svr.GetRaftCluster()
+	c.Assert(rc.GetSchedulers(), HasLen, 1)
 	resp := make(map[string]interface{})
-	listURL := fmt.Sprintf("%s%s%s/%s/list", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, "evict-leader-scheduler")
-	suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
-	suite.Len(resp["store-id-ranges"], 1)
+	listURL := fmt.Sprintf("%s%s%s/%s/list", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, "evict-leader-scheduler")
+	c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
+	c.Assert(resp["store-id-ranges"], HasLen, 1)
 	input1 := make(map[string]interface{})
 	input1["name"] = "evict-leader-scheduler"
 	input1["store_id"] = 2
 	body, err = json.Marshal(input1)
-	suite.NoError(err)
-	suite.NoError(failpoint.Enable("github.com/tikv/pd/server/schedulers/persistFail", "return(true)"))
-	suite.NoError(tu.CheckPostJSON(testDialClient, addURL, body, tu.StatusNotOK(re)))
-	suite.Len(rc.GetSchedulers(), 1)
+	c.Assert(err, IsNil)
+	c.Assert(failpoint.Enable("github.com/tikv/pd/server/schedulers/persistFail", "return(true)"), IsNil)
+	c.Assert(tu.CheckPostJSON(testDialClient, addURL, body, tu.StatusNotOK(c)), IsNil)
+	c.Assert(rc.GetSchedulers(), HasLen, 1)
 	resp = make(map[string]interface{})
-	suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
-	suite.Len(resp["store-id-ranges"], 1)
-	suite.NoError(failpoint.Disable("github.com/tikv/pd/server/schedulers/persistFail"))
-	suite.NoError(tu.CheckPostJSON(testDialClient, addURL, body, tu.StatusOK(re)))
-	suite.Len(rc.GetSchedulers(), 1)
+	c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
+	c.Assert(resp["store-id-ranges"], HasLen, 1)
+	c.Assert(failpoint.Disable("github.com/tikv/pd/server/schedulers/persistFail"), IsNil)
+	c.Assert(tu.CheckPostJSON(testDialClient, addURL, body, tu.StatusOK(c)), IsNil)
+	c.Assert(rc.GetSchedulers(), HasLen, 1)
 	resp = make(map[string]interface{})
-	suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
-	suite.Len(resp["store-id-ranges"], 2)
-	deleteURL := fmt.Sprintf("%s/%s", suite.urlPrefix, "evict-leader-scheduler-1")
+	c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
+	c.Assert(resp["store-id-ranges"], HasLen, 2)
+	deleteURL := fmt.Sprintf("%s/%s", s.urlPrefix, "evict-leader-scheduler-1")
 	_, err = apiutil.DoDelete(testDialClient, deleteURL)
-	suite.NoError(err)
-	suite.Len(rc.GetSchedulers(), 1)
+	c.Assert(err, IsNil)
+	c.Assert(rc.GetSchedulers(), HasLen, 1)
 	resp1 := make(map[string]interface{})
-	suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp1))
-	suite.Len(resp1["store-id-ranges"], 1)
-	deleteURL = fmt.Sprintf("%s/%s", suite.urlPrefix, "evict-leader-scheduler-2")
-	suite.NoError(failpoint.Enable("github.com/tikv/pd/server/config/persistFail", "return(true)"))
+	c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp1), IsNil)
+	c.Assert(resp1["store-id-ranges"], HasLen, 1)
+	deleteURL = fmt.Sprintf("%s/%s", s.urlPrefix, "evict-leader-scheduler-2")
+	c.Assert(failpoint.Enable("github.com/tikv/pd/server/config/persistFail", "return(true)"), IsNil)
 	statusCode, err := apiutil.DoDelete(testDialClient, deleteURL)
-	suite.NoError(err)
-	suite.Equal(500, statusCode)
-	suite.Len(rc.GetSchedulers(), 1)
-	suite.NoError(failpoint.Disable("github.com/tikv/pd/server/config/persistFail"))
+	c.Assert(err, IsNil)
+	c.Assert(statusCode, Equals, 500)
+	c.Assert(rc.GetSchedulers(), HasLen, 1)
+	c.Assert(failpoint.Disable("github.com/tikv/pd/server/config/persistFail"), IsNil)
 	statusCode, err = apiutil.DoDelete(testDialClient, deleteURL)
-	suite.NoError(err)
-	suite.Equal(200, statusCode)
-	suite.Empty(rc.GetSchedulers())
-	suite.NoError(tu.CheckGetJSON(testDialClient, listURL, nil, tu.Status(re, 404)))
+	c.Assert(err, IsNil)
+	c.Assert(statusCode, Equals, 200)
+	c.Assert(rc.GetSchedulers(), HasLen, 0)
+	c.Assert(tu.CheckGetJSON(testDialClient, listURL, nil, tu.Status(c, 404)), IsNil)
+
 	statusCode, _ = apiutil.DoDelete(testDialClient, deleteURL)
-	suite.Equal(404, statusCode)
+	c.Assert(statusCode, Equals, 404)
 }
 
-func (suite *scheduleTestSuite) TestAPI() {
-	re := suite.Require()
+func (s *testScheduleSuite) TestAPI(c *C) {
 	type arg struct {
 		opt   string
 		value interface{}
 	}
-	testCases := []struct {
+	cases := []struct {
 		name          string
 		createdName   string
 		args          []arg
-		extraTestFunc func(name string)
+		extraTestFunc func(name string, c *C)
 	}{
 		{
 			name: "balance-leader-scheduler",
-			extraTestFunc: func(name string) {
+			extraTestFunc: func(name string, c *C) {
 				resp := make(map[string]interface{})
-				listURL := fmt.Sprintf("%s%s%s/%s/list", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
-				suite.Equal(4.0, resp["batch"])
+				listURL := fmt.Sprintf("%s%s%s/%s/list", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
+				c.Assert(resp["batch"], Equals, 4.0)
 				dataMap := make(map[string]interface{})
 				dataMap["batch"] = 3
-				updateURL := fmt.Sprintf("%s%s%s/%s/config", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				updateURL := fmt.Sprintf("%s%s%s/%s/config", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
 				body, err := json.Marshal(dataMap)
-				suite.NoError(err)
-				suite.NoError(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(re)))
+				c.Assert(err, IsNil)
+				c.Assert(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(c)), IsNil)
 				resp = make(map[string]interface{})
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
-				suite.Equal(3.0, resp["batch"])
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
+				c.Assert(resp["batch"], Equals, 3.0)
 				// update again
 				err = tu.CheckPostJSON(testDialClient, updateURL, body,
-					tu.StatusOK(re),
-					tu.StringEqual(re, "\"no changed\"\n"))
-				suite.NoError(err)
+					tu.StatusOK(c),
+					tu.StringEqual(c, "\"no changed\"\n"))
+				c.Assert(err, IsNil)
 				// update invalidate batch
 				dataMap = map[string]interface{}{}
 				dataMap["batch"] = 100
 				body, err = json.Marshal(dataMap)
-				suite.NoError(err)
+				c.Assert(err, IsNil)
 				err = tu.CheckPostJSON(testDialClient, updateURL, body,
-					tu.Status(re, http.StatusBadRequest),
-					tu.StringEqual(re, "\"invalid batch size which should be an integer between 1 and 10\"\n"))
-				suite.NoError(err)
+					tu.Status(c, http.StatusBadRequest),
+					tu.StringEqual(c, "\"invalid batch size which should be an integer between 1 and 10\"\n"))
+				c.Assert(err, IsNil)
 				resp = make(map[string]interface{})
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
-				suite.Equal(3.0, resp["batch"])
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
+				c.Assert(resp["batch"], Equals, 3.0)
 				// empty body
 				err = tu.CheckPostJSON(testDialClient, updateURL, nil,
-					tu.Status(re, http.StatusInternalServerError),
-					tu.StringEqual(re, "\"unexpected end of JSON input\"\n"))
-				suite.NoError(err)
+					tu.Status(c, http.StatusInternalServerError),
+					tu.StringEqual(c, "\"unexpected end of JSON input\"\n"))
+				c.Assert(err, IsNil)
 				// config item not found
 				dataMap = map[string]interface{}{}
 				dataMap["error"] = 3
 				body, err = json.Marshal(dataMap)
-				suite.NoError(err)
+				c.Assert(err, IsNil)
 				err = tu.CheckPostJSON(testDialClient, updateURL, body,
-					tu.Status(re, http.StatusBadRequest),
-					tu.StringEqual(re, "\"config item not found\"\n"))
-				suite.NoError(err)
+					tu.Status(c, http.StatusBadRequest),
+					tu.StringEqual(c, "\"config item not found\"\n"))
+				c.Assert(err, IsNil)
 			},
 		},
 		{
 			name: "balance-hot-region-scheduler",
-			extraTestFunc: func(name string) {
+			extraTestFunc: func(name string, c *C) {
 				resp := make(map[string]interface{})
-				listURL := fmt.Sprintf("%s%s%s/%s/list", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
+				listURL := fmt.Sprintf("%s%s%s/%s/list", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
 				expectMap := map[string]float64{
 					"min-hot-byte-rate":          100,
 					"min-hot-key-rate":           10,
@@ -194,25 +188,25 @@ func (suite *scheduleTestSuite) TestAPI() {
 					"minor-dec-ratio":            0.99,
 				}
 				for key := range expectMap {
-					suite.Equal(expectMap[key], resp[key])
+					c.Assert(resp[key], DeepEquals, expectMap[key])
 				}
 				dataMap := make(map[string]interface{})
 				dataMap["max-zombie-rounds"] = 5.0
 				expectMap["max-zombie-rounds"] = 5.0
-				updateURL := fmt.Sprintf("%s%s%s/%s/config", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				updateURL := fmt.Sprintf("%s%s%s/%s/config", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
 				body, err := json.Marshal(dataMap)
-				suite.NoError(err)
-				suite.NoError(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(re)))
+				c.Assert(err, IsNil)
+				c.Assert(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(c)), IsNil)
 				resp = make(map[string]interface{})
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
 				for key := range expectMap {
-					suite.Equal(expectMap[key], resp[key])
+					c.Assert(resp[key], DeepEquals, expectMap[key])
 				}
 				// update again
 				err = tu.CheckPostJSON(testDialClient, updateURL, body,
-					tu.StatusOK(re),
-					tu.StringEqual(re, "no changed"))
-				suite.NoError(err)
+					tu.StatusOK(c),
+					tu.StringEqual(c, "no changed"))
+				c.Assert(err, IsNil)
 			},
 		},
 		{name: "balance-region-scheduler"},
@@ -222,38 +216,38 @@ func (suite *scheduleTestSuite) TestAPI() {
 			name:        "grant-leader-scheduler",
 			createdName: "grant-leader-scheduler",
 			args:        []arg{{"store_id", 1}},
-			extraTestFunc: func(name string) {
+			extraTestFunc: func(name string, c *C) {
 				resp := make(map[string]interface{})
-				listURL := fmt.Sprintf("%s%s%s/%s/list", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
+				listURL := fmt.Sprintf("%s%s%s/%s/list", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
 				exceptMap := make(map[string]interface{})
 				exceptMap["1"] = []interface{}{map[string]interface{}{"end-key": "", "start-key": ""}}
-				suite.Equal(exceptMap, resp["store-id-ranges"])
+				c.Assert(resp["store-id-ranges"], DeepEquals, exceptMap)
 
 				// using /pd/v1/schedule-config/grant-leader-scheduler/config to add new store to grant-leader-scheduler
 				input := make(map[string]interface{})
 				input["name"] = "grant-leader-scheduler"
 				input["store_id"] = 2
-				updateURL := fmt.Sprintf("%s%s%s/%s/config", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				updateURL := fmt.Sprintf("%s%s%s/%s/config", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
 				body, err := json.Marshal(input)
-				suite.NoError(err)
-				suite.NoError(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(re)))
+				c.Assert(err, IsNil)
+				c.Assert(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(c)), IsNil)
 				resp = make(map[string]interface{})
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
 				exceptMap["2"] = []interface{}{map[string]interface{}{"end-key": "", "start-key": ""}}
-				suite.Equal(exceptMap, resp["store-id-ranges"])
+				c.Assert(resp["store-id-ranges"], DeepEquals, exceptMap)
 
 				// using /pd/v1/schedule-config/grant-leader-scheduler/config to delete exists store from grant-leader-scheduler
-				deleteURL := fmt.Sprintf("%s%s%s/%s/delete/%s", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name, "2")
+				deleteURL := fmt.Sprintf("%s%s%s/%s/delete/%s", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name, "2")
 				_, err = apiutil.DoDelete(testDialClient, deleteURL)
-				suite.NoError(err)
+				c.Assert(err, IsNil)
 				resp = make(map[string]interface{})
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
 				delete(exceptMap, "2")
-				suite.Equal(exceptMap, resp["store-id-ranges"])
+				c.Assert(resp["store-id-ranges"], DeepEquals, exceptMap)
 				statusCode, err := apiutil.DoDelete(testDialClient, deleteURL)
-				suite.NoError(err)
-				suite.Equal(404, statusCode)
+				c.Assert(err, IsNil)
+				c.Assert(statusCode, Equals, 404)
 			},
 		},
 		{
@@ -261,24 +255,24 @@ func (suite *scheduleTestSuite) TestAPI() {
 			createdName: "scatter-range-test",
 			args:        []arg{{"start_key", ""}, {"end_key", ""}, {"range_name", "test"}},
 			// Test the scheduler config handler.
-			extraTestFunc: func(name string) {
+			extraTestFunc: func(name string, c *C) {
 				resp := make(map[string]interface{})
-				listURL := fmt.Sprintf("%s%s%s/%s/list", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
-				suite.Equal("", resp["start-key"])
-				suite.Equal("", resp["end-key"])
-				suite.Equal("test", resp["range-name"])
+				listURL := fmt.Sprintf("%s%s%s/%s/list", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
+				c.Assert(resp["start-key"], Equals, "")
+				c.Assert(resp["end-key"], Equals, "")
+				c.Assert(resp["range-name"], Equals, "test")
 				resp["start-key"] = "a_00"
 				resp["end-key"] = "a_99"
-				updateURL := fmt.Sprintf("%s%s%s/%s/config", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				updateURL := fmt.Sprintf("%s%s%s/%s/config", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
 				body, err := json.Marshal(resp)
-				suite.NoError(err)
-				suite.NoError(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(re)))
+				c.Assert(err, IsNil)
+				c.Assert(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(c)), IsNil)
 				resp = make(map[string]interface{})
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
-				suite.Equal("a_00", resp["start-key"])
-				suite.Equal("a_99", resp["end-key"])
-				suite.Equal("test", resp["range-name"])
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
+				c.Assert(resp["start-key"], Equals, "a_00")
+				c.Assert(resp["end-key"], Equals, "a_99")
+				c.Assert(resp["range-name"], Equals, "test")
 			},
 		},
 		{
@@ -286,235 +280,240 @@ func (suite *scheduleTestSuite) TestAPI() {
 			createdName: "evict-leader-scheduler",
 			args:        []arg{{"store_id", 1}},
 			// Test the scheduler config handler.
-			extraTestFunc: func(name string) {
+			extraTestFunc: func(name string, c *C) {
 				resp := make(map[string]interface{})
-				listURL := fmt.Sprintf("%s%s%s/%s/list", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
+				listURL := fmt.Sprintf("%s%s%s/%s/list", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
 				exceptMap := make(map[string]interface{})
 				exceptMap["1"] = []interface{}{map[string]interface{}{"end-key": "", "start-key": ""}}
-				suite.Equal(exceptMap, resp["store-id-ranges"])
+				c.Assert(resp["store-id-ranges"], DeepEquals, exceptMap)
 
 				// using /pd/v1/schedule-config/evict-leader-scheduler/config to add new store to evict-leader-scheduler
 				input := make(map[string]interface{})
 				input["name"] = "evict-leader-scheduler"
 				input["store_id"] = 2
-				updateURL := fmt.Sprintf("%s%s%s/%s/config", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
+				updateURL := fmt.Sprintf("%s%s%s/%s/config", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name)
 				body, err := json.Marshal(input)
-				suite.NoError(err)
-				suite.NoError(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(re)))
+				c.Assert(err, IsNil)
+				c.Assert(tu.CheckPostJSON(testDialClient, updateURL, body, tu.StatusOK(c)), IsNil)
 				resp = make(map[string]interface{})
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
 				exceptMap["2"] = []interface{}{map[string]interface{}{"end-key": "", "start-key": ""}}
-				suite.Equal(exceptMap, resp["store-id-ranges"])
+				c.Assert(resp["store-id-ranges"], DeepEquals, exceptMap)
 
 				// using /pd/v1/schedule-config/evict-leader-scheduler/config to delete exist store from evict-leader-scheduler
-				deleteURL := fmt.Sprintf("%s%s%s/%s/delete/%s", suite.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name, "2")
+				deleteURL := fmt.Sprintf("%s%s%s/%s/delete/%s", s.svr.GetAddr(), apiPrefix, server.SchedulerConfigHandlerPath, name, "2")
 				_, err = apiutil.DoDelete(testDialClient, deleteURL)
-				suite.NoError(err)
+				c.Assert(err, IsNil)
 				resp = make(map[string]interface{})
-				suite.NoError(tu.ReadGetJSON(re, testDialClient, listURL, &resp))
+				c.Assert(tu.ReadGetJSON(c, testDialClient, listURL, &resp), IsNil)
 				delete(exceptMap, "2")
-				suite.Equal(exceptMap, resp["store-id-ranges"])
+				c.Assert(resp["store-id-ranges"], DeepEquals, exceptMap)
 				statusCode, err := apiutil.DoDelete(testDialClient, deleteURL)
-				suite.NoError(err)
-				suite.Equal(404, statusCode)
+				c.Assert(err, IsNil)
+				c.Assert(statusCode, Equals, 404)
 			},
 		},
 	}
-	for _, testCase := range testCases {
+	for _, ca := range cases {
 		input := make(map[string]interface{})
-		input["name"] = testCase.name
-		for _, a := range testCase.args {
+		input["name"] = ca.name
+		for _, a := range ca.args {
 			input[a.opt] = a.value
 		}
 		body, err := json.Marshal(input)
-		suite.NoError(err)
-		suite.testPauseOrResume(testCase.name, testCase.createdName, body)
+		c.Assert(err, IsNil)
+		s.testPauseOrResume(ca.name, ca.createdName, body, ca.extraTestFunc, c)
 	}
 
 	// test pause and resume all schedulers.
 
 	// add schedulers.
-	testCases = testCases[:3]
-	for _, testCase := range testCases {
+	cases = cases[:3]
+	for _, ca := range cases {
 		input := make(map[string]interface{})
-		input["name"] = testCase.name
-		for _, a := range testCase.args {
+		input["name"] = ca.name
+		for _, a := range ca.args {
 			input[a.opt] = a.value
 		}
 		body, err := json.Marshal(input)
-		suite.NoError(err)
-		suite.addScheduler(body)
+		c.Assert(err, IsNil)
+		s.addScheduler(ca.name, ca.createdName, body, ca.extraTestFunc, c)
 	}
 
 	// test pause all schedulers.
 	input := make(map[string]interface{})
 	input["delay"] = 30
 	pauseArgs, err := json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/all", pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
-	handler := suite.svr.GetHandler()
-	for _, testCase := range testCases {
-		createdName := testCase.createdName
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/all", pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
+	handler := s.svr.GetHandler()
+	for _, ca := range cases {
+		createdName := ca.createdName
 		if createdName == "" {
-			createdName = testCase.name
+			createdName = ca.name
 		}
 		isPaused, err := handler.IsSchedulerPaused(createdName)
-		suite.NoError(err)
-		suite.True(isPaused)
+		c.Assert(err, IsNil)
+		c.Assert(isPaused, IsTrue)
 	}
 	input["delay"] = 1
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/all", pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/all", pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	time.Sleep(time.Second)
-	for _, testCase := range testCases {
-		createdName := testCase.createdName
+	for _, ca := range cases {
+		createdName := ca.createdName
 		if createdName == "" {
-			createdName = testCase.name
+			createdName = ca.name
 		}
 		isPaused, err := handler.IsSchedulerPaused(createdName)
-		suite.NoError(err)
-		suite.False(isPaused)
+		c.Assert(err, IsNil)
+		c.Assert(isPaused, IsFalse)
 	}
 
 	// test resume all schedulers.
 	input["delay"] = 30
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/all", pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/all", pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	input["delay"] = 0
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/all", pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
-	for _, testCase := range testCases {
-		createdName := testCase.createdName
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/all", pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
+	for _, ca := range cases {
+		createdName := ca.createdName
 		if createdName == "" {
-			createdName = testCase.name
+			createdName = ca.name
 		}
 		isPaused, err := handler.IsSchedulerPaused(createdName)
-		suite.NoError(err)
-		suite.False(isPaused)
+		c.Assert(err, IsNil)
+		c.Assert(isPaused, IsFalse)
 	}
 
 	// delete schedulers.
-	for _, testCase := range testCases {
-		createdName := testCase.createdName
+	for _, ca := range cases {
+		createdName := ca.createdName
 		if createdName == "" {
-			createdName = testCase.name
+			createdName = ca.name
 		}
-		suite.deleteScheduler(createdName)
+		s.deleteScheduler(createdName, c)
 	}
 }
 
-func (suite *scheduleTestSuite) TestDisable() {
+func (s *testScheduleSuite) TestDisable(c *C) {
 	name := "shuffle-leader-scheduler"
 	input := make(map[string]interface{})
 	input["name"] = name
 	body, err := json.Marshal(input)
-	suite.NoError(err)
-	suite.addScheduler(body)
+	c.Assert(err, IsNil)
+	s.addScheduler(name, name, body, nil, c)
 
-	re := suite.Require()
-	u := fmt.Sprintf("%s%s/api/v1/config/schedule", suite.svr.GetAddr(), apiPrefix)
+	u := fmt.Sprintf("%s%s/api/v1/config/schedule", s.svr.GetAddr(), apiPrefix)
 	var scheduleConfig config.ScheduleConfig
-	err = tu.ReadGetJSON(re, testDialClient, u, &scheduleConfig)
-	suite.NoError(err)
+	err = tu.ReadGetJSON(c, testDialClient, u, &scheduleConfig)
+	c.Assert(err, IsNil)
 
 	originSchedulers := scheduleConfig.Schedulers
 	scheduleConfig.Schedulers = config.SchedulerConfigs{config.SchedulerConfig{Type: "shuffle-leader", Disable: true}}
 	body, err = json.Marshal(scheduleConfig)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, u, body, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, u, body, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 
 	var schedulers []string
-	err = tu.ReadGetJSON(re, testDialClient, suite.urlPrefix, &schedulers)
-	suite.NoError(err)
-	suite.Len(schedulers, 1)
-	suite.Equal(name, schedulers[0])
+	err = tu.ReadGetJSON(c, testDialClient, s.urlPrefix, &schedulers)
+	c.Assert(err, IsNil)
+	c.Assert(schedulers, HasLen, 1)
+	c.Assert(schedulers[0], Equals, name)
 
-	err = tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s?status=disabled", suite.urlPrefix), &schedulers)
-	suite.NoError(err)
-	suite.Len(schedulers, 1)
-	suite.Equal(name, schedulers[0])
+	err = tu.ReadGetJSON(c, testDialClient, fmt.Sprintf("%s?status=disabled", s.urlPrefix), &schedulers)
+	c.Assert(err, IsNil)
+	c.Assert(schedulers, HasLen, 1)
+	c.Assert(schedulers[0], Equals, name)
 
 	// reset schedule config
 	scheduleConfig.Schedulers = originSchedulers
 	body, err = json.Marshal(scheduleConfig)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, u, body, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, u, body, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 
-	suite.deleteScheduler(name)
+	s.deleteScheduler(name, c)
 }
 
-func (suite *scheduleTestSuite) addScheduler(body []byte) {
-	err := tu.CheckPostJSON(testDialClient, suite.urlPrefix, body, tu.StatusOK(suite.Require()))
-	suite.NoError(err)
-}
-
-func (suite *scheduleTestSuite) deleteScheduler(createdName string) {
-	deleteURL := fmt.Sprintf("%s/%s", suite.urlPrefix, createdName)
-	_, err := apiutil.DoDelete(testDialClient, deleteURL)
-	suite.NoError(err)
-}
-
-func (suite *scheduleTestSuite) testPauseOrResume(name, createdName string, body []byte) {
+func (s *testScheduleSuite) addScheduler(name, createdName string, body []byte, extraTest func(string, *C), c *C) {
 	if createdName == "" {
 		createdName = name
 	}
-	re := suite.Require()
-	err := tu.CheckPostJSON(testDialClient, suite.urlPrefix, body, tu.StatusOK(re))
-	suite.NoError(err)
-	handler := suite.svr.GetHandler()
+	err := tu.CheckPostJSON(testDialClient, s.urlPrefix, body, tu.StatusOK(c))
+	c.Assert(err, IsNil)
+
+	if extraTest != nil {
+		extraTest(createdName, c)
+	}
+}
+
+func (s *testScheduleSuite) deleteScheduler(createdName string, c *C) {
+	deleteURL := fmt.Sprintf("%s/%s", s.urlPrefix, createdName)
+	_, err := apiutil.DoDelete(testDialClient, deleteURL)
+	c.Assert(err, IsNil)
+}
+
+func (s *testScheduleSuite) testPauseOrResume(name, createdName string, body []byte, extraTest func(string, *C), c *C) {
+	if createdName == "" {
+		createdName = name
+	}
+	err := tu.CheckPostJSON(testDialClient, s.urlPrefix, body, tu.StatusOK(c))
+	c.Assert(err, IsNil)
+	handler := s.svr.GetHandler()
 	sches, err := handler.GetSchedulers()
-	suite.NoError(err)
-	suite.Equal(createdName, sches[0])
+	c.Assert(err, IsNil)
+	c.Assert(sches[0], Equals, createdName)
 
 	// test pause.
 	input := make(map[string]interface{})
 	input["delay"] = 30
 	pauseArgs, err := json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+createdName, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+createdName, pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	isPaused, err := handler.IsSchedulerPaused(createdName)
-	suite.NoError(err)
-	suite.True(isPaused)
+	c.Assert(err, IsNil)
+	c.Assert(isPaused, IsTrue)
 	input["delay"] = 1
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+createdName, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
-	pausedAt, err := handler.GetPausedSchedulerDelayAt(createdName)
-	suite.NoError(err)
-	resumeAt, err := handler.GetPausedSchedulerDelayUntil(createdName)
-	suite.NoError(err)
-	suite.Equal(int64(1), resumeAt-pausedAt)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+createdName, pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	time.Sleep(time.Second)
 	isPaused, err = handler.IsSchedulerPaused(createdName)
-	suite.NoError(err)
-	suite.False(isPaused)
+	c.Assert(err, IsNil)
+	c.Assert(isPaused, IsFalse)
 
 	// test resume.
 	input = make(map[string]interface{})
 	input["delay"] = 30
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+createdName, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+createdName, pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	input["delay"] = 0
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+createdName, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+createdName, pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	isPaused, err = handler.IsSchedulerPaused(createdName)
-	suite.NoError(err)
-	suite.False(isPaused)
-	suite.deleteScheduler(createdName)
+	c.Assert(err, IsNil)
+	c.Assert(isPaused, IsFalse)
+
+	if extraTest != nil {
+		extraTest(createdName, c)
+	}
+
+	s.deleteScheduler(createdName, c)
 }

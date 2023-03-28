@@ -20,13 +20,19 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 	"github.com/unrolled/render"
 )
 
-func TestJsonRespondErrorOk(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testUtilSuite{})
+
+type testUtilSuite struct{}
+
+func (s *testUtilSuite) TestJsonRespondErrorOk(c *C) {
 	rd := render.New(render.Options{
 		IndentJSON: true,
 	})
@@ -35,17 +41,15 @@ func TestJsonRespondErrorOk(t *testing.T) {
 	var input map[string]string
 	output := map[string]string{"zone": "cn", "host": "local"}
 	err := ReadJSONRespondError(rd, response, body, &input)
-	re.NoError(err)
-	re.Equal(output["zone"], input["zone"])
-	re.Equal(output["host"], input["host"])
+	c.Assert(err, IsNil)
+	c.Assert(input["zone"], Equals, output["zone"])
+	c.Assert(input["host"], Equals, output["host"])
 	result := response.Result()
 	defer result.Body.Close()
-	re.Equal(200, result.StatusCode)
+	c.Assert(result.StatusCode, Equals, 200)
 }
 
-func TestJsonRespondErrorBadInput(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testUtilSuite) TestJsonRespondErrorBadInput(c *C) {
 	rd := render.New(render.Options{
 		IndentJSON: true,
 	})
@@ -53,18 +57,20 @@ func TestJsonRespondErrorBadInput(t *testing.T) {
 	body := io.NopCloser(bytes.NewBufferString("{\"zone\":\"cn\", \"host\":\"local\"}"))
 	var input []string
 	err := ReadJSONRespondError(rd, response, body, &input)
-	re.EqualError(err, "json: cannot unmarshal object into Go value of type []string")
+	c.Assert(err, NotNil)
+	c.Assert(err.Error(), Equals, "json: cannot unmarshal object into Go value of type []string")
 	result := response.Result()
 	defer result.Body.Close()
-	re.Equal(400, result.StatusCode)
+	c.Assert(result.StatusCode, Equals, 400)
 
 	{
 		body := io.NopCloser(bytes.NewBufferString("{\"zone\":\"cn\","))
 		var input []string
 		err := ReadJSONRespondError(rd, response, body, &input)
-		re.EqualError(err, "unexpected end of JSON input")
+		c.Assert(err, NotNil)
+		c.Assert(err.Error(), Equals, "unexpected end of JSON input")
 		result := response.Result()
 		defer result.Body.Close()
-		re.Equal(400, result.StatusCode)
+		c.Assert(result.StatusCode, Equals, 400)
 	}
 }

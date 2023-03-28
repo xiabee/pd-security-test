@@ -16,36 +16,35 @@ package typeutil
 
 import (
 	"encoding/json"
-	"testing"
 
 	"github.com/BurntSushi/toml"
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
+
+var _ = Suite(&testDurationSuite{})
+
+type testDurationSuite struct{}
 
 type example struct {
 	Interval Duration `json:"interval" toml:"interval"`
 }
 
-func TestDurationJSON(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testDurationSuite) TestJSON(c *C) {
 	example := &example{}
 
 	text := []byte(`{"interval":"1h1m1s"}`)
-	re.NoError(json.Unmarshal(text, example))
-	re.Equal(float64(60*60+60+1), example.Interval.Seconds())
+	c.Assert(json.Unmarshal(text, example), IsNil)
+	c.Assert(example.Interval.Seconds(), Equals, float64(60*60+60+1))
 
 	b, err := json.Marshal(example)
-	re.NoError(err)
-	re.Equal(string(text), string(b))
+	c.Assert(err, IsNil)
+	c.Assert(string(b), Equals, string(text))
 }
 
-func TestDurationTOML(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testDurationSuite) TestTOML(c *C) {
 	example := &example{}
 
 	text := []byte(`interval = "1h1m1s"`)
-	re.Nil(toml.Unmarshal(text, example))
-	re.Equal(float64(60*60+60+1), example.Interval.Seconds())
+	c.Assert(toml.Unmarshal(text, example), IsNil)
+	c.Assert(example.Interval.Seconds(), Equals, float64(60*60+60+1))
 }

@@ -18,30 +18,43 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
 )
 
-func TestMember(t *testing.T) {
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&memberTestSuite{})
+
+type memberTestSuite struct{}
+
+func (s *memberTestSuite) SetUpSuite(c *C) {
+	server.EnableZap = true
+}
+
+func (s *memberTestSuite) TestMember(c *C) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cluster, err := tests.NewTestCluster(ctx, 3)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	err = cluster.RunInitialServers()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	cluster.WaitLeader()
 	leaderServer := cluster.GetServer(cluster.GetLeader())
-	re.NoError(leaderServer.BootstrapCluster())
+	c.Assert(leaderServer.BootstrapCluster(), IsNil)
 	pdAddr := cluster.GetConfig().GetClientURL()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	cmd := pdctlCmd.GetRootCmd()
 	svr := cluster.GetServer("pd2")
 	id := svr.GetServerID()
@@ -52,60 +65,57 @@ func TestMember(t *testing.T) {
 	// member leader show
 	args := []string{"-u", pdAddr, "member", "leader", "show"}
 	output, err := pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	leader := pdpb.Member{}
-	re.NoError(json.Unmarshal(output, &leader))
-	re.Equal(svr.GetLeader(), &leader)
+	c.Assert(json.Unmarshal(output, &leader), IsNil)
+	c.Assert(&leader, DeepEquals, svr.GetLeader())
 
 	// member leader transfer <member_name>
 	args = []string{"-u", pdAddr, "member", "leader", "transfer", "pd2"}
 	_, err = pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
-	testutil.Eventually(re, func() bool {
-		return svr.GetLeader().GetName() == "pd2"
+	c.Assert(err, IsNil)
+	testutil.WaitUntil(c, func() bool {
+		return c.Check("pd2", Equals, svr.GetLeader().GetName())
 	})
 
 	// member leader resign
 	cluster.WaitLeader()
 	args = []string{"-u", pdAddr, "member", "leader", "resign"}
 	output, err = pdctl.ExecuteCommand(cmd, args...)
-	re.Contains(string(output), "Success")
-	re.NoError(err)
-	testutil.Eventually(re, func() bool {
-		return svr.GetLeader().GetName() != "pd2"
+	c.Assert(strings.Contains(string(output), "Success"), IsTrue)
+	c.Assert(err, IsNil)
+	testutil.WaitUntil(c, func() bool {
+		return c.Check("pd2", Not(Equals), svr.GetLeader().GetName())
 	})
 
 	// member leader_priority <member_name> <priority>
 	cluster.WaitLeader()
 	args = []string{"-u", pdAddr, "member", "leader_priority", name, "100"}
 	_, err = pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	priority, err := svr.GetServer().GetMember().GetMemberLeaderPriority(id)
-	re.NoError(err)
-	re.Equal(100, priority)
+	c.Assert(err, IsNil)
+	c.Assert(priority, Equals, 100)
 
 	// member delete name <member_name>
 	err = svr.Destroy()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	members, err := etcdutil.ListEtcdMembers(client)
-	re.NoError(err)
-	re.Len(members.Members, 3)
+	c.Assert(err, IsNil)
+	c.Assert(members.Members, HasLen, 3)
 	args = []string{"-u", pdAddr, "member", "delete", "name", name}
 	_, err = pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
-	testutil.Eventually(re, func() bool {
-		members, err = etcdutil.ListEtcdMembers(client)
-		re.NoError(err)
-		return len(members.Members) == 2
-	})
+	c.Assert(err, IsNil)
+	members, err = etcdutil.ListEtcdMembers(client)
+	c.Assert(err, IsNil)
+	c.Assert(members.Members, HasLen, 2)
 
 	// member delete id <member_id>
 	args = []string{"-u", pdAddr, "member", "delete", "id", fmt.Sprint(id)}
 	_, err = pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
-	testutil.Eventually(re, func() bool {
-		members, err = etcdutil.ListEtcdMembers(client)
-		re.NoError(err)
-		return len(members.Members) == 2
-	})
+	c.Assert(err, IsNil)
+	members, err = etcdutil.ListEtcdMembers(client)
+	c.Assert(err, IsNil)
+	c.Assert(members.Members, HasLen, 2)
+	c.Succeed()
 }

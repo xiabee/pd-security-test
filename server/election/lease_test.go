@@ -16,29 +16,32 @@ package election
 
 import (
 	"context"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 	"github.com/tikv/pd/pkg/etcdutil"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
 )
 
-func TestLease(t *testing.T) {
-	re := require.New(t)
-	cfg := etcdutil.NewTestSingleConfig(t)
+var _ = Suite(&testLeaseSuite{})
+
+type testLeaseSuite struct{}
+
+func (s *testLeaseSuite) TestLease(c *C) {
+	cfg := etcdutil.NewTestSingleConfig()
 	etcd, err := embed.StartEtcd(cfg)
 	defer func() {
 		etcd.Close()
+		etcdutil.CleanConfig(cfg)
 	}()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	ep := cfg.LCUrls[0].String()
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints: []string{ep},
 	})
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	<-etcd.Server.ReadyNotify()
 
@@ -53,51 +56,51 @@ func TestLease(t *testing.T) {
 		client:  client,
 		lease:   clientv3.NewLease(client),
 	}
-	re.True(lease1.IsExpired())
-	re.True(lease2.IsExpired())
-	re.NoError(lease1.Close())
-	re.NoError(lease2.Close())
+	c.Check(lease1.IsExpired(), IsTrue)
+	c.Check(lease2.IsExpired(), IsTrue)
+	c.Check(lease1.Close(), IsNil)
+	c.Check(lease2.Close(), IsNil)
 
 	// Grant the two leases with the same timeout.
-	re.NoError(lease1.Grant(defaultLeaseTimeout))
-	re.NoError(lease2.Grant(defaultLeaseTimeout))
-	re.False(lease1.IsExpired())
-	re.False(lease2.IsExpired())
+	c.Check(lease1.Grant(defaultLeaseTimeout), IsNil)
+	c.Check(lease2.Grant(defaultLeaseTimeout), IsNil)
+	c.Check(lease1.IsExpired(), IsFalse)
+	c.Check(lease2.IsExpired(), IsFalse)
 
 	// Wait for a while to make both two leases timeout.
 	time.Sleep((defaultLeaseTimeout + 1) * time.Second)
-	re.True(lease1.IsExpired())
-	re.True(lease2.IsExpired())
+	c.Check(lease1.IsExpired(), IsTrue)
+	c.Check(lease2.IsExpired(), IsTrue)
 
 	// Grant the two leases with different timeouts.
-	re.NoError(lease1.Grant(defaultLeaseTimeout))
-	re.NoError(lease2.Grant(defaultLeaseTimeout * 4))
-	re.False(lease1.IsExpired())
-	re.False(lease2.IsExpired())
+	c.Check(lease1.Grant(defaultLeaseTimeout), IsNil)
+	c.Check(lease2.Grant(defaultLeaseTimeout*4), IsNil)
+	c.Check(lease1.IsExpired(), IsFalse)
+	c.Check(lease2.IsExpired(), IsFalse)
 
 	// Wait for a while to make one of the lease timeout.
 	time.Sleep((defaultLeaseTimeout + 1) * time.Second)
-	re.True(lease1.IsExpired())
-	re.False(lease2.IsExpired())
+	c.Check(lease1.IsExpired(), IsTrue)
+	c.Check(lease2.IsExpired(), IsFalse)
 
 	// Close both of the two leases.
-	re.NoError(lease1.Close())
-	re.NoError(lease2.Close())
-	re.True(lease1.IsExpired())
-	re.True(lease2.IsExpired())
+	c.Check(lease1.Close(), IsNil)
+	c.Check(lease2.Close(), IsNil)
+	c.Check(lease1.IsExpired(), IsTrue)
+	c.Check(lease2.IsExpired(), IsTrue)
 
 	// Grant the lease1 and keep it alive.
-	re.NoError(lease1.Grant(defaultLeaseTimeout))
-	re.False(lease1.IsExpired())
+	c.Check(lease1.Grant(defaultLeaseTimeout), IsNil)
+	c.Check(lease1.IsExpired(), IsFalse)
 	ctx, cancel := context.WithCancel(context.Background())
 	go lease1.KeepAlive(ctx)
 	defer cancel()
 
 	// Wait for a timeout.
 	time.Sleep((defaultLeaseTimeout + 1) * time.Second)
-	re.False(lease1.IsExpired())
+	c.Check(lease1.IsExpired(), IsFalse)
 	// Close and wait for a timeout.
-	re.NoError(lease1.Close())
+	c.Check(lease1.Close(), IsNil)
 	time.Sleep((defaultLeaseTimeout + 1) * time.Second)
-	re.True(lease1.IsExpired())
+	c.Check(lease1.IsExpired(), IsTrue)
 }

@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/stretchr/testify/require"
 )
 
 func newCommand(usage, short string) *cobra.Command {
@@ -32,7 +31,6 @@ func newCommand(usage, short string) *cobra.Command {
 }
 
 func TestGenCompleter(t *testing.T) {
-	re := require.New(t)
 	var subCommand = []string{"testa", "testb", "testc", "testdef"}
 
 	rootCmd := &cobra.Command{
@@ -67,12 +65,13 @@ func TestGenCompleter(t *testing.T) {
 			}
 		}
 
-		re.True(inPrefixArray)
+		if inPrefixArray == false {
+			t.Errorf("%s not in prefix array", cmd)
+		}
 	}
 }
 
 func TestReadStdin(t *testing.T) {
-	re := require.New(t)
 	s := []struct {
 		in      io.Reader
 		targets []string
@@ -85,10 +84,16 @@ func TestReadStdin(t *testing.T) {
 	}}
 	for _, v := range s {
 		in, err := ReadStdin(v.in)
-		re.NoError(err)
-		re.Len(in, len(v.targets))
+		if err != nil {
+			t.Errorf("ReadStdin err:%v", err)
+		}
+		if len(v.targets) != len(in) {
+			t.Errorf("ReadStdin =  %v, want %s, nil", in, v.targets)
+		}
 		for i, target := range v.targets {
-			re.Equal(target, in[i])
+			if target != in[i] {
+				t.Errorf("ReadStdin = %v, want %s, nil", in, v.targets)
+			}
 		}
 	}
 }

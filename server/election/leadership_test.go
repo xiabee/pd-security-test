@@ -19,28 +19,36 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 	"github.com/tikv/pd/pkg/etcdutil"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
 )
 
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testLeadershipSuite{})
+
+type testLeadershipSuite struct{}
+
 const defaultLeaseTimeout = 1
 
-func TestLeadership(t *testing.T) {
-	re := require.New(t)
-	cfg := etcdutil.NewTestSingleConfig(t)
+func (s *testLeadershipSuite) TestLeadership(c *C) {
+	cfg := etcdutil.NewTestSingleConfig()
 	etcd, err := embed.StartEtcd(cfg)
 	defer func() {
 		etcd.Close()
+		etcdutil.CleanConfig(cfg)
 	}()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	ep := cfg.LCUrls[0].String()
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints: []string{ep},
 	})
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	<-etcd.Server.ReadyNotify()
 
@@ -50,27 +58,27 @@ func TestLeadership(t *testing.T) {
 
 	// leadership1 starts first and get the leadership
 	err = leadership1.Campaign(defaultLeaseTimeout, "test_leader_1")
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// leadership2 starts then and can not get the leadership
 	err = leadership2.Campaign(defaultLeaseTimeout, "test_leader_2")
-	re.Error(err)
+	c.Assert(err, NotNil)
 
-	re.True(leadership1.Check())
+	c.Assert(leadership1.Check(), IsTrue)
 	// leadership2 failed, so the check should return false
-	re.False(leadership2.Check())
+	c.Assert(leadership2.Check(), IsFalse)
 
 	// Sleep longer than the defaultLeaseTimeout to wait for the lease expires
 	time.Sleep((defaultLeaseTimeout + 1) * time.Second)
 
-	re.False(leadership1.Check())
-	re.False(leadership2.Check())
+	c.Assert(leadership1.Check(), IsFalse)
+	c.Assert(leadership2.Check(), IsFalse)
 
 	// Delete the leader key and campaign for leadership1
 	err = leadership1.DeleteLeaderKey()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	err = leadership1.Campaign(defaultLeaseTimeout, "test_leader_1")
-	re.NoError(err)
-	re.True(leadership1.Check())
+	c.Assert(err, IsNil)
+	c.Assert(leadership1.Check(), IsTrue)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go leadership1.Keep(ctx)
@@ -78,15 +86,15 @@ func TestLeadership(t *testing.T) {
 	// Sleep longer than the defaultLeaseTimeout
 	time.Sleep((defaultLeaseTimeout + 1) * time.Second)
 
-	re.True(leadership1.Check())
-	re.False(leadership2.Check())
+	c.Assert(leadership1.Check(), IsTrue)
+	c.Assert(leadership2.Check(), IsFalse)
 
 	// Delete the leader key and re-campaign for leadership2
 	err = leadership1.DeleteLeaderKey()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	err = leadership2.Campaign(defaultLeaseTimeout, "test_leader_2")
-	re.NoError(err)
-	re.True(leadership2.Check())
+	c.Assert(err, IsNil)
+	c.Assert(leadership2.Check(), IsTrue)
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
 	go leadership2.Keep(ctx)
@@ -94,14 +102,14 @@ func TestLeadership(t *testing.T) {
 	// Sleep longer than the defaultLeaseTimeout
 	time.Sleep((defaultLeaseTimeout + 1) * time.Second)
 
-	re.False(leadership1.Check())
-	re.True(leadership2.Check())
+	c.Assert(leadership1.Check(), IsFalse)
+	c.Assert(leadership2.Check(), IsTrue)
 
 	// Test resetting the leadership.
 	leadership1.Reset()
 	leadership2.Reset()
-	re.False(leadership1.Check())
-	re.False(leadership2.Check())
+	c.Assert(leadership1.Check(), IsFalse)
+	c.Assert(leadership2.Check(), IsFalse)
 
 	// Try to keep the reset leadership.
 	leadership1.Keep(ctx)
@@ -109,12 +117,12 @@ func TestLeadership(t *testing.T) {
 
 	// Check the lease.
 	lease1 := leadership1.getLease()
-	re.NotNil(lease1)
+	c.Assert(lease1, NotNil)
 	lease2 := leadership1.getLease()
-	re.NotNil(lease2)
+	c.Assert(lease2, NotNil)
 
-	re.True(lease1.IsExpired())
-	re.True(lease2.IsExpired())
-	re.NoError(lease1.Close())
-	re.NoError(lease2.Close())
+	c.Assert(lease1.IsExpired(), IsTrue)
+	c.Assert(lease2.IsExpired(), IsTrue)
+	c.Assert(lease1.Close(), IsNil)
+	c.Assert(lease2.Close(), IsNil)
 }

@@ -14,10 +14,7 @@
 
 package typeutil
 
-import (
-	"math"
-	"time"
-)
+import "time"
 
 // MinUint64 returns the min value between two variables whose type are uint64.
 func MinUint64(a, b uint64) uint64 {
@@ -54,9 +51,4 @@ func StringsEqual(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-// Float64Equal checks if two float64 are equal.
-func Float64Equal(a, b float64) bool {
-	return math.Abs(a-b) <= 1e-6
 }

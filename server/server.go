@@ -30,11 +30,11 @@ import (
 	"time"
 
 	"github.com/coreos/go-semver/semver"
+	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/diagnosticspb"
-	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
@@ -44,19 +44,15 @@ import (
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/pkg/grpcutil"
-	"github.com/tikv/pd/pkg/jsonutil"
 	"github.com/tikv/pd/pkg/logutil"
-	"github.com/tikv/pd/pkg/ratelimit"
+	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/pkg/systimemon"
-	"github.com/tikv/pd/pkg/tsoutil"
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/encryptionkm"
-	"github.com/tikv/pd/server/gc"
 	"github.com/tikv/pd/server/id"
-	"github.com/tikv/pd/server/keyspace"
 	"github.com/tikv/pd/server/member"
 	syncer "github.com/tikv/pd/server/region_syncer"
 	"github.com/tikv/pd/server/schedule"
@@ -83,15 +79,14 @@ const (
 	pdRootPath      = "/pd"
 	pdAPIPrefix     = "/pd/"
 	pdClusterIDPath = "/pd/cluster_id"
-	// idAllocPath for idAllocator to save persistent window's end.
-	idAllocPath  = "alloc_id"
-	idAllocLabel = "idalloc"
-
-	recoveringMarkPath = "cluster/markers/snapshot-recovering"
 )
 
-// EtcdStartTimeout the timeout of the startup etcd.
-var EtcdStartTimeout = time.Minute * 5
+var (
+	// EnableZap enable the zap logger in embed etcd.
+	EnableZap = false
+	// EtcdStartTimeout the timeout of the startup etcd.
+	EtcdStartTimeout = time.Minute * 5
+)
 
 // Server is the pd server.
 // nolint
@@ -135,10 +130,6 @@ type Server struct {
 	encryptionKeyManager *encryptionkm.KeyManager
 	// for storage operation.
 	storage storage.Storage
-	// safepoint manager
-	gcSafePointManager *gc.SafePointManager
-	// keyspace manager
-	keyspaceManager *keyspace.Manager
 	// for basicCluster operation.
 	basicCluster *core.BasicCluster
 	// for tso.
@@ -155,6 +146,9 @@ type Server struct {
 	startCallbacks []func()
 	closeCallbacks []func()
 
+	// serviceSafePointLock is a lock for UpdateServiceGCSafePoint
+	serviceSafePointLock syncutil.Mutex
+
 	// hot region history info storeage
 	hotRegionStorage *storage.HotRegionStorage
 	// Store as map[string]*grpc.ClientConn
@@ -163,7 +157,6 @@ type Server struct {
 	// the corresponding forwarding TSO channel.
 	tsoDispatcher sync.Map /* Store as map[string]chan *tsoRequest */
 
-	serviceRateLimiter *ratelimit.Limiter
 	serviceLabels      map[string][]apiutil.AccessPath
 	apiServiceLabelMap map[apiutil.AccessPath]string
 
@@ -265,9 +258,7 @@ func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...Ha
 		audit.NewLocalLogBackend(true),
 		audit.NewPrometheusHistogramBackend(serviceAuditHistogram, false),
 	}
-	s.serviceRateLimiter = ratelimit.NewLimiter()
 	s.serviceAuditBackendLabels = make(map[string]*audit.BackendLabels)
-	s.serviceRateLimiter = ratelimit.NewLimiter()
 	s.serviceLabels = make(map[string][]apiutil.AccessPath)
 	s.apiServiceLabelMap = make(map[apiutil.AccessPath]string)
 
@@ -284,12 +275,18 @@ func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...Ha
 		etcdCfg.UserHandlers = userHandlers
 	}
 	etcdCfg.ServiceRegister = func(gs *grpc.Server) {
-		grpcServer := &GrpcServer{Server: s}
-		pdpb.RegisterPDServer(gs, grpcServer)
-		keyspacepb.RegisterKeyspaceServer(gs, &KeyspaceServer{GrpcServer: grpcServer})
+		pdpb.RegisterPDServer(gs, &GrpcServer{Server: s})
 		diagnosticspb.RegisterDiagnosticsServer(gs, s)
 	}
 	s.etcdCfg = etcdCfg
+	if EnableZap {
+		// The etcd master version has removed embed.Config.SetupLogging.
+		// Now logger is set up automatically based on embed.Config.Logger,
+		// Use zap logger in the test, otherwise will panic.
+		// Reference: https://go.etcd.io/etcd/blob/master/embed/config_logging.go#L45
+		s.etcdCfg.Logger = "zap"
+		s.etcdCfg.LogOutputs = []string{"stdout"}
+	}
 	s.lg = cfg.GetZapLogger()
 	s.logProps = cfg.GetZapLogProperties()
 	return s, nil
@@ -392,24 +389,12 @@ func (s *Server) startServer(ctx context.Context) error {
 	s.member.SetMemberDeployPath(s.member.ID())
 	s.member.SetMemberBinaryVersion(s.member.ID(), versioninfo.PDReleaseVersion)
 	s.member.SetMemberGitHash(s.member.ID(), versioninfo.PDGitHash)
-	s.idAllocator = id.NewAllocator(&id.AllocatorParams{
-		Client:    s.client,
-		RootPath:  s.rootPath,
-		AllocPath: idAllocPath,
-		Label:     idAllocLabel,
-		Member:    s.member.MemberValue(),
-	})
+	s.idAllocator = id.NewAllocator(s.client, s.rootPath, s.member.MemberValue())
 	s.tsoAllocatorManager = tso.NewAllocatorManager(
 		s.member, s.rootPath, s.cfg,
 		func() time.Duration { return s.persistOptions.GetMaxResetTSGap() })
 	// Set up the Global TSO Allocator here, it will be initialized once the PD campaigns leader successfully.
 	s.tsoAllocatorManager.SetUpAllocator(ctx, tso.GlobalDCLocation, s.member.GetLeadership())
-	// When disabled the Local TSO, we should clean up the Local TSO Allocator's meta info written in etcd if it exists.
-	if !s.cfg.EnableLocalTSO {
-		if err = s.tsoAllocatorManager.CleanUpDCLocation(); err != nil {
-			return err
-		}
-	}
 	if zone, exist := s.cfg.Labels[config.ZoneLabel]; exist && zone != "" && s.cfg.EnableLocalTSO {
 		if err = s.tsoAllocatorManager.SetLocalTSOConfig(zone); err != nil {
 			return err
@@ -425,19 +410,6 @@ func (s *Server) startServer(ctx context.Context) error {
 	}
 	defaultStorage := storage.NewStorageWithEtcdBackend(s.client, s.rootPath)
 	s.storage = storage.NewCoreStorage(defaultStorage, regionStorage)
-	s.gcSafePointManager = gc.NewSafePointManager(s.storage)
-	keyspaceIDAllocator := id.NewAllocator(&id.AllocatorParams{
-		Client:    s.client,
-		RootPath:  s.rootPath,
-		AllocPath: endpoint.KeyspaceIDAlloc(),
-		Label:     keyspace.AllocLabel,
-		Member:    s.member.MemberValue(),
-		Step:      keyspace.AllocStep,
-	})
-	s.keyspaceManager, err = keyspace.NewKeyspaceManager(s.storage, keyspaceIDAllocator)
-	if err != nil {
-		return err
-	}
 	s.basicCluster = core.NewBasicCluster()
 	s.cluster = cluster.NewRaftCluster(ctx, s.clusterID, syncer.NewRegionSyncer(s), s.client, s.httpClient)
 	s.hbStreams = hbstream.NewHeartbeatStreams(ctx, s.clusterID, s.cluster)
@@ -736,7 +708,7 @@ func (s *Server) GetClientScheme() string {
 
 // GetMemberInfo returns the server member information.
 func (s *Server) GetMemberInfo() *pdpb.Member {
-	return typeutil.DeepClone(s.member.Member(), core.MemberFactory)
+	return proto.Clone(s.member.Member()).(*pdpb.Member)
 }
 
 // GetHandler returns the handler for API.
@@ -815,11 +787,6 @@ func (s *Server) GetTSOAllocatorManager() *tso.AllocatorManager {
 	return s.tsoAllocatorManager
 }
 
-// GetKeyspaceManager returns the keyspace manager of server.
-func (s *Server) GetKeyspaceManager() *keyspace.Manager {
-	return s.keyspaceManager
-}
-
 // Name returns the unique etcd Name for this server in etcd cluster.
 func (s *Server) Name() string {
 	return s.cfg.Name
@@ -847,14 +814,8 @@ func (s *Server) GetMembers() ([]*pdpb.Member, error) {
 // GetServiceMiddlewareConfig gets the service middleware config information.
 func (s *Server) GetServiceMiddlewareConfig() *config.ServiceMiddlewareConfig {
 	cfg := s.serviceMiddlewareCfg.Clone()
-	cfg.AuditConfig = *s.serviceMiddlewarePersistOptions.GetAuditConfig().Clone()
-	cfg.RateLimitConfig = *s.serviceMiddlewarePersistOptions.GetRateLimitConfig().Clone()
+	cfg.AuditConfig = *s.serviceMiddlewarePersistOptions.GetAuditConfig()
 	return cfg
-}
-
-// SetEnableLocalTSO sets enable-local-tso flag of Server. This function only for test.
-func (s *Server) SetEnableLocalTSO(enableLocalTSO bool) {
-	s.cfg.EnableLocalTSO = enableLocalTSO
 }
 
 // GetConfig gets the config information.
@@ -1022,55 +983,6 @@ func (s *Server) SetAuditConfig(cfg config.AuditConfig) error {
 		return err
 	}
 	log.Info("Audit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
-	return nil
-}
-
-// UpdateRateLimitConfig is used to update rate-limit config which will reserve old limiter-config
-func (s *Server) UpdateRateLimitConfig(key, label string, value ratelimit.DimensionConfig) error {
-	cfg := s.GetServiceMiddlewareConfig()
-	rateLimitCfg := make(map[string]ratelimit.DimensionConfig)
-	for label, item := range cfg.LimiterConfig {
-		rateLimitCfg[label] = item
-	}
-	rateLimitCfg[label] = value
-	return s.UpdateRateLimit(&cfg.RateLimitConfig, key, &rateLimitCfg)
-}
-
-// UpdateRateLimit is used to update rate-limit config which will overwrite limiter-config
-func (s *Server) UpdateRateLimit(cfg *config.RateLimitConfig, key string, value interface{}) error {
-	updated, found, err := jsonutil.AddKeyValue(cfg, key, value)
-	if err != nil {
-		return err
-	}
-
-	if !found {
-		return errors.Errorf("config item %s not found", key)
-	}
-
-	if updated {
-		err = s.SetRateLimitConfig(*cfg)
-	}
-	return err
-}
-
-// GetRateLimitConfig gets the rate limit config information.
-func (s *Server) GetRateLimitConfig() *config.RateLimitConfig {
-	return s.serviceMiddlewarePersistOptions.GetRateLimitConfig().Clone()
-}
-
-// SetRateLimitConfig sets the rate limit config.
-func (s *Server) SetRateLimitConfig(cfg config.RateLimitConfig) error {
-	old := s.serviceMiddlewarePersistOptions.GetRateLimitConfig()
-	s.serviceMiddlewarePersistOptions.SetRateLimitConfig(&cfg)
-	if err := s.serviceMiddlewarePersistOptions.Persist(s.storage); err != nil {
-		s.serviceMiddlewarePersistOptions.SetRateLimitConfig(old)
-		log.Error("failed to update Rate Limit config",
-			zap.Reflect("new", cfg),
-			zap.Reflect("old", old),
-			errs.ZapError(err))
-		return err
-	}
-	log.Info("Rate Limit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
 	return nil
 }
 
@@ -1291,21 +1203,6 @@ func (s *Server) SetServiceAuditBackendLabels(serviceLabel string, labels []stri
 	s.serviceAuditBackendLabels[serviceLabel] = &audit.BackendLabels{Labels: labels}
 }
 
-// GetServiceRateLimiter is used to get rate limiter
-func (s *Server) GetServiceRateLimiter() *ratelimit.Limiter {
-	return s.serviceRateLimiter
-}
-
-// IsInRateLimitAllowList returns whethis given service label is in allow lost
-func (s *Server) IsInRateLimitAllowList(serviceLabel string) bool {
-	return s.serviceRateLimiter.IsInAllowList(serviceLabel)
-}
-
-// UpdateServiceRateLimiter is used to update RateLimiter
-func (s *Server) UpdateServiceRateLimiter(serviceLabel string, opts ...ratelimit.Option) ratelimit.UpdateStatus {
-	return s.serviceRateLimiter.Update(serviceLabel, opts...)
-}
-
 // GetClusterStatus gets cluster status.
 func (s *Server) GetClusterStatus() (*cluster.Status, error) {
 	s.cluster.Lock()
@@ -1451,23 +1348,23 @@ func (s *Server) campaignLeader() {
 	})
 
 	// maintain the PD leadership, after this, TSO can be service.
-	s.member.KeepLeader(ctx)
+	go s.member.KeepLeader(ctx)
 	log.Info("campaign pd leader ok", zap.String("campaign-pd-leader-name", s.Name()))
 
-	allocator, err := s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
+	alllocator, err := s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
 	if err != nil {
 		log.Error("failed to get the global TSO allocator", errs.ZapError(err))
 		return
 	}
 	log.Info("initializing the global TSO allocator")
-	if err := allocator.Initialize(0); err != nil {
+	if err := alllocator.Initialize(0); err != nil {
 		log.Error("failed to initialize the global TSO allocator", errs.ZapError(err))
 		return
 	}
 	defer func() {
 		s.tsoAllocatorManager.ResetAllocatorGroup(tso.GlobalDCLocation)
 		failpoint.Inject("updateAfterResetTSO", func() {
-			if err = allocator.UpdateTSO(); err != nil {
+			if err = alllocator.UpdateTSO(); err != nil {
 				panic(err)
 			}
 		})
@@ -1561,25 +1458,21 @@ func (s *Server) reloadConfigFromKV() error {
 	if err != nil {
 		return err
 	}
-	s.loadRateLimitConfig()
-	useRegionStorage := s.persistOptions.IsUseRegionStorage()
-	regionStorage := storage.TrySwitchRegionStorage(s.storage, useRegionStorage)
-	if regionStorage != nil {
-		if useRegionStorage {
-			log.Info("server enable region storage")
-		} else {
-			log.Info("server disable region storage")
-		}
+	switchableStorage, ok := s.storage.(interface {
+		SwitchToRegionStorage()
+		SwitchToDefaultStorage()
+	})
+	if !ok {
+		return nil
+	}
+	if s.persistOptions.IsUseRegionStorage() {
+		switchableStorage.SwitchToRegionStorage()
+		log.Info("server enable region storage")
+	} else {
+		switchableStorage.SwitchToDefaultStorage()
+		log.Info("server disable region storage")
 	}
 	return nil
-}
-
-func (s *Server) loadRateLimitConfig() {
-	cfg := s.serviceMiddlewarePersistOptions.GetRateLimitConfig().LimiterConfig
-	for key := range cfg {
-		value := cfg[key]
-		s.serviceRateLimiter.Update(key, ratelimit.UpdateDimensionConfig(&value))
-	}
 }
 
 // ReplicateFileToMember is used to synchronize state to a member.
@@ -1637,80 +1530,4 @@ func (s *Server) IsTTLConfigExist(key string) bool {
 		}
 	}
 	return false
-}
-
-// MarkSnapshotRecovering mark pd that we're recovering
-// tikv will get this state during BR EBS restore.
-// we write this info into etcd for simplicity, the key only stays inside etcd temporary
-// during BR EBS restore in which period the cluster is not able to serve request.
-// and is deleted after BR EBS restore is done.
-func (s *Server) MarkSnapshotRecovering() error {
-	log.Info("mark snapshot recovering")
-	markPath := endpoint.AppendToRootPath(s.rootPath, recoveringMarkPath)
-	// the value doesn't matter, set to a static string
-	_, err := kv.NewSlowLogTxn(s.client).
-		If(clientv3.Compare(clientv3.CreateRevision(markPath), "=", 0)).
-		Then(clientv3.OpPut(markPath, "on")).
-		Commit()
-	// if other client already marked, return success too
-	return err
-}
-
-// IsSnapshotRecovering check whether recovering-mark marked
-func (s *Server) IsSnapshotRecovering(ctx context.Context) (bool, error) {
-	markPath := endpoint.AppendToRootPath(s.rootPath, recoveringMarkPath)
-	resp, err := s.client.Get(ctx, markPath)
-	if err != nil {
-		return false, err
-	}
-	return len(resp.Kvs) > 0, nil
-}
-
-// UnmarkSnapshotRecovering unmark recovering mark
-func (s *Server) UnmarkSnapshotRecovering(ctx context.Context) error {
-	log.Info("unmark snapshot recovering")
-	markPath := endpoint.AppendToRootPath(s.rootPath, recoveringMarkPath)
-	_, err := s.client.Delete(ctx, markPath)
-	// if other client already unmarked, return success too
-	return err
-}
-
-// RecoverAllocID recover alloc id. set current base id to input id
-func (s *Server) RecoverAllocID(ctx context.Context, id uint64) error {
-	return s.idAllocator.SetBase(id)
-}
-
-// GetGlobalTS returns global tso.
-func (s *Server) GetGlobalTS() (uint64, error) {
-	ts, err := s.tsoAllocatorManager.GetGlobalTSO()
-	if err != nil {
-		return 0, err
-	}
-	return tsoutil.GenerateTS(ts), nil
-}
-
-// GetExternalTS returns external timestamp.
-func (s *Server) GetExternalTS() uint64 {
-	return s.GetRaftCluster().GetExternalTS()
-}
-
-// SetExternalTS returns external timestamp.
-func (s *Server) SetExternalTS(externalTS uint64) error {
-	globalTS, err := s.GetGlobalTS()
-	if err != nil {
-		return err
-	}
-	if tsoutil.CompareTimestampUint64(externalTS, globalTS) == 1 {
-		desc := "the external timestamp should not be larger than global ts"
-		log.Error(desc, zap.Uint64("request timestamp", externalTS), zap.Uint64("global ts", globalTS))
-		return errors.New(desc)
-	}
-	currentExternalTS := s.GetRaftCluster().GetExternalTS()
-	if tsoutil.CompareTimestampUint64(externalTS, currentExternalTS) != 1 {
-		desc := "the external timestamp should be larger than now"
-		log.Error(desc, zap.Uint64("request timestamp", externalTS), zap.Uint64("current external timestamp", currentExternalTS))
-		return errors.New(desc)
-	}
-	s.GetRaftCluster().SetExternalTS(externalTS)
-	return nil
 }

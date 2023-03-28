@@ -20,15 +20,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// DimensionConfig is the limit dimension config of one label
-type DimensionConfig struct {
-	// qps conifg
-	QPS      float64
-	QPSBurst int
-	// concurrency config
-	ConcurrencyLimit uint64
-}
-
 // Limiter is a controller for the request rate.
 type Limiter struct {
 	qpsLimiter         sync.Map
@@ -39,9 +30,7 @@ type Limiter struct {
 
 // NewLimiter returns a global limiter which can be updated in the later.
 func NewLimiter() *Limiter {
-	return &Limiter{
-		labelAllowList: make(map[string]struct{}),
-	}
+	return &Limiter{labelAllowList: make(map[string]struct{})}
 }
 
 // Allow is used to check whether it has enough token.
@@ -76,12 +65,10 @@ func (l *Limiter) Release(label string) {
 }
 
 // Update is used to update Ratelimiter with Options
-func (l *Limiter) Update(label string, opts ...Option) UpdateStatus {
-	var status UpdateStatus
+func (l *Limiter) Update(label string, opts ...Option) {
 	for _, opt := range opts {
-		status |= opt(label, l)
+		opt(label, l)
 	}
-	return status
 }
 
 // GetQPSLimiterStatus returns the status of a given label's QPS limiter.
@@ -93,8 +80,8 @@ func (l *Limiter) GetQPSLimiterStatus(label string) (limit rate.Limit, burst int
 	return 0, 0
 }
 
-// QPSUnlimit deletes QPS limiter of the given label
-func (l *Limiter) QPSUnlimit(label string) {
+// DeleteQPSLimiter deletes QPS limiter of given label
+func (l *Limiter) DeleteQPSLimiter(label string) {
 	l.qpsLimiter.Delete(label)
 }
 
@@ -107,8 +94,8 @@ func (l *Limiter) GetConcurrencyLimiterStatus(label string) (limit uint64, curre
 	return 0, 0
 }
 
-// ConcurrencyUnlimit deletes concurrency limiter of the given label
-func (l *Limiter) ConcurrencyUnlimit(label string) {
+// DeleteConcurrencyLimiter deletes concurrency limiter of given label
+func (l *Limiter) DeleteConcurrencyLimiter(label string) {
 	l.concurrencyLimiter.Delete(label)
 }
 

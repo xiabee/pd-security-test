@@ -26,8 +26,6 @@ import (
 	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/cluster"
-	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/unrolled/render"
 )
@@ -119,7 +117,7 @@ func (h *ruleHandler) GetRuleByGroup(w http.ResponseWriter, r *http.Request) {
 
 // @Tags     rule
 // @Summary  List all rules of cluster by region.
-// @Param    id  path  integer  true  "Region Id"
+// @Param    region  path  string  true  "The name of region"
 // @Produce  json
 // @Success  200  {array}   placement.Rule
 // @Failure  400  {string}  string  "The input is invalid."
@@ -127,50 +125,24 @@ func (h *ruleHandler) GetRuleByGroup(w http.ResponseWriter, r *http.Request) {
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
 // @Router   /config/rules/region/{region} [get]
 func (h *ruleHandler) GetRulesByRegion(w http.ResponseWriter, r *http.Request) {
-	cluster, region := h.preCheckForRegionAndRule(w, r)
-	if cluster == nil || region == nil {
-		return
-	}
-	rules := cluster.GetRuleManager().GetRulesForApplyRegion(region)
-	h.rd.JSON(w, http.StatusOK, rules)
-}
-
-// @Tags     rule
-// @Summary  List rules and matched peers related to the given region.
-// @Param    id  path  integer  true  "Region Id"
-// @Produce  json
-// @Success  200  {object}  placement.RegionFit
-// @Failure  400  {string}  string  "The input is invalid."
-// @Failure  404  {string}  string  "The region does not exist."
-// @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Router   /config/rules/region/{region}/detail [get]
-func (h *ruleHandler) CheckRegionPlacementRule(w http.ResponseWriter, r *http.Request) {
-	cluster, region := h.preCheckForRegionAndRule(w, r)
-	if cluster == nil || region == nil {
-		return
-	}
-	regionFit := cluster.GetRuleManager().FitRegion(cluster, region)
-	h.rd.JSON(w, http.StatusOK, regionFit)
-}
-
-func (h *ruleHandler) preCheckForRegionAndRule(w http.ResponseWriter, r *http.Request) (*cluster.RaftCluster, *core.RegionInfo) {
 	cluster := getCluster(r)
 	if !cluster.GetOpts().IsPlacementRulesEnabled() {
 		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
-		return cluster, nil
+		return
 	}
 	regionStr := mux.Vars(r)["region"]
 	regionID, err := strconv.ParseUint(regionStr, 10, 64)
 	if err != nil {
 		h.rd.JSON(w, http.StatusBadRequest, "invalid region id")
-		return cluster, nil
+		return
 	}
 	region := cluster.GetRegion(regionID)
 	if region == nil {
 		h.rd.JSON(w, http.StatusNotFound, server.ErrRegionNotFound(regionID).Error())
-		return cluster, nil
+		return
 	}
-	return cluster, region
+	rules := cluster.GetRuleManager().GetRulesForApplyRegion(region)
+	h.rd.JSON(w, http.StatusOK, rules)
 }
 
 // @Tags     rule

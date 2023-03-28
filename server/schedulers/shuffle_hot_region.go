@@ -15,7 +15,9 @@
 package schedulers
 
 import (
+	"math/rand"
 	"strconv"
+	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
@@ -24,7 +26,6 @@ import (
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/plan"
 	"github.com/tikv/pd/server/statistics"
 	"github.com/tikv/pd/server/storage/endpoint"
 	"go.uber.org/zap"
@@ -76,16 +77,24 @@ type shuffleHotRegionSchedulerConfig struct {
 // to a random store, and then transfer the leader to
 // the hot peer.
 type shuffleHotRegionScheduler struct {
-	*baseHotScheduler
-	conf *shuffleHotRegionSchedulerConfig
+	*BaseScheduler
+	stLoadInfos [resourceTypeLen]map[uint64]*statistics.StoreLoadDetail
+	r           *rand.Rand
+	conf        *shuffleHotRegionSchedulerConfig
+	types       []statistics.RWType
 }
 
 // newShuffleHotRegionScheduler creates an admin scheduler that random balance hot regions
 func newShuffleHotRegionScheduler(opController *schedule.OperatorController, conf *shuffleHotRegionSchedulerConfig) schedule.Scheduler {
-	base := newBaseHotScheduler(opController)
+	base := NewBaseScheduler(opController)
 	ret := &shuffleHotRegionScheduler{
-		baseHotScheduler: base,
-		conf:             conf,
+		BaseScheduler: base,
+		conf:          conf,
+		types:         []statistics.RWType{statistics.Read, statistics.Write},
+		r:             rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+	for ty := resourceType(0); ty < resourceTypeLen; ty++ {
+		ret.stLoadInfos[ty] = map[uint64]*statistics.StoreLoadDetail{}
 	}
 	return ret
 }
@@ -118,12 +127,36 @@ func (s *shuffleHotRegionScheduler) IsScheduleAllowed(cluster schedule.Cluster) 
 	return hotRegionAllowed && regionAllowed && leaderAllowed
 }
 
-func (s *shuffleHotRegionScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (s *shuffleHotRegionScheduler) Schedule(cluster schedule.Cluster) []*operator.Operator {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
-	rw := s.randomRWType()
-	s.prepareForBalance(rw, cluster)
-	operators := s.randomSchedule(cluster, s.stLoadInfos[buildResourceType(rw, core.LeaderKind)])
-	return operators, nil
+	i := s.r.Int() % len(s.types)
+	return s.dispatch(s.types[i], cluster)
+}
+
+func (s *shuffleHotRegionScheduler) dispatch(typ statistics.RWType, cluster schedule.Cluster) []*operator.Operator {
+	storeInfos := statistics.SummaryStoreInfos(cluster.GetStores())
+	storesLoads := cluster.GetStoresLoads()
+	isTraceRegionFlow := cluster.GetOpts().IsTraceRegionFlow()
+
+	switch typ {
+	case statistics.Read:
+		s.stLoadInfos[readLeader] = statistics.SummaryStoresLoad(
+			storeInfos,
+			storesLoads,
+			cluster.RegionReadStats(),
+			isTraceRegionFlow,
+			statistics.Read, core.LeaderKind)
+		return s.randomSchedule(cluster, s.stLoadInfos[readLeader])
+	case statistics.Write:
+		s.stLoadInfos[writeLeader] = statistics.SummaryStoresLoad(
+			storeInfos,
+			storesLoads,
+			cluster.RegionWriteStats(),
+			isTraceRegionFlow,
+			statistics.Write, core.LeaderKind)
+		return s.randomSchedule(cluster, s.stLoadInfos[writeLeader])
+	}
+	return nil
 }
 
 func (s *shuffleHotRegionScheduler) randomSchedule(cluster schedule.Cluster, loadDetail map[uint64]*statistics.StoreLoadDetail) []*operator.Operator {
@@ -146,8 +179,8 @@ func (s *shuffleHotRegionScheduler) randomSchedule(cluster schedule.Cluster, loa
 
 		filters := []filter.Filter{
 			&filter.StoreStateFilter{ActionScope: s.GetName(), MoveRegion: true},
-			filter.NewExcludedFilter(s.GetName(), srcRegion.GetStoreIDs(), srcRegion.GetStoreIDs()),
-			filter.NewPlacementSafeguard(s.GetName(), cluster.GetOpts(), cluster.GetBasicCluster(), cluster.GetRuleManager(), srcRegion, srcStore, nil),
+			filter.NewExcludedFilter(s.GetName(), srcRegion.GetStoreIds(), srcRegion.GetStoreIds()),
+			filter.NewPlacementSafeguard(s.GetName(), cluster.GetOpts(), cluster.GetBasicCluster(), cluster.GetRuleManager(), srcRegion, srcStore),
 		}
 		stores := cluster.GetStores()
 		destStoreIDs := make([]uint64, 0, len(stores))
@@ -175,7 +208,6 @@ func (s *shuffleHotRegionScheduler) randomSchedule(cluster schedule.Cluster, loa
 			log.Debug("fail to create move leader operator", errs.ZapError(err))
 			return nil
 		}
-		op.SetPriorityLevel(core.Low)
 		op.Counters = append(op.Counters, schedulerCounter.WithLabelValues(s.GetName(), "new-operator"))
 		return []*operator.Operator{op}
 	}

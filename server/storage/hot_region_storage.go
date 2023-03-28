@@ -144,13 +144,13 @@ func NewHotRegionsStorage(
 	if err != nil {
 		return nil, err
 	}
-	hotRegionInfoCtx, hotRegionInfoCancel := context.WithCancel(ctx)
+	hotRegionInfoCtx, hotRegionInfoCancle := context.WithCancel(ctx)
 	h := HotRegionStorage{
 		LevelDBKV:               levelDB,
 		ekm:                     ekm,
 		batchHotInfo:            make(map[string]*HistoryHotRegion),
 		hotRegionInfoCtx:        hotRegionInfoCtx,
-		hotRegionInfoCancel:     hotRegionInfoCancel,
+		hotRegionInfoCancel:     hotRegionInfoCancle,
 		hotRegionStorageHandler: hotRegionStorageHandler,
 		curReservedDays:         hotRegionStorageHandler.GetHotRegionsReservedDays(),
 		curInterval:             hotRegionStorageHandler.GetHotRegionsWriteInterval(),

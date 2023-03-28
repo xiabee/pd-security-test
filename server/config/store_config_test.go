@@ -18,15 +18,15 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"net/http"
-	"testing"
 
-	"github.com/docker/go-units"
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestTiKVConfig(t *testing.T) {
-	re := require.New(t)
-	m := NewStoreConfigManager(nil)
+var _ = Suite(&testTiKVConfigSuite{})
+
+type testTiKVConfigSuite struct{}
+
+func (t *testTiKVConfigSuite) TestTiKVConfig(c *C) {
 	// case1: big region.
 	{
 		body := `{ "coprocessor": {
@@ -40,38 +40,32 @@ func TestTiKVConfig(t *testing.T) {
         "perf-level": 2
     	}}`
 		var config StoreConfig
-		re.NoError(json.Unmarshal([]byte(body), &config))
-		m.update(&config)
-		re.Equal(uint64(144000000), config.GetRegionMaxKeys())
-		re.Equal(uint64(96000000), config.GetRegionSplitKeys())
-		re.Equal(15*units.GiB/units.MiB, int(config.GetRegionMaxSize()))
-		re.Equal(uint64(10*units.GiB/units.MiB), config.GetRegionSplitSize())
+		c.Assert(json.Unmarshal([]byte(body), &config), IsNil)
+
+		c.Assert(config.GetRegionMaxKeys(), Equals, uint64(144000000))
+		c.Assert(config.GetRegionSplitKeys(), Equals, uint64(96000000))
+		c.Assert(int(config.GetRegionMaxSize()), Equals, 15*1024)
+		c.Assert(config.GetRegionSplitSize(), Equals, uint64(10*1024))
 	}
 	//case2: empty config.
 	{
 		body := `{}`
 		var config StoreConfig
-		re.NoError(json.Unmarshal([]byte(body), &config))
+		c.Assert(json.Unmarshal([]byte(body), &config), IsNil)
 
-		re.Equal(uint64(1440000), config.GetRegionMaxKeys())
-		re.Equal(uint64(960000), config.GetRegionSplitKeys())
-		re.Equal(144, int(config.GetRegionMaxSize()))
-		re.Equal(uint64(96), config.GetRegionSplitSize())
+		c.Assert(config.GetRegionMaxKeys(), Equals, uint64(1440000))
+		c.Assert(config.GetRegionSplitKeys(), Equals, uint64(960000))
+		c.Assert(int(config.GetRegionMaxSize()), Equals, 144)
+		c.Assert(config.GetRegionSplitSize(), Equals, uint64(96))
 	}
 }
 
-func TestUpdateConfig(t *testing.T) {
-	re := require.New(t)
+func (t *testTiKVConfigSuite) TestUpdateConfig(c *C) {
 	manager := NewTestStoreConfigManager([]string{"tidb.com"})
 	manager.ObserveConfig("tikv.com")
-	re.Equal(uint64(144), manager.GetStoreConfig().GetRegionMaxSize())
+	c.Assert(manager.GetStoreConfig().GetRegionMaxSize(), Equals, uint64(144))
 	manager.ObserveConfig("tidb.com")
-	re.Equal(uint64(10), manager.GetStoreConfig().GetRegionMaxSize())
-
-	// case2: the config should not update if config is same expect some ignore field.
-	c, err := manager.source.GetConfig("tidb.com")
-	re.NoError(err)
-	re.True(manager.GetStoreConfig().Equal(c))
+	c.Assert(manager.GetStoreConfig().GetRegionMaxSize(), Equals, uint64(10))
 
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -80,12 +74,10 @@ func TestUpdateConfig(t *testing.T) {
 		},
 	}
 	manager = NewStoreConfigManager(client)
-	re.Equal("http", manager.source.(*TiKVConfigSource).schema)
+	c.Assert(manager.source.(*TiKVConfigSource).schema, Equals, "http")
 }
 
-func TestParseConfig(t *testing.T) {
-	re := require.New(t)
-	m := NewStoreConfigManager(nil)
+func (t *testTiKVConfigSuite) TestParseConfig(c *C) {
 	body := `
 {
 "coprocessor":{
@@ -105,13 +97,11 @@ func TestParseConfig(t *testing.T) {
 `
 
 	var config StoreConfig
-	re.NoError(json.Unmarshal([]byte(body), &config))
-	m.update(&config)
-	re.Equal(uint64(96), config.GetRegionBucketSize())
+	c.Assert(json.Unmarshal([]byte(body), &config), IsNil)
+	c.Assert(config.GetRegionBucketSize(), Equals, uint64(96))
 }
 
-func TestMergeCheck(t *testing.T) {
-	re := require.New(t)
+func (t *testTiKVConfigSuite) TestMergeCheck(c *C) {
 	testdata := []struct {
 		size      uint64
 		mergeSize uint64
@@ -150,11 +140,11 @@ func TestMergeCheck(t *testing.T) {
 	config := &StoreConfig{}
 	for _, v := range testdata {
 		if v.pass {
-			re.NoError(config.CheckRegionSize(v.size, v.mergeSize))
-			re.NoError(config.CheckRegionKeys(v.keys, v.mergeKeys))
+			c.Assert(config.CheckRegionSize(v.size, v.mergeSize), IsNil)
+			c.Assert(config.CheckRegionKeys(v.keys, v.mergeKeys), IsNil)
 		} else {
-			re.Error(config.CheckRegionSize(v.size, v.mergeSize))
-			re.Error(config.CheckRegionKeys(v.keys, v.mergeKeys))
+			c.Assert(config.CheckRegionSize(v.size, v.mergeSize), NotNil)
+			c.Assert(config.CheckRegionKeys(v.keys, v.mergeKeys), NotNil)
 		}
 	}
 }

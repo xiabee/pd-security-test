@@ -24,26 +24,32 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/requestutil"
 )
 
-func TestLabelMatcher(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	matcher := &LabelMatcher{"testSuccess"}
-	labels1 := &BackendLabels{Labels: []string{"testFail", "testSuccess"}}
-	re.True(matcher.Match(labels1))
-	labels2 := &BackendLabels{Labels: []string{"testFail"}}
-	re.False(matcher.Match(labels2))
+func Test(t *testing.T) {
+	TestingT(t)
 }
 
-func TestPrometheusHistogramBackend(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+var _ = Suite(&testAuditSuite{})
+
+type testAuditSuite struct {
+}
+
+func (s *testAuditSuite) TestLabelMatcher(c *C) {
+	matcher := &LabelMatcher{"testSuccess"}
+	labels1 := &BackendLabels{Labels: []string{"testFail", "testSuccess"}}
+	c.Assert(matcher.Match(labels1), Equals, true)
+
+	labels2 := &BackendLabels{Labels: []string{"testFail"}}
+	c.Assert(matcher.Match(labels2), Equals, false)
+}
+
+func (s *testAuditSuite) TestPrometheusHistogramBackend(c *C) {
 	serviceAuditHistogramTest := prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "pd",
@@ -51,7 +57,7 @@ func TestPrometheusHistogramBackend(t *testing.T) {
 			Name:      "audit_handling_seconds_test",
 			Help:      "PD server service handling audit",
 			Buckets:   prometheus.DefBuckets,
-		}, []string{"service", "method", "component", "ip"})
+		}, []string{"service", "method", "component"})
 
 	prometheus.MustRegister(serviceAuditHistogramTest)
 
@@ -59,61 +65,55 @@ func TestPrometheusHistogramBackend(t *testing.T) {
 	defer ts.Close()
 
 	backend := NewPrometheusHistogramBackend(serviceAuditHistogramTest, true)
-	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:2379/test?test=test", nil)
+	req, _ := http.NewRequest("GET", "http://127.0.0.1:2379/test?test=test", nil)
 	info := requestutil.GetRequestInfo(req)
 	info.ServiceLabel = "test"
 	info.Component = "user1"
-	info.IP = "localhost"
 	req = req.WithContext(requestutil.WithRequestInfo(req.Context(), info))
-	re.False(backend.ProcessHTTPRequest(req))
+	c.Assert(backend.ProcessHTTPRequest(req), Equals, false)
 
 	endTime := time.Now().Unix() + 20
 	req = req.WithContext(requestutil.WithEndTime(req.Context(), endTime))
 
-	re.True(backend.ProcessHTTPRequest(req))
-	re.True(backend.ProcessHTTPRequest(req))
+	c.Assert(backend.ProcessHTTPRequest(req), Equals, true)
+	c.Assert(backend.ProcessHTTPRequest(req), Equals, true)
 
 	info.Component = "user2"
 	req = req.WithContext(requestutil.WithRequestInfo(req.Context(), info))
-	re.True(backend.ProcessHTTPRequest(req))
+	c.Assert(backend.ProcessHTTPRequest(req), Equals, true)
 
 	// For test, sleep time needs longer than the push interval
-	time.Sleep(time.Second)
-	req, _ = http.NewRequest(http.MethodGet, ts.URL, nil)
+	time.Sleep(1 * time.Second)
+	req, _ = http.NewRequest("GET", ts.URL, nil)
 	resp, err := http.DefaultClient.Do(req)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	defer resp.Body.Close()
 	content, _ := io.ReadAll(resp.Body)
 	output := string(content)
-	re.Contains(output, "pd_service_audit_handling_seconds_test_count{component=\"user1\",ip=\"localhost\",method=\"HTTP\",service=\"test\"} 2")
-	re.Contains(output, "pd_service_audit_handling_seconds_test_count{component=\"user2\",ip=\"localhost\",method=\"HTTP\",service=\"test\"} 1")
+	c.Assert(strings.Contains(output, "pd_service_audit_handling_seconds_test_count{component=\"user1\",method=\"HTTP\",service=\"test\"} 2"), Equals, true)
+	c.Assert(strings.Contains(output, "pd_service_audit_handling_seconds_test_count{component=\"user2\",method=\"HTTP\",service=\"test\"} 1"), Equals, true)
 }
 
-func TestLocalLogBackendUsingFile(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testAuditSuite) TestLocalLogBackendUsingFile(c *C) {
 	backend := NewLocalLogBackend(true)
 	fname := initLog()
 	defer os.Remove(fname)
-	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:2379/test?test=test", strings.NewReader("testBody"))
-	re.False(backend.ProcessHTTPRequest(req))
+	req, _ := http.NewRequest("GET", "http://127.0.0.1:2379/test?test=test", strings.NewReader("testBody"))
+	c.Assert(backend.ProcessHTTPRequest(req), Equals, false)
 	info := requestutil.GetRequestInfo(req)
 	req = req.WithContext(requestutil.WithRequestInfo(req.Context(), info))
-	re.True(backend.ProcessHTTPRequest(req))
+	c.Assert(backend.ProcessHTTPRequest(req), Equals, true)
 	b, _ := os.ReadFile(fname)
 	output := strings.SplitN(string(b), "]", 4)
-	re.Equal(
-		fmt.Sprintf(" [\"Audit Log\"] [service-info=\"{ServiceLabel:, Method:HTTP/1.1/GET:/test, Component:anonymous, IP:, "+
-			"StartTime:%s, URLParam:{\\\"test\\\":[\\\"test\\\"]}, BodyParam:testBody}\"]\n",
-			time.Unix(info.StartTimeStamp, 0).String()),
-		output[3],
-	)
+	c.Assert(output[3], Equals, fmt.Sprintf(" [\"Audit Log\"] [service-info=\"{ServiceLabel:, Method:HTTP/1.1/GET:/test, Component:anonymous, IP:, "+
+		"StartTime:%s, URLParam:{\\\"test\\\":[\\\"test\\\"]}, BodyParam:testBody}\"]\n",
+		time.Unix(info.StartTimeStamp, 0).String()))
 }
 
 func BenchmarkLocalLogAuditUsingTerminal(b *testing.B) {
 	b.StopTimer()
 	backend := NewLocalLogBackend(true)
-	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:2379/test?test=test", strings.NewReader("testBody"))
+	req, _ := http.NewRequest("GET", "http://127.0.0.1:2379/test?test=test", strings.NewReader("testBody"))
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
 		info := requestutil.GetRequestInfo(req)
@@ -127,7 +127,7 @@ func BenchmarkLocalLogAuditUsingFile(b *testing.B) {
 	backend := NewLocalLogBackend(true)
 	fname := initLog()
 	defer os.Remove(fname)
-	req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:2379/test?test=test", strings.NewReader("testBody"))
+	req, _ := http.NewRequest("GET", "http://127.0.0.1:2379/test?test=test", strings.NewReader("testBody"))
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
 		info := requestutil.GetRequestInfo(req)

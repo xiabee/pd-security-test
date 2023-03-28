@@ -38,17 +38,17 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
-	"os"
+	"io/ioutil"
 )
 
 // NewCert generates TLS cert by using the given cert,key and parse function.
 func NewCert(certfile, keyfile string, parseFunc func([]byte, []byte) (tls.Certificate, error)) (*tls.Certificate, error) {
-	cert, err := os.ReadFile(certfile)
+	cert, err := ioutil.ReadFile(certfile)
 	if err != nil {
 		return nil, err
 	}
 
-	key, err := os.ReadFile(keyfile)
+	key, err := ioutil.ReadFile(keyfile)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +69,7 @@ func NewCertPool(caFiles []string) (*x509.CertPool, error) {
 	certPool := x509.NewCertPool()
 
 	for _, caFile := range caFiles {
-		pemByte, err := os.ReadFile(caFile)
+		pemByte, err := ioutil.ReadFile(caFile)
 		if err != nil {
 			return nil, err
 		}

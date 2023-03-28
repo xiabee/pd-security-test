@@ -19,56 +19,67 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"testing"
+	"strings"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/assertutil"
 	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 )
 
-func TestGetVersion(t *testing.T) {
+var _ = Suite(&testVersionSuite{})
+
+func checkerWithNilAssert(c *C) *assertutil.Checker {
+	checker := assertutil.NewChecker(c.FailNow)
+	checker.IsNil = func(obtained interface{}) {
+		c.Assert(obtained, IsNil)
+	}
+	return checker
+}
+
+type testVersionSuite struct{}
+
+func (s *testVersionSuite) TestGetVersion(c *C) {
 	// TODO: enable it.
-	t.Skip("Temporary disable. See issue: https://github.com/tikv/pd/issues/1893")
-	re := require.New(t)
+	c.Skip("Temporary disable. See issue: https://github.com/tikv/pd/issues/1893")
 
 	fname := filepath.Join(os.TempDir(), "stdout")
 	old := os.Stdout
 	temp, _ := os.Create(fname)
 	os.Stdout = temp
 
-	cfg := server.NewTestSingleConfig(assertutil.CheckerWithNilAssert(re))
+	cfg := server.NewTestSingleConfig(checkerWithNilAssert(c))
 	reqCh := make(chan struct{})
 	go func() {
 		<-reqCh
 		time.Sleep(200 * time.Millisecond)
 		addr := cfg.ClientUrls + apiPrefix + "/api/v1/version"
 		resp, err := testDialClient.Get(addr)
-		re.NoError(err)
+		c.Assert(err, IsNil)
 		defer resp.Body.Close()
 		_, err = io.ReadAll(resp.Body)
-		re.NoError(err)
+		c.Assert(err, IsNil)
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan *server.Server)
 	go func(cfg *config.Config) {
 		s, err := server.CreateServer(ctx, cfg, NewHandler)
-		re.NoError(err)
-		re.NoError(failpoint.Enable("github.com/tikv/pd/server/memberNil", `return(true)`))
+		c.Assert(err, IsNil)
+		c.Assert(failpoint.Enable("github.com/tikv/pd/server/memberNil", `return(true)`), IsNil)
 		reqCh <- struct{}{}
 		err = s.Run()
-		re.NoError(err)
+		c.Assert(err, IsNil)
 		ch <- s
 	}(cfg)
 
 	svr := <-ch
 	close(ch)
 	out, _ := os.ReadFile(fname)
-	re.NotContains(string(out), "PANIC")
+	c.Assert(strings.Contains(string(out), "PANIC"), IsFalse)
 
 	// clean up
 	func() {
@@ -79,5 +90,5 @@ func TestGetVersion(t *testing.T) {
 		cancel()
 		testutil.CleanServer(cfg.DataDir)
 	}()
-	re.NoError(failpoint.Disable("github.com/tikv/pd/server/memberNil"))
+	c.Assert(failpoint.Disable("github.com/tikv/pd/server/memberNil"), IsNil)
 }

@@ -21,7 +21,6 @@ import (
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/plan"
 	"github.com/tikv/pd/server/storage/endpoint"
 	"go.uber.org/zap"
 )
@@ -170,14 +169,14 @@ func (s *evictSlowStoreScheduler) IsScheduleAllowed(cluster schedule.Cluster) bo
 	return true
 }
 
-func (s *evictSlowStoreScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (s *evictSlowStoreScheduler) Schedule(cluster schedule.Cluster) []*operator.Operator {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
 	var ops []*operator.Operator
 
 	if s.conf.evictStore() != 0 {
 		store := cluster.GetStore(s.conf.evictStore())
 		if store == nil || store.IsRemoved() {
-			// Previous slow store had been removed, remove the scheduler and check
+			// Previous slow store had been removed, remove the sheduler and check
 			// slow node next time.
 			log.Info("slow store has been removed",
 				zap.Uint64("store-id", store.GetID()))
@@ -185,10 +184,10 @@ func (s *evictSlowStoreScheduler) Schedule(cluster schedule.Cluster, dryRun bool
 			log.Info("slow store has been recovered",
 				zap.Uint64("store-id", store.GetID()))
 		} else {
-			return s.schedulerEvictLeader(cluster), nil
+			return s.schedulerEvictLeader(cluster)
 		}
 		s.cleanupEvictLeader(cluster)
-		return ops, nil
+		return ops
 	}
 
 	var slowStore *core.StoreInfo
@@ -201,14 +200,14 @@ func (s *evictSlowStoreScheduler) Schedule(cluster schedule.Cluster, dryRun bool
 		if (store.IsPreparing() || store.IsServing()) && store.IsSlow() {
 			// Do nothing if there is more than one slow store.
 			if slowStore != nil {
-				return ops, nil
+				return ops
 			}
 			slowStore = store
 		}
 	}
 
 	if slowStore == nil || slowStore.GetSlowScore() < slowStoreEvictThreshold {
-		return ops, nil
+		return ops
 	}
 
 	// If there is only one slow store, evict leaders from that store.
@@ -217,9 +216,9 @@ func (s *evictSlowStoreScheduler) Schedule(cluster schedule.Cluster, dryRun bool
 	err := s.prepareEvictLeader(cluster, slowStore.GetID())
 	if err != nil {
 		log.Info("prepare for evicting leader failed", zap.Error(err), zap.Uint64("store-id", slowStore.GetID()))
-		return ops, nil
+		return ops
 	}
-	return s.schedulerEvictLeader(cluster), nil
+	return s.schedulerEvictLeader(cluster)
 }
 
 // newEvictSlowStoreScheduler creates a scheduler that detects and evicts slow stores.

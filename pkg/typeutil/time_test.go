@@ -16,65 +16,62 @@ package typeutil
 
 import (
 	"math/rand"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestParseTimestamp(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+var _ = Suite(&testTimeSuite{})
+
+type testTimeSuite struct{}
+
+func (s *testTimeSuite) TestParseTimestamp(c *C) {
 	for i := 0; i < 3; i++ {
 		t := time.Now().Add(time.Second * time.Duration(rand.Int31n(1000)))
 		data := Uint64ToBytes(uint64(t.UnixNano()))
 		nt, err := ParseTimestamp(data)
-		re.NoError(err)
-		re.True(nt.Equal(t))
+		c.Assert(err, IsNil)
+		c.Assert(nt.Equal(t), IsTrue)
 	}
 	data := []byte("pd")
 	nt, err := ParseTimestamp(data)
-	re.Error(err)
-	re.True(nt.Equal(ZeroTime))
+	c.Assert(err, NotNil)
+	c.Assert(nt.Equal(ZeroTime), IsTrue)
 }
 
-func TestSubTimeByWallClock(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testTimeSuite) TestSubTimeByWallClock(c *C) {
 	for i := 0; i < 100; i++ {
 		r := rand.Int63n(1000)
 		t1 := time.Now()
 		// Add r seconds.
 		t2 := t1.Add(time.Second * time.Duration(r))
 		duration := SubRealTimeByWallClock(t2, t1)
-		re.Equal(time.Second*time.Duration(r), duration)
+		c.Assert(duration, Equals, time.Second*time.Duration(r))
 		milliseconds := SubTSOPhysicalByWallClock(t2, t1)
-		re.Equal(r*time.Second.Milliseconds(), milliseconds)
-		// Add r milliseconds.
+		c.Assert(milliseconds, Equals, r*time.Second.Milliseconds())
+		// Add r millionseconds.
 		t3 := t1.Add(time.Millisecond * time.Duration(r))
 		milliseconds = SubTSOPhysicalByWallClock(t3, t1)
-		re.Equal(r, milliseconds)
+		c.Assert(milliseconds, Equals, r)
 		// Add r nanoseconds.
 		t4 := t1.Add(time.Duration(-r))
 		duration = SubRealTimeByWallClock(t4, t1)
-		re.Equal(time.Duration(-r), duration)
+		c.Assert(duration, Equals, time.Duration(-r))
 		// For the millisecond comparison, please see TestSmallTimeDifference.
 	}
 }
 
-func TestSmallTimeDifference(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testTimeSuite) TestSmallTimeDifference(c *C) {
 	t1, err := time.Parse("2006-01-02 15:04:05.999", "2021-04-26 00:44:25.682")
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	t2, err := time.Parse("2006-01-02 15:04:05.999", "2021-04-26 00:44:25.681918")
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	duration := SubRealTimeByWallClock(t1, t2)
-	re.Equal(time.Duration(82)*time.Microsecond, duration)
+	c.Assert(duration, Equals, time.Duration(82)*time.Microsecond)
 	duration = SubRealTimeByWallClock(t2, t1)
-	re.Equal(time.Duration(-82)*time.Microsecond, duration)
+	c.Assert(duration, Equals, time.Duration(-82)*time.Microsecond)
 	milliseconds := SubTSOPhysicalByWallClock(t1, t2)
-	re.Equal(int64(1), milliseconds)
+	c.Assert(milliseconds, Equals, int64(1))
 	milliseconds = SubTSOPhysicalByWallClock(t2, t1)
-	re.Equal(int64(-1), milliseconds)
+	c.Assert(milliseconds, Equals, int64(-1))
 }

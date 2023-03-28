@@ -14,7 +14,7 @@
 
 package movingaverage
 
-import "github.com/elliotchance/pie/v2"
+import "github.com/montanaflynn/stats"
 
 // MedianFilter works as a median filter with specified window size.
 // There are at most `size` data points for calculating.
@@ -50,7 +50,8 @@ func (r *MedianFilter) Get() float64 {
 	if r.count < r.size {
 		records = r.records[:r.count]
 	}
-	return pie.Median(records)
+	median, _ := stats.Median(records)
+	return median
 }
 
 // Reset cleans the data set.

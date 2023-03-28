@@ -15,7 +15,6 @@
 package command
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -103,20 +102,11 @@ func NewCancelDeleteStoreCommand() *cobra.Command {
 // NewLabelStoreCommand returns a label subcommand of storeCmd.
 func NewLabelStoreCommand() *cobra.Command {
 	l := &cobra.Command{
-		Use:  "label <store_id> <key>=<value> [<key>=<value>]",
-		Args: cobra.MinimumNArgs(2),
-		Example: `  # Add nonexistent label or update existent
-	label <store_id> <key>=<value> [<key>=<value>]...
-  # Delete one existent label via key
-	label <store_id> <key> --delete
-  # Rewrite all labels for the store
-	label <store_id> <key>=<value> [<key>=<value>]... --rewrite`,
-		Short: "Set a store's labels",
+		Use:   "label <store_id> <key> <value> [<key> <value>]...",
+		Short: "set a store's label value",
 		Run:   labelStoreCommandFunc,
 	}
-	l.Flags().BoolP("force", "f", false, "[Deprecated] rewrite all labels for the store, same as rewrite")
-	l.Flags().BoolP("rewrite", "r", false, "rewrite all labels for the store")
-	l.Flags().BoolP("delete", "d", false, "delete the specified label")
+	l.Flags().BoolP("force", "f", false, "overwrite the label forcibly")
 	return l
 }
 
@@ -500,12 +490,7 @@ func labelStoreCommandFunc(cmd *cobra.Command, args []string) {
 	// The least args' numbers is 1, which means users can set empty key and value
 	// In this way, if force flag is set then it means clear all labels,
 	// if force flag isn't set then it means do nothing
-	isDelete, err := cmd.Flags().GetBool("delete")
-	if err != nil {
-		cmd.Println("can't parse parameters", err)
-		return
-	}
-	if len(args) <= 1 {
+	if len(args) < 1 || len(args)%2 != 1 {
 		cmd.Usage()
 		return
 	}
@@ -514,58 +499,13 @@ func labelStoreCommandFunc(cmd *cobra.Command, args []string) {
 		return
 	}
 	prefix := fmt.Sprintf(path.Join(storePrefix, "label"), args[0])
-	var toDeletedLabel string
-	if isDelete {
-		if len(args) != 2 {
-			cmd.PrintErrln("Failed: not allow to delete multiple labels at a time")
-			return
-		}
-		toDeletedLabel = args[1]
-		b, _ := json.Marshal(toDeletedLabel)
-		res, err := doRequest(cmd, prefix, http.MethodDelete, http.Header{"Content-Type": {"application/json"}}, WithBody(bytes.NewBuffer(b)))
-		if err != nil {
-			cmd.Printf("Failed! %s\n", err)
-			return
-		}
-		cmd.Printf("Success! %s\n", res)
-		return
-	}
-
 	labels := make(map[string]interface{})
-	// useEqual is used to compatible the old way
-	// TODO: remove old way
-	useEqual := true
-	for i := 1; i < len(args); {
-		if i == 1 {
-			sliceArg := strings.Split(args[i], "=")
-			if len(sliceArg) != 2 {
-				useEqual = false
-			}
-		}
-		if useEqual { // new way
-			sliceArg := strings.Split(args[i], "=")
-			if len(sliceArg) != 2 {
-				cmd.PrintErrln("Failed: invalid arguments, expect <key>=<value>")
-				return
-			}
-			key, value := strings.TrimSpace(sliceArg[0]), strings.TrimSpace(sliceArg[1])
-			labels[key] = value
-			i++
-		} else { // old way
-			if i+1 >= len(args) {
-				cmd.PrintErrln("Failed: invalid arguments, expect <key> <value> [key value]...")
-				return
-			}
-			labels[args[i]] = args[i+1]
-			i += 2
-		}
+	for i := 1; i < len(args); i += 2 {
+		labels[args[i]] = args[i+1]
 	}
 	if force, _ := cmd.Flags().GetBool("force"); force {
 		prefix += "?force=true"
-	} else if rewrite, _ := cmd.Flags().GetBool("rewrite"); rewrite {
-		prefix += "?force=true"
 	}
-	cmd.Println(prefix)
 	postJSON(cmd, prefix, labels)
 }
 
