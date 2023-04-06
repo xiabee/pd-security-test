@@ -110,6 +110,7 @@ type unsafeRecoveryController struct {
 	step         uint64
 	failedStores map[uint64]struct{}
 	timeout      time.Time
+	autoDetect   bool
 
 	// collected reports from store, if not reported yet, it would be nil
 	storeReports      map[uint64]*pdpb.StoreReport
@@ -160,34 +161,41 @@ func (u *unsafeRecoveryController) reset() {
 func (u *unsafeRecoveryController) IsRunning() bool {
 	u.RLock()
 	defer u.RUnlock()
+	return u.isRunningLocked()
+}
+
+func (u *unsafeRecoveryController) isRunningLocked() bool {
 	return u.stage != idle && u.stage != finished && u.stage != failed
 }
 
 // RemoveFailedStores removes failed stores from the cluster.
-func (u *unsafeRecoveryController) RemoveFailedStores(failedStores map[uint64]struct{}, timeout uint64) error {
-	if u.IsRunning() {
-		return errs.ErrUnsafeRecoveryIsRunning.FastGenByArgs()
-	}
+func (u *unsafeRecoveryController) RemoveFailedStores(failedStores map[uint64]struct{}, timeout uint64, autoDetect bool) error {
 	u.Lock()
 	defer u.Unlock()
 
-	if len(failedStores) == 0 {
-		return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs("no store specified")
+	if u.isRunningLocked() {
+		return errs.ErrUnsafeRecoveryIsRunning.FastGenByArgs()
 	}
 
-	// validate the stores and mark the store as tombstone forcibly
-	for failedStore := range failedStores {
-		store := u.cluster.GetStore(failedStore)
-		if store == nil {
-			return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs(fmt.Sprintf("store %v doesn't exist", failedStore))
-		} else if (store.IsPreparing() || store.IsServing()) && !store.IsDisconnected() {
-			return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs(fmt.Sprintf("store %v is up and connected", failedStore))
+	if !autoDetect {
+		if len(failedStores) == 0 {
+			return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs("no store specified")
 		}
-	}
-	for failedStore := range failedStores {
-		err := u.cluster.BuryStore(failedStore, true)
-		if err != nil && !errors.ErrorEqual(err, errs.ErrStoreNotFound.FastGenByArgs(failedStore)) {
-			return err
+
+		// validate the stores and mark the store as tombstone forcibly
+		for failedStore := range failedStores {
+			store := u.cluster.GetStore(failedStore)
+			if store == nil {
+				return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs(fmt.Sprintf("store %v doesn't exist", failedStore))
+			} else if (store.IsPreparing() || store.IsServing()) && !store.IsDisconnected() {
+				return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs(fmt.Sprintf("store %v is up and connected", failedStore))
+			}
+		}
+		for failedStore := range failedStores {
+			err := u.cluster.BuryStore(failedStore, true)
+			if err != nil && !errors.ErrorEqual(err, errs.ErrStoreNotFound.FastGenByArgs(failedStore)) {
+				return err
+			}
 		}
 	}
 
@@ -204,6 +212,7 @@ func (u *unsafeRecoveryController) RemoveFailedStores(failedStores map[uint64]st
 
 	u.timeout = time.Now().Add(time.Duration(timeout) * time.Second)
 	u.failedStores = failedStores
+	u.autoDetect = autoDetect
 	u.changeStage(collectReport)
 	return nil
 }
@@ -216,7 +225,9 @@ func (u *unsafeRecoveryController) Show() []StageOutput {
 	if u.stage == idle {
 		return []StageOutput{{Info: "No on-going recovery."}}
 	}
-	u.checkTimeout()
+	if err := u.checkTimeout(); err != nil {
+		u.HandleErr(err)
+	}
 	status := u.output
 	if u.stage != finished && u.stage != failed {
 		status = append(status, u.getReportStatus())
@@ -251,17 +262,15 @@ func (u *unsafeRecoveryController) getReportStatus() StageOutput {
 	return status
 }
 
-func (u *unsafeRecoveryController) checkTimeout() bool {
+func (u *unsafeRecoveryController) checkTimeout() error {
 	if u.stage == finished || u.stage == failed {
-		return false
+		return nil
 	}
 
 	if time.Now().After(u.timeout) {
-		ret := u.HandleErr(errors.Errorf("Exceeds timeout %v", u.timeout))
-		u.timeout = time.Now().Add(storeRequestInterval * 2)
-		return ret
+		return errors.Errorf("Exceeds timeout %v", u.timeout)
 	}
-	return false
+	return nil
 }
 
 func (u *unsafeRecoveryController) HandleErr(err error) bool {
@@ -270,128 +279,139 @@ func (u *unsafeRecoveryController) HandleErr(err error) bool {
 		u.err = err
 	}
 	if u.stage == exitForceLeader {
+		// We already tried to exit force leader, and it still failed.
+		// We turn into failed stage directly. TiKV will step down force leader
+		// automatically after being for a long time.
 		u.changeStage(failed)
 		return true
 	}
+	// When encountering an error for the first time, we will try to exit force
+	// leader before turning into failed stage to avoid the leaking force leaders
+	// blocks reads and writes.
+	u.storePlanExpires = make(map[uint64]time.Time)
+	u.storeRecoveryPlans = make(map[uint64]*pdpb.RecoveryPlan)
+	u.timeout = time.Now().Add(storeRequestInterval * 2)
+	// empty recovery plan would trigger exit force leader
+	u.changeStage(exitForceLeader)
 	return false
 }
 
 // HandleStoreHeartbeat handles the store heartbeat requests and checks whether the stores need to
 // send detailed report back.
 func (u *unsafeRecoveryController) HandleStoreHeartbeat(heartbeat *pdpb.StoreHeartbeatRequest, resp *pdpb.StoreHeartbeatResponse) {
-	if !u.IsRunning() {
-		// no recovery in progress, do nothing
-		return
-	}
 	u.Lock()
 	defer u.Unlock()
 
-	if u.checkTimeout() {
+	if !u.isRunningLocked() {
+		// no recovery in progress, do nothing
 		return
 	}
 
-	allCollected := u.collectReport(heartbeat)
-
-	if allCollected {
-		newestRegionTree, peersMap, buildErr := u.buildUpFromReports()
-		if buildErr != nil && u.HandleErr(buildErr) {
-			return
+	done, err := func() (bool, error) {
+		if err := u.checkTimeout(); err != nil {
+			return false, err
 		}
 
-		// clean up previous plan
-		u.storePlanExpires = make(map[uint64]time.Time)
-		u.storeRecoveryPlans = make(map[uint64]*pdpb.RecoveryPlan)
-
-		var stage unsafeRecoveryStage
-		if u.err == nil {
-			stage = u.stage
-		} else {
-			stage = exitForceLeader
+		allCollected, err := u.collectReport(heartbeat)
+		if err != nil {
+			return false, err
 		}
-		reCheck := false
-		hasPlan := false
-		var err error
-		for {
-			switch stage {
-			case collectReport:
-				fallthrough
-			case tombstoneTiFlashLearner:
-				if hasPlan, err = u.generateTombstoneTiFlashLearnerPlan(newestRegionTree, peersMap); hasPlan && err == nil {
-					u.changeStage(tombstoneTiFlashLearner)
-					break
-				}
-				if err != nil {
-					break
-				}
-				fallthrough
-			case forceLeaderForCommitMerge:
-				if hasPlan, err = u.generateForceLeaderPlan(newestRegionTree, peersMap, true); hasPlan && err == nil {
-					u.changeStage(forceLeaderForCommitMerge)
-					break
-				}
-				if err != nil {
-					break
-				}
-				fallthrough
-			case forceLeader:
-				if hasPlan, err = u.generateForceLeaderPlan(newestRegionTree, peersMap, false); hasPlan && err == nil {
-					u.changeStage(forceLeader)
-					break
-				}
-				if err != nil {
-					break
-				}
-				fallthrough
-			case demoteFailedVoter:
-				if hasPlan = u.generateDemoteFailedVoterPlan(newestRegionTree, peersMap); hasPlan {
-					u.changeStage(demoteFailedVoter)
-					break
-				} else if !reCheck {
-					reCheck = true
-					stage = tombstoneTiFlashLearner
-					continue
-				}
-				fallthrough
-			case createEmptyRegion:
-				if hasPlan, err = u.generateCreateEmptyRegionPlan(newestRegionTree, peersMap); hasPlan && err == nil {
-					u.changeStage(createEmptyRegion)
-					break
-				}
-				if err != nil {
-					break
-				}
-				fallthrough
-			case exitForceLeader:
-				// no need to generate plan, empty recovery plan triggers exit force leader on TiKV side
-				if hasPlan = u.generateExitForceLeaderPlan(); hasPlan {
-					u.changeStage(exitForceLeader)
-				}
-			default:
-				panic("unreachable")
-			}
 
+		if allCollected {
+			newestRegionTree, peersMap, err := u.buildUpFromReports()
 			if err != nil {
-				if u.HandleErr(err) {
-					return
-				}
-				u.storePlanExpires = make(map[uint64]time.Time)
-				u.storeRecoveryPlans = make(map[uint64]*pdpb.RecoveryPlan)
-				// Clear the reports etc.
-				u.changeStage(exitForceLeader)
-				return
-			} else if !hasPlan {
-				if u.err != nil {
-					u.changeStage(failed)
-				} else {
-					u.changeStage(finished)
-				}
-				return
+				return false, err
 			}
-			break
+
+			return u.generatePlan(newestRegionTree, peersMap)
 		}
+		return false, nil
+	}()
+
+	if done || (err != nil && u.HandleErr(err)) {
+		return
+	}
+	u.dispatchPlan(heartbeat, resp)
+}
+
+func (u *unsafeRecoveryController) generatePlan(newestRegionTree *regionTree, peersMap map[uint64][]*regionItem) (bool, error) {
+	// clean up previous plan
+	u.storePlanExpires = make(map[uint64]time.Time)
+	u.storeRecoveryPlans = make(map[uint64]*pdpb.RecoveryPlan)
+
+	stage := u.stage
+	reCheck := false
+	hasPlan := false
+	var err error
+	for {
+		switch stage {
+		case collectReport:
+			fallthrough
+		case tombstoneTiFlashLearner:
+			if hasPlan, err = u.generateTombstoneTiFlashLearnerPlan(newestRegionTree, peersMap); hasPlan && err == nil {
+				u.changeStage(tombstoneTiFlashLearner)
+				break
+			}
+			if err != nil {
+				break
+			}
+			fallthrough
+		case forceLeaderForCommitMerge:
+			if hasPlan, err = u.generateForceLeaderPlan(newestRegionTree, peersMap, true); hasPlan && err == nil {
+				u.changeStage(forceLeaderForCommitMerge)
+				break
+			}
+			if err != nil {
+				break
+			}
+			fallthrough
+		case forceLeader:
+			if hasPlan, err = u.generateForceLeaderPlan(newestRegionTree, peersMap, false); hasPlan && err == nil {
+				u.changeStage(forceLeader)
+				break
+			}
+			if err != nil {
+				break
+			}
+			fallthrough
+		case demoteFailedVoter:
+			if hasPlan = u.generateDemoteFailedVoterPlan(newestRegionTree, peersMap); hasPlan {
+				u.changeStage(demoteFailedVoter)
+				break
+			} else if !reCheck {
+				reCheck = true
+				stage = tombstoneTiFlashLearner
+				continue
+			}
+			fallthrough
+		case createEmptyRegion:
+			if hasPlan, err = u.generateCreateEmptyRegionPlan(newestRegionTree, peersMap); hasPlan && err == nil {
+				u.changeStage(createEmptyRegion)
+				break
+			}
+			if err != nil {
+				break
+			}
+			fallthrough
+		case exitForceLeader:
+			if hasPlan = u.generateExitForceLeaderPlan(); hasPlan {
+				u.changeStage(exitForceLeader)
+			}
+		default:
+			panic("unreachable")
+		}
+		break
 	}
 
-	u.dispatchPlan(heartbeat, resp)
+	if err == nil && !hasPlan {
+		if u.err != nil {
+			u.changeStage(failed)
+		} else {
+			u.changeStage(finished)
+		}
+		return true, nil
+	}
+	return false, err
 }
 
 // It dispatches recovery plan if any.
@@ -401,7 +421,7 @@ func (u *unsafeRecoveryController) dispatchPlan(heartbeat *pdpb.StoreHeartbeatRe
 
 	if reported, exist := u.storeReports[storeID]; reported != nil || !exist {
 		// the plan has been executed, no need to dispatch again
-		// or no need to displan plan to this store(e.g. Tiflash)
+		// or no need to dispatch plan to this store(e.g. Tiflash)
 		return
 	}
 
@@ -417,22 +437,21 @@ func (u *unsafeRecoveryController) dispatchPlan(heartbeat *pdpb.StoreHeartbeatRe
 }
 
 // It collects and checks if store reports have been fully collected.
-func (u *unsafeRecoveryController) collectReport(heartbeat *pdpb.StoreHeartbeatRequest) bool {
+func (u *unsafeRecoveryController) collectReport(heartbeat *pdpb.StoreHeartbeatRequest) (bool, error) {
 	storeID := heartbeat.Stats.StoreId
 	if _, isFailedStore := u.failedStores[storeID]; isFailedStore {
-		u.HandleErr(errors.Errorf("Receive heartbeat from failed store %d", storeID))
-		return false
+		return false, errors.Errorf("Receive heartbeat from failed store %d", storeID)
 	}
 
 	if heartbeat.StoreReport == nil {
-		return false
+		return false, nil
 	}
 
 	if heartbeat.StoreReport.GetStep() != u.step {
 		log.Info("Unsafe recovery receives invalid store report",
 			zap.Uint64("store-id", storeID), zap.Uint64("expected-step", u.step), zap.Uint64("obtained-step", heartbeat.StoreReport.GetStep()))
 		// invalid store report, ignore
-		return false
+		return false, nil
 	}
 
 	if report, exists := u.storeReports[storeID]; exists {
@@ -441,11 +460,11 @@ func (u *unsafeRecoveryController) collectReport(heartbeat *pdpb.StoreHeartbeatR
 		if report == nil {
 			u.numStoresReported++
 			if u.numStoresReported == len(u.storeReports) {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 // Gets the stage of the current unsafe recovery.
@@ -463,17 +482,23 @@ func (u *unsafeRecoveryController) changeStage(stage unsafeRecoveryStage) {
 	switch u.stage {
 	case idle:
 	case collectReport:
-		stores := ""
-		count := 0
-		for store := range u.failedStores {
-			count += 1
-			stores += fmt.Sprintf("%d", store)
-			if count != len(u.failedStores) {
-				stores += ", "
-			}
-		}
 		// TODO: clean up existing operators
-		output.Info = fmt.Sprintf("Unsafe recovery enters collect report stage: failed stores %s", stores)
+		output.Info = "Unsafe recovery enters collect report stage"
+		if u.autoDetect {
+			output.Details = append(output.Details, "auto detect mode with no specified failed stores")
+		} else {
+			stores := ""
+			count := 0
+			for store := range u.failedStores {
+				count += 1
+				stores += fmt.Sprintf("%d", store)
+				if count != len(u.failedStores) {
+					stores += ", "
+				}
+			}
+			output.Details = append(output.Details, fmt.Sprintf("failed stores %s", stores))
+		}
+
 	case tombstoneTiFlashLearner:
 		output.Info = "Unsafe recovery enters tombstone TiFlash learner stage"
 		output.Actions = u.getTombstoneTiFlashLearnerDigest()
@@ -633,13 +658,22 @@ func (u *unsafeRecoveryController) recordAffectedRegion(region *metapb.Region) {
 	}
 }
 
+func (u *unsafeRecoveryController) isFailed(peer *metapb.Peer) bool {
+	_, isFailed := u.failedStores[peer.StoreId]
+	_, isLive := u.storeReports[peer.StoreId]
+	if isFailed || (u.autoDetect && !isLive) {
+		return true
+	}
+	return false
+}
+
 func (u *unsafeRecoveryController) canElectLeader(region *metapb.Region, onlyIncoming bool) bool {
 	hasQuorum := func(voters []*metapb.Peer) bool {
 		numFailedVoters := 0
 		numLiveVoters := 0
 
 		for _, voter := range voters {
-			if _, ok := u.failedStores[voter.StoreId]; ok {
+			if u.isFailed(voter) {
 				numFailedVoters += 1
 			} else {
 				numLiveVoters += 1
@@ -675,14 +709,12 @@ func (u *unsafeRecoveryController) getFailedPeers(region *metapb.Region) []*meta
 		if peer.Role == metapb.PeerRole_Learner || peer.Role == metapb.PeerRole_DemotingVoter {
 			continue
 		}
-		if _, ok := u.failedStores[peer.StoreId]; ok {
+		if u.isFailed(peer) {
 			failedPeers = append(failedPeers, peer)
 		}
 	}
 	return failedPeers
 }
-
-var _ btree.Item = &regionItem{}
 
 type regionItem struct {
 	report  *pdpb.PeerReport
@@ -690,9 +722,9 @@ type regionItem struct {
 }
 
 // Less returns true if the region start key is less than the other.
-func (r *regionItem) Less(other btree.Item) bool {
+func (r *regionItem) Less(other *regionItem) bool {
 	left := r.Region().GetStartKey()
-	right := other.(*regionItem).Region().GetStartKey()
+	right := other.Region().GetStartKey()
 	return bytes.Compare(left, right) < 0
 }
 
@@ -759,13 +791,13 @@ const (
 
 type regionTree struct {
 	regions map[uint64]*regionItem
-	tree    *btree.BTree
+	tree    *btree.BTreeG[*regionItem]
 }
 
 func newRegionTree() *regionTree {
 	return &regionTree{
 		regions: make(map[uint64]*regionItem),
-		tree:    btree.New(defaultBTreeDegree),
+		tree:    btree.NewG[*regionItem](defaultBTreeDegree),
 	}
 }
 
@@ -793,8 +825,8 @@ func (t *regionTree) getOverlaps(item *regionItem) []*regionItem {
 
 	end := item.Region().GetEndKey()
 	var overlaps []*regionItem
-	t.tree.AscendGreaterOrEqual(result, func(i btree.Item) bool {
-		over := i.(*regionItem)
+	t.tree.AscendGreaterOrEqual(result, func(i *regionItem) bool {
+		over := i
 		if len(end) > 0 && bytes.Compare(end, over.Region().GetStartKey()) <= 0 {
 			return false
 		}
@@ -807,8 +839,8 @@ func (t *regionTree) getOverlaps(item *regionItem) []*regionItem {
 // find is a helper function to find an item that contains the regions start key.
 func (t *regionTree) find(item *regionItem) *regionItem {
 	var result *regionItem
-	t.tree.DescendLessOrEqual(item, func(i btree.Item) bool {
-		result = i.(*regionItem)
+	t.tree.DescendLessOrEqual(item, func(i *regionItem) bool {
+		result = i
 		return false
 	})
 
@@ -910,8 +942,8 @@ func (u *unsafeRecoveryController) generateTombstoneTiFlashLearnerPlan(newestReg
 	hasPlan := false
 
 	var err error
-	newestRegionTree.tree.Ascend(func(item btree.Item) bool {
-		region := item.(*regionItem).Region()
+	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
+		region := item.Region()
 		if !u.canElectLeader(region, false) {
 			leader := u.selectLeader(peersMap, region)
 			if leader == nil {
@@ -950,9 +982,9 @@ func (u *unsafeRecoveryController) generateForceLeaderPlan(newestRegionTree *reg
 	var err error
 	// Check the regions in newest Region Tree to see if it can still elect leader
 	// considering the failed stores
-	newestRegionTree.tree.Ascend(func(item btree.Item) bool {
-		report := item.(*regionItem).report
-		region := item.(*regionItem).Region()
+	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
+		report := item.report
+		region := item.Region()
 		if !u.canElectLeader(region, false) {
 			if hasForceLeader(region) {
 				// already is a force leader, skip
@@ -979,6 +1011,21 @@ func (u *unsafeRecoveryController) generateForceLeaderPlan(newestRegionTree *reg
 				storeRecoveryPlan.ForceLeader = &pdpb.ForceLeader{}
 				for store := range u.failedStores {
 					storeRecoveryPlan.ForceLeader.FailedStores = append(storeRecoveryPlan.ForceLeader.FailedStores, store)
+				}
+			}
+			if u.autoDetect {
+				// For auto detect, the failedStores is empty. So need to add the detected failed store to the list
+				for _, peer := range u.getFailedPeers(leader.Region()) {
+					found := false
+					for _, store := range storeRecoveryPlan.ForceLeader.FailedStores {
+						if store == peer.StoreId {
+							found = true
+							break
+						}
+					}
+					if !found {
+						storeRecoveryPlan.ForceLeader.FailedStores = append(storeRecoveryPlan.ForceLeader.FailedStores, peer.StoreId)
+					}
 				}
 			}
 			storeRecoveryPlan.ForceLeader.EnterForceLeaders = append(storeRecoveryPlan.ForceLeader.EnterForceLeaders, region.GetId())
@@ -1021,8 +1068,8 @@ func (u *unsafeRecoveryController) generateDemoteFailedVoterPlan(newestRegionTre
 
 	// Check the regions in newest Region Tree to see if it can still elect leader
 	// considering the failed stores
-	newestRegionTree.tree.Ascend(func(item btree.Item) bool {
-		region := item.(*regionItem).Region()
+	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
+		region := item.Region()
 		if !u.canElectLeader(region, false) {
 			leader := findForceLeader(peersMap, region)
 			if leader == nil {
@@ -1098,9 +1145,9 @@ func (u *unsafeRecoveryController) generateCreateEmptyRegionPlan(newestRegionTre
 	// regions that cover them and evenly distribute newly created regions among all stores.
 	lastEnd := []byte("")
 	var lastStoreID uint64
-	newestRegionTree.tree.Ascend(func(item btree.Item) bool {
-		region := item.(*regionItem).Region()
-		storeID := item.(*regionItem).storeID
+	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
+		region := item.Region()
+		storeID := item.storeID
 		if !bytes.Equal(region.StartKey, lastEnd) {
 			if u.cluster.GetStore(storeID).IsTiFlash() {
 				storeID = getRandomStoreID()
@@ -1172,6 +1219,7 @@ func (u *unsafeRecoveryController) generateExitForceLeaderPlan() bool {
 	for storeID, storeReport := range u.storeReports {
 		for _, peerReport := range storeReport.PeerReports {
 			if peerReport.IsForceLeader {
+				// empty recovery plan triggers exit force leader on TiKV side
 				_ = u.getRecoveryPlan(storeID)
 				hasPlan = true
 				break

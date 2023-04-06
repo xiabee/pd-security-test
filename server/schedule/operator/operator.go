@@ -55,9 +55,9 @@ type Operator struct {
 
 // NewOperator creates a new operator.
 func NewOperator(desc, brief string, regionID uint64, regionEpoch *metapb.RegionEpoch, kind OpKind, approximateSize int64, steps ...OpStep) *Operator {
-	level := core.NormalPriority
+	level := core.Medium
 	if kind&OpAdmin != 0 {
-		level = core.HighPriority
+		level = core.Urgent
 	}
 	maxDuration := float64(0)
 	for _, v := range steps {
@@ -248,6 +248,18 @@ func (o *Operator) Step(i int) OpStep {
 		return o.steps[i]
 	}
 	return nil
+}
+
+// ContainNonWitnessStep returns true if it contains the target OpStep
+func (o *Operator) ContainNonWitnessStep() bool {
+	for _, step := range o.steps {
+		switch step.(type) {
+		case BecomeNonWitness:
+			return true
+		default:
+		}
+	}
+	return false
 }
 
 // getCurrentTimeAndStep returns the start time of the i-th step.

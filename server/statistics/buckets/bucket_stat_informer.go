@@ -18,20 +18,19 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/tikv/pd/pkg/btree"
 	"github.com/tikv/pd/pkg/keyutil"
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/core/rangetree"
 	"github.com/tikv/pd/server/statistics"
 )
 
-var minHotThresholds = [statistics.RegionStatCount]uint64{
-	statistics.RegionReadBytes:  8 * 1024,
-	statistics.RegionReadKeys:   128,
-	statistics.RegionReadQuery:  128,
-	statistics.RegionWriteBytes: 1 * 1024,
-	statistics.RegionWriteKeys:  32,
-	statistics.RegionWriteQuery: 32,
+var minHotThresholds [statistics.RegionStatCount]uint64
+
+func init() {
+	for i := range minHotThresholds {
+		minHotThresholds[i] = uint64(statistics.MinHotThresholds[i])
+	}
 }
 
 // BucketStatInformer is used to get the bucket statistics.
@@ -96,7 +95,7 @@ func (b *BucketTreeItem) String() string {
 }
 
 // Less returns true if the start key is less than the other.
-func (b *BucketTreeItem) Less(than btree.Item) bool {
+func (b *BucketTreeItem) Less(than rangetree.RangeItem) bool {
 	return bytes.Compare(b.startKey, than.(*BucketTreeItem).startKey) < 0
 }
 

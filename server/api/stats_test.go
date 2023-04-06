@@ -17,39 +17,44 @@ package api
 import (
 	"fmt"
 	"net/url"
+	"testing"
 
-	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/statistics"
 )
 
-var _ = Suite(&testStatsSuite{})
-
-type testStatsSuite struct {
+type statsTestSuite struct {
+	suite.Suite
 	svr       *server.Server
 	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
-func (s *testStatsSuite) SetUpSuite(c *C) {
-	s.svr, s.cleanup = mustNewServer(c)
-	mustWaitLeader(c, []*server.Server{s.svr})
-
-	addr := s.svr.GetAddr()
-	s.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
-
-	mustBootstrapCluster(c, s.svr)
+func TestStatsTestSuite(t *testing.T) {
+	suite.Run(t, new(statsTestSuite))
 }
 
-func (s *testStatsSuite) TearDownSuite(c *C) {
-	s.cleanup()
+func (suite *statsTestSuite) SetupSuite() {
+	re := suite.Require()
+	suite.svr, suite.cleanup = mustNewServer(re)
+	server.MustWaitLeader(re, []*server.Server{suite.svr})
+
+	addr := suite.svr.GetAddr()
+	suite.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
+
+	mustBootstrapCluster(re, suite.svr)
 }
 
-func (s *testStatsSuite) TestRegionStats(c *C) {
-	statsURL := s.urlPrefix + "/stats/region"
+func (suite *statsTestSuite) TearDownSuite() {
+	suite.cleanup()
+}
+
+func (suite *statsTestSuite) TestRegionStats() {
+	statsURL := suite.urlPrefix + "/stats/region"
 	epoch := &metapb.RegionEpoch{
 		ConfVer: 1,
 		Version: 1,
@@ -117,8 +122,9 @@ func (s *testStatsSuite) TestRegionStats(c *C) {
 		),
 	}
 
+	re := suite.Require()
 	for _, r := range regions {
-		mustRegionHeartbeat(c, s.svr, r)
+		mustRegionHeartbeat(re, suite.svr, r)
 	}
 
 	// Distribution (L for leader, F for follower):
@@ -179,14 +185,14 @@ func (s *testStatsSuite) TestRegionStats(c *C) {
 		for _, query := range []string{"", "count"} {
 			args := fmt.Sprintf("?start_key=%s&end_key=%s&%s", data.startKey, data.endKey, query)
 			res, err := testDialClient.Get(statsURL + args)
-			c.Assert(err, IsNil)
+			suite.NoError(err)
 			defer res.Body.Close()
 			stats := &statistics.RegionStats{}
 			err = apiutil.ReadJSON(res.Body, stats)
-			c.Assert(err, IsNil)
-			c.Assert(stats.Count, DeepEquals, data.expect.Count)
+			suite.NoError(err)
+			suite.Equal(data.expect.Count, stats.Count)
 			if query != "count" {
-				c.Assert(stats, DeepEquals, data.expect)
+				suite.Equal(data.expect, stats)
 			}
 		}
 	}

@@ -15,12 +15,10 @@
 package schedulers
 
 import (
-	"math/rand"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/kvproto/pkg/metapb"
@@ -33,6 +31,7 @@ import (
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/plan"
 	"github.com/tikv/pd/server/statistics"
 	"github.com/tikv/pd/server/storage/endpoint"
 	"github.com/unrolled/render"
@@ -123,8 +122,10 @@ func (conf *grantHotRegionSchedulerConfig) SetStoreLeaderID(id uint64) {
 func (conf *grantHotRegionSchedulerConfig) Clone() *grantHotRegionSchedulerConfig {
 	conf.mu.RLock()
 	defer conf.mu.RUnlock()
+	newStoreIDs := make([]uint64, len(conf.StoreIDs))
+	copy(newStoreIDs, conf.StoreIDs)
 	return &grantHotRegionSchedulerConfig{
-		StoreIDs:      conf.StoreIDs,
+		StoreIDs:      newStoreIDs,
 		StoreLeaderID: conf.StoreLeaderID,
 	}
 }
@@ -154,27 +155,19 @@ func (conf *grantHotRegionSchedulerConfig) has(storeID uint64) bool {
 
 // grantLeaderScheduler transfers all hot peers to peers  and transfer leader to the fixed store
 type grantHotRegionScheduler struct {
-	*BaseScheduler
-	r           *rand.Rand
-	conf        *grantHotRegionSchedulerConfig
-	handler     http.Handler
-	types       []statistics.RWType
-	stLoadInfos [resourceTypeLen]map[uint64]*statistics.StoreLoadDetail
+	*baseHotScheduler
+	conf    *grantHotRegionSchedulerConfig
+	handler http.Handler
 }
 
 // newGrantHotRegionScheduler creates an admin scheduler that transfers hot region peer to fixed store and hot region leader to one store.
 func newGrantHotRegionScheduler(opController *schedule.OperatorController, conf *grantHotRegionSchedulerConfig) *grantHotRegionScheduler {
-	base := NewBaseScheduler(opController)
+	base := newBaseHotScheduler(opController)
 	handler := newGrantHotRegionHandler(conf)
 	ret := &grantHotRegionScheduler{
-		BaseScheduler: base,
-		conf:          conf,
-		handler:       handler,
-		r:             rand.New(rand.NewSource(time.Now().UnixNano())),
-		types:         []statistics.RWType{statistics.Read, statistics.Write},
-	}
-	for ty := resourceType(0); ty < resourceTypeLen; ty++ {
-		ret.stLoadInfos[ty] = map[uint64]*statistics.StoreLoadDetail{}
+		baseHotScheduler: base,
+		conf:             conf,
+		handler:          handler,
 	}
 	return ret
 }
@@ -267,34 +260,15 @@ func newGrantHotRegionHandler(config *grantHotRegionSchedulerConfig) http.Handle
 	return router
 }
 
-func (s *grantHotRegionScheduler) Schedule(cluster schedule.Cluster) []*operator.Operator {
+func (s *grantHotRegionScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
-	i := s.r.Int() % len(s.types)
-	return s.dispatch(s.types[i], cluster)
+	rw := s.randomRWType()
+	s.prepareForBalance(rw, cluster)
+	return s.dispatch(rw, cluster), nil
 }
 
 func (s *grantHotRegionScheduler) dispatch(typ statistics.RWType, cluster schedule.Cluster) []*operator.Operator {
-	storeInfos := statistics.SummaryStoreInfos(cluster.GetStores())
-	storesLoads := cluster.GetStoresLoads()
-	isTraceRegionFlow := cluster.GetOpts().IsTraceRegionFlow()
-
-	var stLoadInfos map[uint64]*statistics.StoreLoadDetail
-	switch typ {
-	case statistics.Read:
-		stLoadInfos = statistics.SummaryStoresLoad(
-			storeInfos,
-			storesLoads,
-			cluster.RegionReadStats(),
-			isTraceRegionFlow,
-			statistics.Read, core.RegionKind)
-	case statistics.Write:
-		stLoadInfos = statistics.SummaryStoresLoad(
-			storeInfos,
-			storesLoads,
-			cluster.RegionWriteStats(),
-			isTraceRegionFlow,
-			statistics.Write, core.RegionKind)
-	}
+	stLoadInfos := s.stLoadInfos[buildResourceType(typ, core.RegionKind)]
 	infos := make([]*statistics.StoreLoadDetail, len(stLoadInfos))
 	index := 0
 	for _, info := range stLoadInfos {
@@ -349,7 +323,7 @@ func (s *grantHotRegionScheduler) transfer(cluster schedule.Cluster, regionID ui
 		return nil, errs.ErrStoreNotFound
 	}
 	filters := []filter.Filter{
-		filter.NewPlacementSafeguard(s.GetName(), cluster.GetOpts(), cluster.GetBasicCluster(), cluster.GetRuleManager(), srcRegion, srcStore),
+		filter.NewPlacementSafeguard(s.GetName(), cluster.GetOpts(), cluster.GetBasicCluster(), cluster.GetRuleManager(), srcRegion, srcStore, nil),
 	}
 
 	destStoreIDs := make([]uint64, 0, len(s.conf.StoreIDs))
@@ -359,7 +333,7 @@ func (s *grantHotRegionScheduler) transfer(cluster schedule.Cluster, regionID ui
 		candidate = []uint64{s.conf.GetStoreLeaderID()}
 	} else {
 		filters = append(filters, &filter.StoreStateFilter{ActionScope: s.GetName(), MoveRegion: true},
-			filter.NewExcludedFilter(s.GetName(), srcRegion.GetStoreIds(), srcRegion.GetStoreIds()))
+			filter.NewExcludedFilter(s.GetName(), srcRegion.GetStoreIDs(), srcRegion.GetStoreIDs()))
 		candidate = s.conf.StoreIDs
 	}
 	for _, storeID := range candidate {
@@ -385,5 +359,6 @@ func (s *grantHotRegionScheduler) transfer(cluster schedule.Cluster, regionID ui
 	} else {
 		op, err = operator.CreateMovePeerOperator(GrantHotRegionType+"-move", cluster, srcRegion, operator.OpRegion|operator.OpLeader, srcStore.GetID(), dstStore)
 	}
+	op.SetPriorityLevel(core.High)
 	return
 }

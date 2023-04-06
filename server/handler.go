@@ -38,6 +38,7 @@ import (
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/core/storelimit"
 	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
 	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/server/schedulers"
@@ -201,7 +202,7 @@ func (h *Handler) GetHotRegionsWriteInterval() time.Duration {
 	return h.opt.GetHotRegionsWriteInterval()
 }
 
-//  GetHotRegionsReservedDays gets days hot region information is kept.
+// GetHotRegionsReservedDays gets days hot region information is kept.
 func (h *Handler) GetHotRegionsReservedDays() uint64 {
 	return h.opt.GetHotRegionsReservedDays()
 }
@@ -628,7 +629,7 @@ func (h *Handler) AddTransferPeerOperator(regionID uint64, fromStoreID, toStoreI
 		return err
 	}
 
-	newPeer := &metapb.Peer{StoreId: toStoreID, Role: oldPeer.GetRole()}
+	newPeer := &metapb.Peer{StoreId: toStoreID, Role: oldPeer.GetRole(), IsWitness: oldPeer.GetIsWitness()}
 	op, err := operator.CreateMovePeerOperator("admin-move-peer", c, region, operator.OpAdmin, fromStoreID, newPeer)
 	if err != nil {
 		log.Debug("fail to create move peer operator", errs.ZapError(err))
@@ -749,11 +750,11 @@ func (h *Handler) AddMergeRegionOperator(regionID uint64, targetID uint64) error
 		return ErrRegionNotFound(targetID)
 	}
 
-	if !schedule.IsRegionHealthy(region) || !schedule.IsRegionReplicated(c, region) {
+	if !filter.IsRegionHealthy(region) || !filter.IsRegionReplicated(c, region) {
 		return ErrRegionAbnormalPeer(regionID)
 	}
 
-	if !schedule.IsRegionHealthy(target) || !schedule.IsRegionReplicated(c, target) {
+	if !filter.IsRegionHealthy(target) || !filter.IsRegionReplicated(c, target) {
 		return ErrRegionAbnormalPeer(targetID)
 	}
 
@@ -912,7 +913,11 @@ func (h *Handler) GetOfflinePeer(typ statistics.RegionStatisticType) ([]*core.Re
 }
 
 // ResetTS resets the ts with specified tso.
-func (h *Handler) ResetTS(ts uint64) error {
+func (h *Handler) ResetTS(ts uint64, ignoreSmaller, skipUpperBoundCheck bool) error {
+	log.Info("reset-ts",
+		zap.Uint64("new-ts", ts),
+		zap.Bool("ignore-smaller", ignoreSmaller),
+		zap.Bool("skip-upper-bound-check", skipUpperBoundCheck))
 	tsoAllocator, err := h.s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
 	if err != nil {
 		return err
@@ -920,7 +925,7 @@ func (h *Handler) ResetTS(ts uint64) error {
 	if tsoAllocator == nil {
 		return ErrServerNotStarted
 	}
-	return tsoAllocator.SetTSO(ts)
+	return tsoAllocator.SetTSO(ts, ignoreSmaller, skipUpperBoundCheck)
 }
 
 // SetStoreLimitScene sets the limit values for different scenes
@@ -983,7 +988,7 @@ func (h *Handler) SetStoreLimitTTL(data string, value float64, ttl time.Duration
 	}, ttl)
 }
 
-// IsLeader return ture if this server is leader
+// IsLeader return true if this server is leader
 func (h *Handler) IsLeader() bool {
 	return h.s.member.IsLeader()
 }
@@ -1025,23 +1030,16 @@ func (h *Handler) packHotRegions(hotPeersStat statistics.StoreHotPeersStat, hotR
 			if err != nil {
 				return nil, err
 			}
-			var peerID uint64
-			var isLearner bool
-			for _, peer := range meta.Peers {
-				if peer.StoreId == hotPeerStat.StoreID {
-					peerID = peer.Id
-					isLearner = core.IsLearner(peer)
-					break
-				}
-			}
 			stat := storage.HistoryHotRegion{
 				// store in ms.
-				UpdateTime:     hotPeerStat.LastUpdateTime.UnixNano() / int64(time.Millisecond),
+				// todo: distinguish store heartbeat interval and region heartbeat interval
+				// read statistic from store heartbeat, write statistic from region heartbeat
+				UpdateTime:     int64(region.GetInterval().GetEndTimestamp() * 1000),
 				RegionID:       hotPeerStat.RegionID,
 				StoreID:        hotPeerStat.StoreID,
-				PeerID:         peerID,
-				IsLeader:       peerID == region.GetLeader().Id,
-				IsLearner:      isLearner,
+				PeerID:         region.GetStorePeer(hotPeerStat.StoreID).GetId(),
+				IsLeader:       hotPeerStat.IsLeader,
+				IsLearner:      core.IsLearner(region.GetPeer(hotPeerStat.StoreID)),
 				HotDegree:      int64(hotPeerStat.HotDegree),
 				FlowBytes:      hotPeerStat.ByteRate,
 				KeyRate:        hotPeerStat.KeyRate,
@@ -1115,4 +1113,22 @@ func (h *Handler) AddEvictOrGrant(storeID float64, name string) error {
 		log.Info("update scheduler", zap.String("scheduler-name", name), zap.Uint64("store-id", uint64(storeID)))
 	}
 	return nil
+}
+
+// GetPausedSchedulerDelayAt returns paused unix timestamp when a scheduler is paused
+func (h *Handler) GetPausedSchedulerDelayAt(name string) (int64, error) {
+	rc, err := h.GetRaftCluster()
+	if err != nil {
+		return -1, err
+	}
+	return rc.GetPausedSchedulerDelayAt(name)
+}
+
+// GetPausedSchedulerDelayUntil returns resume unix timestamp when a scheduler is paused
+func (h *Handler) GetPausedSchedulerDelayUntil(name string) (int64, error) {
+	rc, err := h.GetRaftCluster()
+	if err != nil {
+		return -1, err
+	}
+	return rc.GetPausedSchedulerDelayUntil(name)
 }

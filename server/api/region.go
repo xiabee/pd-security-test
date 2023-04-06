@@ -33,7 +33,7 @@ import (
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/statistics"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
@@ -60,6 +60,9 @@ type PDPeerStats struct {
 }
 
 func fromPeer(peer *metapb.Peer) MetaPeer {
+	if peer == nil {
+		return MetaPeer{}
+	}
 	return MetaPeer{
 		Peer:      peer,
 		RoleName:  peer.GetRole().String(),
@@ -108,6 +111,7 @@ type RegionInfo struct {
 	Leader          MetaPeer      `json:"leader,omitempty"`
 	DownPeers       []PDPeerStats `json:"down_peers,omitempty"`
 	PendingPeers    []MetaPeer    `json:"pending_peers,omitempty"`
+	CPUUsage        uint64        `json:"cpu_usage"`
 	WrittenBytes    uint64        `json:"written_bytes"`
 	ReadBytes       uint64        `json:"read_bytes"`
 	WrittenKeys     uint64        `json:"written_keys"`
@@ -136,12 +140,12 @@ func fromPBReplicationStatus(s *replication_modepb.RegionReplicationStatus) *Rep
 	}
 }
 
-// NewRegionInfo create a new api RegionInfo.
-func NewRegionInfo(r *core.RegionInfo) *RegionInfo {
+// NewAPIRegionInfo create a new API RegionInfo.
+func NewAPIRegionInfo(r *core.RegionInfo) *RegionInfo {
 	return InitRegion(r, &RegionInfo{})
 }
 
-// InitRegion init a new api RegionInfo from the core.RegionInfo.
+// InitRegion init a new API RegionInfo from the core.RegionInfo.
 func InitRegion(r *core.RegionInfo, s *RegionInfo) *RegionInfo {
 	if r == nil {
 		return nil
@@ -155,6 +159,7 @@ func InitRegion(r *core.RegionInfo, s *RegionInfo) *RegionInfo {
 	s.Leader = fromPeer(r.GetLeader())
 	s.DownPeers = fromPeerStatsSlice(r.GetDownPeers())
 	s.PendingPeers = fromPeerSlice(r.GetPendingPeers())
+	s.CPUUsage = r.GetCPUUsage()
 	s.WrittenBytes = r.GetBytesWritten()
 	s.WrittenKeys = r.GetKeysWritten()
 	s.ReadBytes = r.GetBytesRead()
@@ -227,7 +232,7 @@ func (h *regionHandler) GetRegionByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	regionInfo := rc.GetRegion(regionID)
-	h.rd.JSON(w, http.StatusOK, NewRegionInfo(regionInfo))
+	h.rd.JSON(w, http.StatusOK, NewAPIRegionInfo(regionInfo))
 }
 
 // @Tags     region
@@ -246,7 +251,7 @@ func (h *regionHandler) GetRegion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	regionInfo := rc.GetRegionByKey([]byte(key))
-	h.rd.JSON(w, http.StatusOK, NewRegionInfo(regionInfo))
+	h.rd.JSON(w, http.StatusOK, NewAPIRegionInfo(regionInfo))
 }
 
 // @Tags     region
@@ -277,7 +282,7 @@ func (h *regionsHandler) CheckRegionsReplicated(w http.ResponseWriter, r *http.R
 	regions := rc.ScanRegions(startKey, endKey, -1)
 	state := "REPLICATED"
 	for _, region := range regions {
-		if !schedule.IsRegionReplicated(rc, region) {
+		if !filter.IsRegionReplicated(rc, region) {
 			state = "INPROGRESS"
 			if rc.GetCoordinator().IsPendingRegion(region.GetID()) {
 				state = "PENDING"
@@ -764,6 +769,19 @@ func (h *regionsHandler) GetTopSizeRegions(w http.ResponseWriter, r *http.Reques
 func (h *regionsHandler) GetTopKeysRegions(w http.ResponseWriter, r *http.Request) {
 	h.GetTopNRegions(w, r, func(a, b *core.RegionInfo) bool {
 		return a.GetApproximateKeys() < b.GetApproximateKeys()
+	})
+}
+
+// @Tags     region
+// @Summary  List regions with the highest CPU usage.
+// @Param    limit  query  integer  false  "Limit count"  default(16)
+// @Produce  json
+// @Success  200  {object}  RegionsInfo
+// @Failure  400  {string}  string  "The input is invalid."
+// @Router   /regions/cpu [get]
+func (h *regionsHandler) GetTopCPURegions(w http.ResponseWriter, r *http.Request) {
+	h.GetTopNRegions(w, r, func(a, b *core.RegionInfo) bool {
+		return a.GetCPUUsage() < b.GetCPUUsage()
 	})
 }
 

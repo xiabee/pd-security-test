@@ -16,12 +16,16 @@ package checker
 
 import (
 	"context"
+	"fmt"
+	"testing"
+	"time"
 
-	. "github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/cache"
+	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server/config"
@@ -31,10 +35,12 @@ import (
 	"github.com/tikv/pd/server/versioninfo"
 )
 
-var _ = Suite(&testRuleCheckerSuite{})
-var _ = SerialSuites(&testRuleCheckerSerialSuite{})
+func TestRuleCheckerTestSuite(t *testing.T) {
+	suite.Run(t, new(ruleCheckerTestSuite))
+}
 
-type testRuleCheckerSerialSuite struct {
+type ruleCheckerTestSuite struct {
+	suite.Suite
 	cluster     *mockcluster.Cluster
 	ruleManager *placement.RuleManager
 	rc          *RuleChecker
@@ -42,68 +48,41 @@ type testRuleCheckerSerialSuite struct {
 	cancel      context.CancelFunc
 }
 
-func (s *testRuleCheckerSerialSuite) SetUpSuite(c *C) {
-	s.ctx, s.cancel = context.WithCancel(context.Background())
-}
-
-func (s *testRuleCheckerSerialSuite) TearDownTest(c *C) {
-	s.cancel()
-}
-
-func (s *testRuleCheckerSerialSuite) SetUpTest(c *C) {
+func (suite *ruleCheckerTestSuite) SetupTest() {
 	cfg := config.NewTestOptions()
-	cfg.SetPlacementRulesCacheEnabled(true)
-	s.cluster = mockcluster.NewCluster(s.ctx, cfg)
-	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
-	s.cluster.SetEnablePlacementRules(true)
-	s.ruleManager = s.cluster.RuleManager
-	s.rc = NewRuleChecker(s.cluster, s.ruleManager, cache.NewDefaultCache(10))
+	suite.ctx, suite.cancel = context.WithCancel(context.Background())
+	suite.cluster = mockcluster.NewCluster(suite.ctx, cfg)
+	suite.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.SwitchWitness))
+	suite.cluster.SetEnablePlacementRules(true)
+	suite.cluster.SetEnableWitness(true)
+	suite.cluster.SetEnableUseJointConsensus(false)
+	suite.ruleManager = suite.cluster.RuleManager
+	suite.rc = NewRuleChecker(suite.ctx, suite.cluster, suite.ruleManager, cache.NewDefaultCache(10))
 }
 
-type testRuleCheckerSuite struct {
-	cluster     *mockcluster.Cluster
-	ruleManager *placement.RuleManager
-	rc          *RuleChecker
-	ctx         context.Context
-	cancel      context.CancelFunc
+func (suite *ruleCheckerTestSuite) TearDownTest() {
+	suite.cancel()
 }
 
-func (s *testRuleCheckerSuite) SetUpSuite(c *C) {
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+func (suite *ruleCheckerTestSuite) TestAddRulePeer() {
+	suite.cluster.AddLeaderStore(1, 1)
+	suite.cluster.AddLeaderStore(2, 1)
+	suite.cluster.AddLeaderStore(3, 1)
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("add-rule-peer", op.Desc())
+	suite.Equal(core.High, op.GetPriorityLevel())
+	suite.Equal(uint64(3), op.Step(0).(operator.AddLearner).ToStore)
 }
 
-func (s *testRuleCheckerSuite) TearDownTest(c *C) {
-	s.cancel()
-}
-
-func (s *testRuleCheckerSuite) SetUpTest(c *C) {
-	cfg := config.NewTestOptions()
-	s.cluster = mockcluster.NewCluster(s.ctx, cfg)
-	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
-	s.cluster.SetEnablePlacementRules(true)
-	s.ruleManager = s.cluster.RuleManager
-	s.rc = NewRuleChecker(s.cluster, s.ruleManager, cache.NewDefaultCache(10))
-}
-
-func (s *testRuleCheckerSuite) TestAddRulePeer(c *C) {
-	s.cluster.AddLeaderStore(1, 1)
-	s.cluster.AddLeaderStore(2, 1)
-	s.cluster.AddLeaderStore(3, 1)
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "add-rule-peer")
-	c.Assert(op.GetPriorityLevel(), Equals, core.HighPriority)
-	c.Assert(op.Step(0).(operator.AddLearner).ToStore, Equals, uint64(3))
-}
-
-func (s *testRuleCheckerSuite) TestAddRulePeerWithIsolationLevel(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1", "rack": "r1", "host": "h1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1", "rack": "r1", "host": "h2"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z1", "rack": "r2", "host": "h1"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z1", "rack": "r3", "host": "h1"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
-	s.ruleManager.SetRule(&placement.Rule{
+func (suite *ruleCheckerTestSuite) TestAddRulePeerWithIsolationLevel() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1", "rack": "r1", "host": "h1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1", "rack": "r1", "host": "h2"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z1", "rack": "r2", "host": "h1"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z1", "rack": "r3", "host": "h1"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
+	suite.ruleManager.SetRule(&placement.Rule{
 		GroupID:        "pd",
 		ID:             "test",
 		Index:          100,
@@ -113,10 +92,10 @@ func (s *testRuleCheckerSuite) TestAddRulePeerWithIsolationLevel(c *C) {
 		LocationLabels: []string{"zone", "rack", "host"},
 		IsolationLevel: "zone",
 	})
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 3)
-	s.ruleManager.SetRule(&placement.Rule{
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 3)
+	suite.ruleManager.SetRule(&placement.Rule{
 		GroupID:        "pd",
 		ID:             "test",
 		Index:          100,
@@ -126,75 +105,75 @@ func (s *testRuleCheckerSuite) TestAddRulePeerWithIsolationLevel(c *C) {
 		LocationLabels: []string{"zone", "rack", "host"},
 		IsolationLevel: "rack",
 	})
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "add-rule-peer")
-	c.Assert(op.Step(0).(operator.AddLearner).ToStore, Equals, uint64(4))
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("add-rule-peer", op.Desc())
+	suite.Equal(uint64(4), op.Step(0).(operator.AddLearner).ToStore)
 }
 
-func (s *testRuleCheckerSuite) TestFixPeer(c *C) {
-	s.cluster.AddLeaderStore(1, 1)
-	s.cluster.AddLeaderStore(2, 1)
-	s.cluster.AddLeaderStore(3, 1)
-	s.cluster.AddLeaderStore(4, 1)
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
-	s.cluster.SetStoreDown(2)
-	r := s.cluster.GetRegion(1)
+func (suite *ruleCheckerTestSuite) TestFixPeer() {
+	suite.cluster.AddLeaderStore(1, 1)
+	suite.cluster.AddLeaderStore(2, 1)
+	suite.cluster.AddLeaderStore(3, 1)
+	suite.cluster.AddLeaderStore(4, 1)
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
+	suite.cluster.SetStoreDown(2)
+	r := suite.cluster.GetRegion(1)
 	r = r.Clone(core.WithDownPeers([]*pdpb.PeerStats{{Peer: r.GetStorePeer(2), DownSeconds: 60000}}))
-	op = s.rc.Check(r)
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "replace-rule-down-peer")
-	c.Assert(op.GetPriorityLevel(), Equals, core.HighPriority)
+	op = suite.rc.Check(r)
+	suite.NotNil(op)
+	suite.Equal("replace-rule-down-peer", op.Desc())
+	suite.Equal(core.High, op.GetPriorityLevel())
 	var add operator.AddLearner
-	c.Assert(op.Step(0), FitsTypeOf, add)
-	s.cluster.SetStoreUp(2)
-	s.cluster.SetStoreOffline(2)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "replace-rule-offline-peer")
-	c.Assert(op.GetPriorityLevel(), Equals, core.HighPriority)
-	c.Assert(op.Step(0), FitsTypeOf, add)
+	suite.IsType(add, op.Step(0))
+	suite.cluster.SetStoreUp(2)
+	suite.cluster.SetStoreOffline(2)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("replace-rule-offline-peer", op.Desc())
+	suite.Equal(core.High, op.GetPriorityLevel())
+	suite.IsType(add, op.Step(0))
 
-	s.cluster.SetStoreUp(2)
+	suite.cluster.SetStoreUp(2)
 	// leader store offline
-	s.cluster.SetStoreOffline(1)
-	r1 := s.cluster.GetRegion(1)
+	suite.cluster.SetStoreOffline(1)
+	r1 := suite.cluster.GetRegion(1)
 	nr1 := r1.Clone(core.WithPendingPeers([]*metapb.Peer{r1.GetStorePeer(3)}))
-	s.cluster.PutRegion(nr1)
+	suite.cluster.PutRegion(nr1)
 	hasTransferLeader := false
 	for i := 0; i < 100; i++ {
-		op = s.rc.Check(s.cluster.GetRegion(1))
-		c.Assert(op, NotNil)
+		op = suite.rc.Check(suite.cluster.GetRegion(1))
+		suite.NotNil(op)
 		if step, ok := op.Step(0).(operator.TransferLeader); ok {
-			c.Assert(step.FromStore, Equals, uint64(1))
-			c.Assert(step.ToStore, Not(Equals), uint64(3))
+			suite.Equal(uint64(1), step.FromStore)
+			suite.NotEqual(uint64(3), step.ToStore)
 			hasTransferLeader = true
 		}
 	}
-	c.Assert(hasTransferLeader, IsTrue)
+	suite.True(hasTransferLeader)
 }
 
-func (s *testRuleCheckerSuite) TestFixOrphanPeers(c *C) {
-	s.cluster.AddLeaderStore(1, 1)
-	s.cluster.AddLeaderStore(2, 1)
-	s.cluster.AddLeaderStore(3, 1)
-	s.cluster.AddLeaderStore(4, 1)
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3, 4)
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "remove-orphan-peer")
-	c.Assert(op.Step(0).(operator.RemovePeer).FromStore, Equals, uint64(4))
+func (suite *ruleCheckerTestSuite) TestFixOrphanPeers() {
+	suite.cluster.AddLeaderStore(1, 1)
+	suite.cluster.AddLeaderStore(2, 1)
+	suite.cluster.AddLeaderStore(3, 1)
+	suite.cluster.AddLeaderStore(4, 1)
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3, 4)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("remove-orphan-peer", op.Desc())
+	suite.Equal(uint64(4), op.Step(0).(operator.RemovePeer).FromStore)
 }
 
-func (s *testRuleCheckerSuite) TestFixOrphanPeers2(c *C) {
+func (suite *ruleCheckerTestSuite) TestFixOrphanPeers2() {
 	// check orphan peers can only be handled when all rules are satisfied.
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"foo": "bar"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"foo": "bar"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"foo": "baz"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 3)
-	s.ruleManager.SetRule(&placement.Rule{
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"foo": "bar"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"foo": "bar"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"foo": "baz"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 3)
+	suite.ruleManager.SetRule(&placement.Rule{
 		GroupID:  "pd",
 		ID:       "r1",
 		Index:    100,
@@ -205,32 +184,32 @@ func (s *testRuleCheckerSuite) TestFixOrphanPeers2(c *C) {
 			{Key: "foo", Op: "in", Values: []string{"baz"}},
 		},
 	})
-	s.cluster.SetStoreDown(2)
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
+	suite.cluster.SetStoreDown(2)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
 }
 
-func (s *testRuleCheckerSuite) TestFixRole(c *C) {
-	s.cluster.AddLeaderStore(1, 1)
-	s.cluster.AddLeaderStore(2, 1)
-	s.cluster.AddLeaderStore(3, 1)
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 2, 1, 3)
-	r := s.cluster.GetRegion(1)
+func (suite *ruleCheckerTestSuite) TestFixRole() {
+	suite.cluster.AddLeaderStore(1, 1)
+	suite.cluster.AddLeaderStore(2, 1)
+	suite.cluster.AddLeaderStore(3, 1)
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 2, 1, 3)
+	r := suite.cluster.GetRegion(1)
 	p := r.GetStorePeer(1)
 	p.Role = metapb.PeerRole_Learner
 	r = r.Clone(core.WithLearners([]*metapb.Peer{p}))
-	op := s.rc.Check(r)
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "fix-peer-role")
-	c.Assert(op.Step(0).(operator.PromoteLearner).ToStore, Equals, uint64(1))
+	op := suite.rc.Check(r)
+	suite.NotNil(op)
+	suite.Equal("fix-peer-role", op.Desc())
+	suite.Equal(uint64(1), op.Step(0).(operator.PromoteLearner).ToStore)
 }
 
-func (s *testRuleCheckerSuite) TestFixRoleLeader(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"role": "follower"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"role": "follower"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"role": "voter"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
-	s.ruleManager.SetRule(&placement.Rule{
+func (suite *ruleCheckerTestSuite) TestFixRoleLeader() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"role": "follower"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"role": "follower"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"role": "voter"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
+	suite.ruleManager.SetRule(&placement.Rule{
 		GroupID:  "pd",
 		ID:       "r1",
 		Index:    100,
@@ -241,7 +220,7 @@ func (s *testRuleCheckerSuite) TestFixRoleLeader(c *C) {
 			{Key: "role", Op: "in", Values: []string{"voter"}},
 		},
 	})
-	s.ruleManager.SetRule(&placement.Rule{
+	suite.ruleManager.SetRule(&placement.Rule{
 		GroupID: "pd",
 		ID:      "r2",
 		Index:   101,
@@ -251,17 +230,17 @@ func (s *testRuleCheckerSuite) TestFixRoleLeader(c *C) {
 			{Key: "role", Op: "in", Values: []string{"follower"}},
 		},
 	})
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "fix-follower-role")
-	c.Assert(op.Step(0).(operator.TransferLeader).ToStore, Equals, uint64(3))
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("fix-follower-role", op.Desc())
+	suite.Equal(uint64(3), op.Step(0).(operator.TransferLeader).ToStore)
 }
 
-func (s *testRuleCheckerSuite) TestFixRoleLeaderIssue3130(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"role": "follower"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"role": "leader"})
-	s.cluster.AddLeaderRegion(1, 1, 2)
-	s.ruleManager.SetRule(&placement.Rule{
+func (suite *ruleCheckerTestSuite) TestFixRoleLeaderIssue3130() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"role": "follower"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"role": "leader"})
+	suite.cluster.AddLeaderRegion(1, 1, 2)
+	suite.ruleManager.SetRule(&placement.Rule{
 		GroupID:  "pd",
 		ID:       "r1",
 		Index:    100,
@@ -272,33 +251,33 @@ func (s *testRuleCheckerSuite) TestFixRoleLeaderIssue3130(c *C) {
 			{Key: "role", Op: "in", Values: []string{"leader"}},
 		},
 	})
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "fix-leader-role")
-	c.Assert(op.Step(0).(operator.TransferLeader).ToStore, Equals, uint64(2))
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("fix-leader-role", op.Desc())
+	suite.Equal(uint64(2), op.Step(0).(operator.TransferLeader).ToStore)
 
-	s.cluster.SetStoreBusy(2, true)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
-	s.cluster.SetStoreBusy(2, false)
+	suite.cluster.SetStoreBusy(2, true)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
+	suite.cluster.SetStoreBusy(2, false)
 
-	s.cluster.AddLeaderRegion(1, 2, 1)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "remove-orphan-peer")
-	c.Assert(op.Step(0).(operator.RemovePeer).FromStore, Equals, uint64(1))
+	suite.cluster.AddLeaderRegion(1, 2, 1)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("remove-orphan-peer", op.Desc())
+	suite.Equal(uint64(1), op.Step(0).(operator.RemovePeer).FromStore)
 }
 
-func (s *testRuleCheckerSuite) TestFixLeaderRoleWithUnhealthyRegion(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"rule": "follower"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"rule": "follower"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"rule": "leader"})
-	s.ruleManager.SetRuleGroup(&placement.RuleGroup{
+func (suite *ruleCheckerTestSuite) TestFixLeaderRoleWithUnhealthyRegion() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"rule": "follower"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"rule": "follower"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"rule": "leader"})
+	suite.ruleManager.SetRuleGroup(&placement.RuleGroup{
 		ID:       "cluster",
 		Index:    2,
 		Override: true,
 	})
-	err := s.ruleManager.SetRules([]*placement.Rule{
+	err := suite.ruleManager.SetRules([]*placement.Rule{
 		{
 			GroupID: "cluster",
 			ID:      "r1",
@@ -320,21 +299,229 @@ func (s *testRuleCheckerSuite) TestFixLeaderRoleWithUnhealthyRegion(c *C) {
 			},
 		},
 	})
-	c.Assert(err, IsNil)
+	suite.NoError(err)
 	// no Leader
-	s.cluster.AddNoLeaderRegion(1, 1, 2, 3)
-	r := s.cluster.GetRegion(1)
-	op := s.rc.Check(r)
-	c.Assert(op, IsNil)
+	suite.cluster.AddNoLeaderRegion(1, 1, 2, 3)
+	r := suite.cluster.GetRegion(1)
+	op := suite.rc.Check(r)
+	suite.Nil(op)
 }
 
-func (s *testRuleCheckerSuite) TestBetterReplacement(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host3"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
-	s.ruleManager.SetRule(&placement.Rule{
+func (suite *ruleCheckerTestSuite) TestFixRuleWitness() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"A": "leader"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"B": "follower"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"C": "voter"})
+	suite.cluster.AddLeaderRegion(1, 1, 2)
+
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID:   "pd",
+		ID:        "r1",
+		Index:     100,
+		Override:  true,
+		Role:      placement.Voter,
+		Count:     1,
+		IsWitness: true,
+		LabelConstraints: []placement.LabelConstraint{
+			{Key: "C", Op: "in", Values: []string{"voter"}},
+		},
+	})
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("add-rule-peer", op.Desc())
+	suite.Equal(uint64(3), op.Step(0).(operator.AddLearner).ToStore)
+	suite.True(op.Step(0).(operator.AddLearner).IsWitness)
+}
+
+func (suite *ruleCheckerTestSuite) TestFixRuleWitness2() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"A": "leader"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"B": "voter"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"C": "voter"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID:   "pd",
+		ID:        "r1",
+		Index:     100,
+		Override:  true,
+		Role:      placement.Voter,
+		Count:     1,
+		IsWitness: true,
+		LabelConstraints: []placement.LabelConstraint{
+			{Key: "C", Op: "in", Values: []string{"voter"}},
+		},
+	})
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("fix-witness-peer", op.Desc())
+	suite.Equal(uint64(3), op.Step(0).(operator.BecomeWitness).StoreID)
+}
+
+func (suite *ruleCheckerTestSuite) TestFixRuleWitness3() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"A": "leader"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"B": "voter"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"C": "voter"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	r := suite.cluster.GetRegion(1)
+	// set peer3 to witness
+	r = r.Clone(core.WithWitnesses([]*metapb.Peer{r.GetPeer(3)}))
+
+	op := suite.rc.Check(r)
+	suite.NotNil(op)
+	suite.Equal("fix-non-witness-peer", op.Desc())
+	suite.Equal(uint64(3), op.Step(0).(operator.RemovePeer).FromStore)
+	suite.Equal(uint64(3), op.Step(1).(operator.AddLearner).ToStore)
+}
+
+func (suite *ruleCheckerTestSuite) TestFixRuleWitness4() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"A": "leader"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"B": "voter"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"C": "learner"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	r := suite.cluster.GetRegion(1)
+	// set peer3 to witness learner
+	r = r.Clone(core.WithLearners([]*metapb.Peer{r.GetPeer(3)}))
+	r = r.Clone(core.WithWitnesses([]*metapb.Peer{r.GetPeer(3)}))
+
+	err := suite.ruleManager.SetRules([]*placement.Rule{
+		{
+			GroupID:   "pd",
+			ID:        "default",
+			Index:     100,
+			Override:  true,
+			Role:      placement.Voter,
+			Count:     2,
+			IsWitness: false,
+		},
+		{
+			GroupID:   "pd",
+			ID:        "r1",
+			Index:     100,
+			Override:  false,
+			Role:      placement.Learner,
+			Count:     1,
+			IsWitness: false,
+			LabelConstraints: []placement.LabelConstraint{
+				{Key: "C", Op: "in", Values: []string{"learner"}},
+			},
+		},
+	})
+	suite.NoError(err)
+
+	op := suite.rc.Check(r)
+	suite.NotNil(op)
+	suite.Equal("fix-non-witness-peer", op.Desc())
+	suite.Equal(uint64(3), op.Step(0).(operator.BecomeNonWitness).StoreID)
+}
+
+func (suite *ruleCheckerTestSuite) TestFixRuleWitness5() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"A": "leader"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"B": "voter"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"C": "voter"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	err := suite.ruleManager.SetRule(&placement.Rule{
+		GroupID:   "pd",
+		ID:        "r1",
+		Index:     100,
+		Override:  true,
+		Role:      placement.Voter,
+		Count:     2,
+		IsWitness: true,
+		LabelConstraints: []placement.LabelConstraint{
+			{Key: "A", Op: "In", Values: []string{"leader"}},
+		},
+	})
+	suite.Error(err)
+	suite.Equal(errs.ErrRuleContent.FastGenByArgs(fmt.Sprintf("define multiple witness by count %d", 2)).Error(), err.Error())
+}
+
+func (suite *ruleCheckerTestSuite) TestFixRuleWitness6() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"A": "leader"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"B": "voter"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"C": "voter"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	err := suite.ruleManager.SetRules([]*placement.Rule{
+		{
+			GroupID:   "pd",
+			ID:        "default",
+			Index:     100,
+			Role:      placement.Voter,
+			IsWitness: false,
+			Count:     2,
+		},
+		{
+			GroupID:   "pd",
+			ID:        "r1",
+			Index:     100,
+			Role:      placement.Voter,
+			Count:     1,
+			IsWitness: true,
+			LabelConstraints: []placement.LabelConstraint{
+				{Key: "C", Op: "in", Values: []string{"voter"}},
+			},
+		},
+	})
+	suite.NoError(err)
+
+	suite.rc.RecordRegionPromoteToNonWitness(1)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
+
+	suite.rc.switchWitnessCache.Remove(1)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+}
+
+func (suite *ruleCheckerTestSuite) TestDisableWitness() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"A": "leader"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"B": "voter"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"C": "voter"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	err := suite.ruleManager.SetRules([]*placement.Rule{
+		{
+			GroupID:   "pd",
+			ID:        "default",
+			Index:     100,
+			Role:      placement.Voter,
+			IsWitness: false,
+			Count:     2,
+		},
+		{
+			GroupID:   "pd",
+			ID:        "r1",
+			Index:     100,
+			Role:      placement.Voter,
+			Count:     1,
+			IsWitness: true,
+			LabelConstraints: []placement.LabelConstraint{
+				{Key: "C", Op: "in", Values: []string{"voter"}},
+			},
+		},
+	})
+	suite.NoError(err)
+
+	r := suite.cluster.GetRegion(1)
+	r = r.Clone(core.WithWitnesses([]*metapb.Peer{r.GetPeer(3)}))
+
+	op := suite.rc.Check(r)
+	suite.Nil(op)
+
+	suite.cluster.SetEnableWitness(false)
+	op = suite.rc.Check(r)
+	suite.NotNil(op)
+}
+
+func (suite *ruleCheckerTestSuite) TestBetterReplacement() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host3"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
+	suite.ruleManager.SetRule(&placement.Rule{
 		GroupID:        "pd",
 		ID:             "test",
 		Index:          100,
@@ -343,22 +530,22 @@ func (s *testRuleCheckerSuite) TestBetterReplacement(c *C) {
 		Count:          3,
 		LocationLabels: []string{"host"},
 	})
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "move-to-better-location")
-	c.Assert(op.Step(0).(operator.AddLearner).ToStore, Equals, uint64(4))
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 3, 4)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("move-to-better-location", op.Desc())
+	suite.Equal(uint64(4), op.Step(0).(operator.AddLearner).ToStore)
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 3, 4)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
 }
 
-func (s *testRuleCheckerSuite) TestBetterReplacement2(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1", "host": "host1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1", "host": "host2"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z1", "host": "host3"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z2", "host": "host1"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
-	s.ruleManager.SetRule(&placement.Rule{
+func (suite *ruleCheckerTestSuite) TestBetterReplacement2() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1", "host": "host1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1", "host": "host2"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z1", "host": "host3"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z2", "host": "host1"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
+	suite.ruleManager.SetRule(&placement.Rule{
 		GroupID:        "pd",
 		ID:             "test",
 		Index:          100,
@@ -367,21 +554,21 @@ func (s *testRuleCheckerSuite) TestBetterReplacement2(c *C) {
 		Count:          3,
 		LocationLabels: []string{"zone", "host"},
 	})
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "move-to-better-location")
-	c.Assert(op.Step(0).(operator.AddLearner).ToStore, Equals, uint64(4))
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 3, 4)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("move-to-better-location", op.Desc())
+	suite.Equal(uint64(4), op.Step(0).(operator.AddLearner).ToStore)
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 3, 4)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
 }
 
-func (s *testRuleCheckerSuite) TestNoBetterReplacement(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
-	s.ruleManager.SetRule(&placement.Rule{
+func (suite *ruleCheckerTestSuite) TestNoBetterReplacement() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
+	suite.ruleManager.SetRule(&placement.Rule{
 		GroupID:        "pd",
 		ID:             "test",
 		Index:          100,
@@ -390,92 +577,87 @@ func (s *testRuleCheckerSuite) TestNoBetterReplacement(c *C) {
 		Count:          3,
 		LocationLabels: []string{"host"},
 	})
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
 }
 
-func (s *testRuleCheckerSuite) TestIssue2419(c *C) {
-	s.cluster.AddLeaderStore(1, 1)
-	s.cluster.AddLeaderStore(2, 1)
-	s.cluster.AddLeaderStore(3, 1)
-	s.cluster.AddLeaderStore(4, 1)
-	s.cluster.SetStoreOffline(3)
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
-	r := s.cluster.GetRegion(1)
+func (suite *ruleCheckerTestSuite) TestIssue2419() {
+	suite.cluster.AddLeaderStore(1, 1)
+	suite.cluster.AddLeaderStore(2, 1)
+	suite.cluster.AddLeaderStore(3, 1)
+	suite.cluster.AddLeaderStore(4, 1)
+	suite.cluster.SetStoreOffline(3)
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
+	r := suite.cluster.GetRegion(1)
 	r = r.Clone(core.WithAddPeer(&metapb.Peer{Id: 5, StoreId: 4, Role: metapb.PeerRole_Learner}))
-	op := s.rc.Check(r)
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "remove-orphan-peer")
-	c.Assert(op.Step(0).(operator.RemovePeer).FromStore, Equals, uint64(4))
+	op := suite.rc.Check(r)
+	suite.NotNil(op)
+	suite.Equal("remove-orphan-peer", op.Desc())
+	suite.Equal(uint64(4), op.Step(0).(operator.RemovePeer).FromStore)
 
 	r = r.Clone(core.WithRemoveStorePeer(4))
-	op = s.rc.Check(r)
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "replace-rule-offline-peer")
-	c.Assert(op.Step(0).(operator.AddLearner).ToStore, Equals, uint64(4))
-	c.Assert(op.Step(1).(operator.PromoteLearner).ToStore, Equals, uint64(4))
-	c.Assert(op.Step(2).(operator.RemovePeer).FromStore, Equals, uint64(3))
+	op = suite.rc.Check(r)
+	suite.NotNil(op)
+	suite.Equal("replace-rule-offline-peer", op.Desc())
+	suite.Equal(uint64(4), op.Step(0).(operator.AddLearner).ToStore)
+	suite.Equal(uint64(4), op.Step(1).(operator.PromoteLearner).ToStore)
+	suite.Equal(uint64(3), op.Step(2).(operator.RemovePeer).FromStore)
 }
 
 // Ref https://github.com/tikv/pd/issues/3521 https://github.com/tikv/pd/issues/5786
 // The problem is when offline a store, we may add learner multiple times if
 // the operator is timeout.
-func (s *testRuleCheckerSuite) TestPriorityFixOrphanPeer(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host4"})
-	s.cluster.AddLabelsStore(5, 1, map[string]string{"host": "host5"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
+func (suite *ruleCheckerTestSuite) TestPriorityFixOrphanPeer() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host4"})
+	suite.cluster.AddLabelsStore(5, 1, map[string]string{"host": "host5"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
 	var add operator.AddLearner
 	var remove operator.RemovePeer
-	s.cluster.SetStoreOffline(2)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Step(0), FitsTypeOf, add)
-	c.Assert(op.Desc(), Equals, "replace-rule-offline-peer")
 	// Ref 5786
-	originRegion := s.cluster.GetRegion(1)
+	originRegion := suite.cluster.GetRegion(1)
 	learner4 := &metapb.Peer{Id: 114, StoreId: 4, Role: metapb.PeerRole_Learner}
 	testRegion := originRegion.Clone(
 		core.WithAddPeer(learner4),
 		core.WithAddPeer(&metapb.Peer{Id: 115, StoreId: 5, Role: metapb.PeerRole_Learner}),
 		core.WithPendingPeers([]*metapb.Peer{originRegion.GetStorePeer(2), learner4}),
 	)
-	s.cluster.PutRegion(testRegion)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert("remove-orphan-peer", Equals, op.Desc())
-	c.Assert(op.Step(0).(operator.RemovePeer), FitsTypeOf, remove)
+	suite.cluster.PutRegion(testRegion)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("remove-orphan-peer", op.Desc())
+	suite.IsType(remove, op.Step(0))
 	// Ref #3521
-	s.cluster.SetStoreOffline(2)
-	s.cluster.PutRegion(originRegion)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Step(0).(operator.AddLearner), FitsTypeOf, add)
-	c.Assert("replace-rule-offline-peer", Equals, op.Desc())
-	testRegion = s.cluster.GetRegion(1).Clone(core.WithAddPeer(
+	suite.cluster.SetStoreOffline(2)
+	suite.cluster.PutRegion(originRegion)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.IsType(add, op.Step(0))
+	suite.Equal("replace-rule-offline-peer", op.Desc())
+	testRegion = suite.cluster.GetRegion(1).Clone(core.WithAddPeer(
 		&metapb.Peer{
 			Id:      125,
 			StoreId: 4,
 			Role:    metapb.PeerRole_Learner,
 		}))
-	s.cluster.PutRegion(testRegion)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op.Step(0), FitsTypeOf, remove)
-	c.Assert(op.Desc(), Equals, "remove-orphan-peer")
+	suite.cluster.PutRegion(testRegion)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.IsType(remove, op.Step(0))
+	suite.Equal("remove-orphan-peer", op.Desc())
 }
 
-func (s *testRuleCheckerSuite) TestIssue3293(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host4"})
-	s.cluster.AddLabelsStore(5, 1, map[string]string{"host": "host5"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
-	err := s.ruleManager.SetRule(&placement.Rule{
+func (suite *ruleCheckerTestSuite) TestIssue3293() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host4"})
+	suite.cluster.AddLabelsStore(5, 1, map[string]string{"host": "host5"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
+	err := suite.ruleManager.SetRule(&placement.Rule{
 		GroupID: "TiDB_DDL_51",
 		ID:      "0",
 		Role:    placement.Follower,
@@ -490,26 +672,26 @@ func (s *testRuleCheckerSuite) TestIssue3293(c *C) {
 			},
 		},
 	})
-	c.Assert(err, IsNil)
-	s.cluster.DeleteStore(s.cluster.GetStore(5))
-	err = s.ruleManager.SetRule(&placement.Rule{
+	suite.NoError(err)
+	suite.cluster.DeleteStore(suite.cluster.GetStore(5))
+	err = suite.ruleManager.SetRule(&placement.Rule{
 		GroupID: "TiDB_DDL_51",
 		ID:      "default",
 		Role:    placement.Voter,
 		Count:   3,
 	})
-	c.Assert(err, IsNil)
-	err = s.ruleManager.DeleteRule("pd", "default")
-	c.Assert(err, IsNil)
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "add-rule-peer")
+	suite.NoError(err)
+	err = suite.ruleManager.DeleteRule("pd", "default")
+	suite.NoError(err)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("add-rule-peer", op.Desc())
 }
 
-func (s *testRuleCheckerSuite) TestIssue3299(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"dc": "sh"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
+func (suite *ruleCheckerTestSuite) TestIssue3299() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"dc": "sh"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
 
 	testCases := []struct {
 		constraints []placement.LabelConstraint
@@ -582,30 +764,30 @@ func (s *testRuleCheckerSuite) TestIssue3299(c *C) {
 		},
 	}
 
-	for _, t := range testCases {
-		err := s.ruleManager.SetRule(&placement.Rule{
+	for _, testCase := range testCases {
+		err := suite.ruleManager.SetRule(&placement.Rule{
 			GroupID:          "p",
 			ID:               "0",
 			Role:             placement.Follower,
 			Count:            1,
-			LabelConstraints: t.constraints,
+			LabelConstraints: testCase.constraints,
 		})
-		if t.err != "" {
-			c.Assert(err, ErrorMatches, t.err)
+		if testCase.err != "" {
+			suite.Regexp(testCase.err, err.Error())
 		} else {
-			c.Assert(err, IsNil)
+			suite.NoError(err)
 		}
 	}
 }
 
 // See issue: https://github.com/tikv/pd/issues/3705
-func (s *testRuleCheckerSuite) TestFixDownPeer(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z2"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z3"})
-	s.cluster.AddLabelsStore(5, 1, map[string]string{"zone": "z3"})
-	s.cluster.AddLeaderRegion(1, 1, 3, 4)
+func (suite *ruleCheckerTestSuite) TestFixDownPeer() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLabelsStore(5, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLeaderRegion(1, 1, 3, 4)
 	rule := &placement.Rule{
 		GroupID:        "pd",
 		ID:             "test",
@@ -615,33 +797,215 @@ func (s *testRuleCheckerSuite) TestFixDownPeer(c *C) {
 		Count:          3,
 		LocationLabels: []string{"zone"},
 	}
-	s.ruleManager.SetRule(rule)
+	suite.ruleManager.SetRule(rule)
 
-	region := s.cluster.GetRegion(1)
-	c.Assert(s.rc.Check(region), IsNil)
+	region := suite.cluster.GetRegion(1)
+	suite.Nil(suite.rc.Check(region))
 
-	s.cluster.SetStoreDown(4)
+	suite.cluster.SetStoreDown(4)
 	region = region.Clone(core.WithDownPeers([]*pdpb.PeerStats{
 		{Peer: region.GetStorePeer(4), DownSeconds: 6000},
 	}))
-	testutil.CheckTransferPeer(c, s.rc.Check(region), operator.OpRegion, 4, 5)
+	testutil.CheckTransferPeer(suite.Require(), suite.rc.Check(region), operator.OpRegion, 4, 5)
 
-	s.cluster.SetStoreDown(5)
-	testutil.CheckTransferPeer(c, s.rc.Check(region), operator.OpRegion, 4, 2)
+	suite.cluster.SetStoreDown(5)
+	testutil.CheckTransferPeer(suite.Require(), suite.rc.Check(region), operator.OpRegion, 4, 2)
 
 	rule.IsolationLevel = "zone"
-	s.ruleManager.SetRule(rule)
-	c.Assert(s.rc.Check(region), IsNil)
+	suite.ruleManager.SetRule(rule)
+	suite.Nil(suite.rc.Check(region))
+}
+
+func (suite *ruleCheckerTestSuite) TestFixDownPeerWithNoWitness() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	suite.cluster.SetStoreDown(2)
+	suite.cluster.GetStore(2).GetMeta().LastHeartbeat = time.Now().Add(-11 * time.Minute).UnixNano()
+	r := suite.cluster.GetRegion(1)
+	// set peer2 to down
+	r = r.Clone(core.WithDownPeers([]*pdpb.PeerStats{{Peer: r.GetStorePeer(2), DownSeconds: 600}}))
+	suite.Nil(suite.rc.Check(r))
+}
+
+func (suite *ruleCheckerTestSuite) TestFixDownWitnessPeer() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	suite.cluster.SetStoreDown(2)
+	suite.cluster.GetStore(2).GetMeta().LastHeartbeat = time.Now().Add(-11 * time.Minute).UnixNano()
+	r := suite.cluster.GetRegion(1)
+	// set peer2 to down
+	r = r.Clone(core.WithDownPeers([]*pdpb.PeerStats{{Peer: r.GetStorePeer(2), DownSeconds: 600}}))
+	// set peer2 to witness
+	r = r.Clone(core.WithWitnesses([]*metapb.Peer{r.GetPeer(2)}))
+
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID: "pd",
+		ID:      "default",
+		Role:    placement.Voter,
+		Count:   2,
+	})
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID:   "pd",
+		ID:        "r1",
+		Role:      placement.Voter,
+		Count:     1,
+		IsWitness: true,
+	})
+	suite.Nil(suite.rc.Check(r))
+
+	suite.cluster.GetStore(2).GetMeta().LastHeartbeat = time.Now().Add(-31 * time.Minute).UnixNano()
+	suite.Nil(suite.rc.Check(r))
+}
+
+func (suite *ruleCheckerTestSuite) TestFixDownPeerWithAvailableWitness() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	suite.cluster.SetStoreDown(2)
+	suite.cluster.GetStore(2).GetMeta().LastHeartbeat = time.Now().Add(-11 * time.Minute).UnixNano()
+	r := suite.cluster.GetRegion(1)
+	// set peer2 to down
+	r = r.Clone(core.WithDownPeers([]*pdpb.PeerStats{{Peer: r.GetStorePeer(2), DownSeconds: 600}}))
+	// set peer3 to witness
+	r = r.Clone(core.WithWitnesses([]*metapb.Peer{r.GetPeer(3)}))
+
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID: "pd",
+		ID:      "default",
+		Role:    placement.Voter,
+		Count:   2,
+	})
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID:   "pd",
+		ID:        "r1",
+		Role:      placement.Voter,
+		Count:     1,
+		IsWitness: true,
+	})
+
+	op := suite.rc.Check(r)
+
+	suite.NotNil(op)
+	suite.Equal("promote-witness", op.Desc())
+	suite.Equal(uint64(3), op.Step(0).(operator.RemovePeer).FromStore)
+	suite.Equal(uint64(3), op.Step(1).(operator.AddLearner).ToStore)
+	suite.Equal(uint64(3), op.Step(2).(operator.BecomeNonWitness).StoreID)
+	suite.Equal(uint64(3), op.Step(3).(operator.PromoteLearner).ToStore)
+}
+
+func (suite *ruleCheckerTestSuite) TestFixDownPeerWithAvailableWitness2() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	suite.cluster.SetStoreDown(2)
+	suite.cluster.GetStore(2).GetMeta().LastHeartbeat = time.Now().Add(-31 * time.Minute).UnixNano()
+	r := suite.cluster.GetRegion(1)
+	// set peer2 to down
+	r = r.Clone(core.WithDownPeers([]*pdpb.PeerStats{{Peer: r.GetStorePeer(2), DownSeconds: 6000}}))
+	// set peer3 to witness
+	r = r.Clone(core.WithWitnesses([]*metapb.Peer{r.GetPeer(3)}))
+
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID: "pd",
+		ID:      "default",
+		Role:    placement.Voter,
+		Count:   2,
+	})
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID:   "pd",
+		ID:        "r1",
+		Role:      placement.Voter,
+		Count:     1,
+		IsWitness: true,
+	})
+
+	op := suite.rc.Check(r)
+
+	suite.Nil(op)
+}
+
+func (suite *ruleCheckerTestSuite) TestFixDownPeerWithAvailableWitness3() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	suite.cluster.SetStoreDown(2)
+	suite.cluster.GetStore(2).GetMeta().LastHeartbeat = time.Now().Add(-31 * time.Minute).UnixNano()
+	r := suite.cluster.GetRegion(1)
+	// set peer2 to down
+	r = r.Clone(core.WithDownPeers([]*pdpb.PeerStats{{Peer: r.GetStorePeer(2), DownSeconds: 6000}}))
+	// set peer3 to witness
+	r = r.Clone(core.WithWitnesses([]*metapb.Peer{r.GetPeer(3)}))
+
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID: "pd",
+		ID:      "default",
+		Role:    placement.Voter,
+		Count:   2,
+	})
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID:   "pd",
+		ID:        "r1",
+		Role:      placement.Voter,
+		Count:     1,
+		IsWitness: true,
+	})
+
+	op := suite.rc.Check(r)
+
+	suite.NotNil(op)
+	suite.Equal("replace-rule-down-peer", op.Desc())
+	suite.Equal(uint64(4), op.Step(0).(operator.AddLearner).ToStore)
+	suite.True(op.Step(0).(operator.AddLearner).IsWitness)
+	suite.Equal(uint64(4), op.Step(1).(operator.PromoteLearner).ToStore)
+	suite.True(op.Step(1).(operator.PromoteLearner).IsWitness)
+	suite.Equal(uint64(2), op.Step(2).(operator.RemovePeer).FromStore)
+}
+
+func (suite *ruleCheckerTestSuite) TestFixDownPeerWithAvailableWitness4() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+
+	suite.cluster.SetStoreDown(2)
+	suite.cluster.GetStore(2).GetMeta().LastHeartbeat = time.Now().Add(-31 * time.Minute).UnixNano()
+	r := suite.cluster.GetRegion(1)
+	// set peer2 to down
+	r = r.Clone(core.WithDownPeers([]*pdpb.PeerStats{{Peer: r.GetStorePeer(2), DownSeconds: 6000}}))
+
+	op := suite.rc.Check(r)
+
+	suite.NotNil(op)
+	suite.Equal("replace-rule-down-peer", op.Desc())
+	suite.Equal(uint64(4), op.Step(0).(operator.AddLearner).ToStore)
+	suite.True(op.Step(0).(operator.AddLearner).IsWitness)
+	suite.Equal(uint64(4), op.Step(1).(operator.PromoteLearner).ToStore)
+	suite.True(op.Step(1).(operator.PromoteLearner).IsWitness)
+	suite.Equal(uint64(2), op.Step(2).(operator.RemovePeer).FromStore)
 }
 
 // See issue: https://github.com/tikv/pd/issues/3705
-func (s *testRuleCheckerSuite) TestFixOfflinePeer(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z2"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z3"})
-	s.cluster.AddLabelsStore(5, 1, map[string]string{"zone": "z3"})
-	s.cluster.AddLeaderRegion(1, 1, 3, 4)
+func (suite *ruleCheckerTestSuite) TestFixOfflinePeer() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLabelsStore(5, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLeaderRegion(1, 1, 3, 4)
 	rule := &placement.Rule{
 		GroupID:        "pd",
 		ID:             "test",
@@ -651,30 +1015,62 @@ func (s *testRuleCheckerSuite) TestFixOfflinePeer(c *C) {
 		Count:          3,
 		LocationLabels: []string{"zone"},
 	}
-	s.ruleManager.SetRule(rule)
+	suite.ruleManager.SetRule(rule)
 
-	region := s.cluster.GetRegion(1)
-	c.Assert(s.rc.Check(region), IsNil)
+	region := suite.cluster.GetRegion(1)
+	suite.Nil(suite.rc.Check(region))
 
-	s.cluster.SetStoreOffline(4)
-	testutil.CheckTransferPeer(c, s.rc.Check(region), operator.OpRegion, 4, 5)
+	suite.cluster.SetStoreOffline(4)
+	testutil.CheckTransferPeer(suite.Require(), suite.rc.Check(region), operator.OpRegion, 4, 5)
 
-	s.cluster.SetStoreOffline(5)
-	testutil.CheckTransferPeer(c, s.rc.Check(region), operator.OpRegion, 4, 2)
+	suite.cluster.SetStoreOffline(5)
+	testutil.CheckTransferPeer(suite.Require(), suite.rc.Check(region), operator.OpRegion, 4, 2)
 
 	rule.IsolationLevel = "zone"
-	s.ruleManager.SetRule(rule)
-	c.Assert(s.rc.Check(region), IsNil)
+	suite.ruleManager.SetRule(rule)
+	suite.Nil(suite.rc.Check(region))
 }
 
-func (s *testRuleCheckerSerialSuite) TestRuleCache(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z2"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z3"})
-	s.cluster.AddLabelsStore(5, 1, map[string]string{"zone": "z3"})
-	s.cluster.AddRegionStore(999, 1)
-	s.cluster.AddLeaderRegion(1, 1, 3, 4)
+func (suite *ruleCheckerTestSuite) TestFixOfflinePeerWithAvaliableWitness() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLabelsStore(5, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLeaderRegion(1, 1, 3, 4)
+
+	r := suite.cluster.GetRegion(1)
+	r = r.Clone(core.WithWitnesses([]*metapb.Peer{r.GetPeer(2)}))
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID: "pd",
+		ID:      "default",
+		Role:    placement.Voter,
+		Count:   2,
+	})
+	suite.ruleManager.SetRule(&placement.Rule{
+		GroupID:   "pd",
+		ID:        "r1",
+		Role:      placement.Voter,
+		Count:     1,
+		IsWitness: true,
+	})
+	suite.Nil(suite.rc.Check(r))
+
+	suite.cluster.SetStoreOffline(4)
+	op := suite.rc.Check(r)
+	suite.NotNil(op)
+	suite.Equal("replace-rule-offline-peer", op.Desc())
+}
+
+func (suite *ruleCheckerTestSuite) TestRuleCache() {
+	suite.cluster.PersistOptions.SetPlacementRulesCacheEnabled(true)
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z2"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddLabelsStore(5, 1, map[string]string{"zone": "z3"})
+	suite.cluster.AddRegionStore(999, 1)
+	suite.cluster.AddLeaderRegion(1, 1, 3, 4)
 	rule := &placement.Rule{
 		GroupID:        "pd",
 		ID:             "test",
@@ -684,12 +1080,12 @@ func (s *testRuleCheckerSerialSuite) TestRuleCache(c *C) {
 		Count:          3,
 		LocationLabels: []string{"zone"},
 	}
-	s.ruleManager.SetRule(rule)
-	region := s.cluster.GetRegion(1)
+	suite.ruleManager.SetRule(rule)
+	region := suite.cluster.GetRegion(1)
 	region = region.Clone(core.WithIncConfVer(), core.WithIncVersion())
-	c.Assert(s.rc.Check(region), IsNil)
+	suite.Nil(suite.rc.Check(region))
 
-	testcases := []struct {
+	testCases := []struct {
 		name        string
 		region      *core.RegionInfo
 		stillCached bool
@@ -727,36 +1123,36 @@ func (s *testRuleCheckerSerialSuite) TestRuleCache(c *C) {
 			stillCached: false,
 		},
 	}
-	for _, testcase := range testcases {
-		c.Log(testcase.name)
-		if testcase.stillCached {
-			c.Assert(failpoint.Enable("github.com/tikv/pd/server/schedule/checker/assertShouldCache", "return(true)"), IsNil)
-			s.rc.Check(testcase.region)
-			c.Assert(failpoint.Disable("github.com/tikv/pd/server/schedule/checker/assertShouldCache"), IsNil)
+	for _, testCase := range testCases {
+		suite.T().Log(testCase.name)
+		if testCase.stillCached {
+			suite.NoError(failpoint.Enable("github.com/tikv/pd/server/schedule/checker/assertShouldCache", "return(true)"))
+			suite.rc.Check(testCase.region)
+			suite.NoError(failpoint.Disable("github.com/tikv/pd/server/schedule/checker/assertShouldCache"))
 		} else {
-			c.Assert(failpoint.Enable("github.com/tikv/pd/server/schedule/checker/assertShouldNotCache", "return(true)"), IsNil)
-			s.rc.Check(testcase.region)
-			c.Assert(failpoint.Disable("github.com/tikv/pd/server/schedule/checker/assertShouldNotCache"), IsNil)
+			suite.NoError(failpoint.Enable("github.com/tikv/pd/server/schedule/checker/assertShouldNotCache", "return(true)"))
+			suite.rc.Check(testCase.region)
+			suite.NoError(failpoint.Disable("github.com/tikv/pd/server/schedule/checker/assertShouldNotCache"))
 		}
 	}
 }
 
 // Ref https://github.com/tikv/pd/issues/4045
-func (s *testRuleCheckerSuite) TestSkipFixOrphanPeerIfSelectedPeerisPendingOrDown(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host4"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3, 4)
+func (suite *ruleCheckerTestSuite) TestSkipFixOrphanPeerIfSelectedPeerisPendingOrDown() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host2"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host4"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3, 4)
 
 	// set peer3 and peer4 to pending
-	r1 := s.cluster.GetRegion(1)
+	r1 := suite.cluster.GetRegion(1)
 	r1 = r1.Clone(core.WithPendingPeers([]*metapb.Peer{r1.GetStorePeer(3), r1.GetStorePeer(4)}))
-	s.cluster.PutRegion(r1)
+	suite.cluster.PutRegion(r1)
 
 	// should not remove extra peer
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
 
 	// set peer3 to down-peer
 	r1 = r1.Clone(core.WithPendingPeers([]*metapb.Peer{r1.GetStorePeer(4)}))
@@ -766,39 +1162,39 @@ func (s *testRuleCheckerSuite) TestSkipFixOrphanPeerIfSelectedPeerisPendingOrDow
 			DownSeconds: 42,
 		},
 	}))
-	s.cluster.PutRegion(r1)
+	suite.cluster.PutRegion(r1)
 
 	// should not remove extra peer
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
 
 	// set peer3 to normal
 	r1 = r1.Clone(core.WithDownPeers(nil))
-	s.cluster.PutRegion(r1)
+	suite.cluster.PutRegion(r1)
 
 	// should remove extra peer now
 	var remove operator.RemovePeer
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op.Step(0), FitsTypeOf, remove)
-	c.Assert(op.Desc(), Equals, "remove-orphan-peer")
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.IsType(remove, op.Step(0))
+	suite.Equal("remove-orphan-peer", op.Desc())
 }
 
-func (s *testRuleCheckerSuite) TestPriorityFitHealthPeers(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host2"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host3"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host4"})
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3, 4)
-	r1 := s.cluster.GetRegion(1)
+func (suite *ruleCheckerTestSuite) TestPriorityFitHealthPeers() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"host": "host1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"host": "host2"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"host": "host3"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"host": "host4"})
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2, 3, 4)
+	r1 := suite.cluster.GetRegion(1)
 
 	// set peer3 to pending
 	r1 = r1.Clone(core.WithPendingPeers([]*metapb.Peer{r1.GetPeer(3)}))
-	s.cluster.PutRegion(r1)
+	suite.cluster.PutRegion(r1)
 
 	var remove operator.RemovePeer
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op.Step(0), FitsTypeOf, remove)
-	c.Assert(op.Desc(), Equals, "remove-orphan-peer")
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.IsType(remove, op.Step(0))
+	suite.Equal("remove-orphan-peer", op.Desc())
 
 	// set peer3 to down
 	r1 = r1.Clone(core.WithDownPeers([]*pdpb.PeerStats{
@@ -808,18 +1204,18 @@ func (s *testRuleCheckerSuite) TestPriorityFitHealthPeers(c *C) {
 		},
 	}))
 	r1 = r1.Clone(core.WithPendingPeers(nil))
-	s.cluster.PutRegion(r1)
+	suite.cluster.PutRegion(r1)
 
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op.Step(0), FitsTypeOf, remove)
-	c.Assert(op.Desc(), Equals, "remove-orphan-peer")
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.IsType(remove, op.Step(0))
+	suite.Equal("remove-orphan-peer", op.Desc())
 }
 
 // Ref https://github.com/tikv/pd/issues/4140
-func (s *testRuleCheckerSuite) TestDemoteVoter(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z4"})
-	region := s.cluster.AddLeaderRegion(1, 1, 4)
+func (suite *ruleCheckerTestSuite) TestDemoteVoter() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z4"})
+	region := suite.cluster.AddLeaderRegion(1, 1, 4)
 	rule := &placement.Rule{
 		GroupID: "pd",
 		ID:      "test",
@@ -846,57 +1242,57 @@ func (s *testRuleCheckerSuite) TestDemoteVoter(c *C) {
 			},
 		},
 	}
-	s.ruleManager.SetRule(rule)
-	s.ruleManager.SetRule(rule2)
-	s.ruleManager.DeleteRule("pd", "default")
-	op := s.rc.Check(region)
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "fix-demote-voter")
+	suite.ruleManager.SetRule(rule)
+	suite.ruleManager.SetRule(rule2)
+	suite.ruleManager.DeleteRule("pd", "default")
+	op := suite.rc.Check(region)
+	suite.NotNil(op)
+	suite.Equal("fix-demote-voter", op.Desc())
 }
 
-func (s *testRuleCheckerSuite) TestOfflineAndDownStore(c *C) {
-	s.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
-	s.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z4"})
-	s.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z1"})
-	s.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z4"})
-	region := s.cluster.AddLeaderRegion(1, 1, 2, 3)
-	op := s.rc.Check(region)
-	c.Assert(op, IsNil)
+func (suite *ruleCheckerTestSuite) TestOfflineAndDownStore() {
+	suite.cluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(2, 1, map[string]string{"zone": "z4"})
+	suite.cluster.AddLabelsStore(3, 1, map[string]string{"zone": "z1"})
+	suite.cluster.AddLabelsStore(4, 1, map[string]string{"zone": "z4"})
+	region := suite.cluster.AddLeaderRegion(1, 1, 2, 3)
+	op := suite.rc.Check(region)
+	suite.Nil(op)
 	// assert rule checker should generate replace offline peer operator after cached
-	s.cluster.SetStoreOffline(1)
-	op = s.rc.Check(region)
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "replace-rule-offline-peer")
+	suite.cluster.SetStoreOffline(1)
+	op = suite.rc.Check(region)
+	suite.NotNil(op)
+	suite.Equal("replace-rule-offline-peer", op.Desc())
 	// re-cache the regionFit
-	s.cluster.SetStoreUp(1)
-	op = s.rc.Check(region)
-	c.Assert(op, IsNil)
+	suite.cluster.SetStoreUp(1)
+	op = suite.rc.Check(region)
+	suite.Nil(op)
 
 	// assert rule checker should generate replace down peer operator after cached
-	s.cluster.SetStoreDown(2)
+	suite.cluster.SetStoreDown(2)
 	region = region.Clone(core.WithDownPeers([]*pdpb.PeerStats{{Peer: region.GetStorePeer(2), DownSeconds: 60000}}))
-	op = s.rc.Check(region)
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "replace-rule-down-peer")
+	op = suite.rc.Check(region)
+	suite.NotNil(op)
+	suite.Equal("replace-rule-down-peer", op.Desc())
 }
 
-func (s *testRuleCheckerSuite) TestPendingList(c *C) {
+func (suite *ruleCheckerTestSuite) TestPendingList() {
 	// no enough store
-	s.cluster.AddLeaderStore(1, 1)
-	s.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
-	op := s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, IsNil)
-	_, exist := s.rc.pendingList.Get(1)
-	c.Assert(exist, IsTrue)
+	suite.cluster.AddLeaderStore(1, 1)
+	suite.cluster.AddLeaderRegionWithRange(1, "", "", 1, 2)
+	op := suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.Nil(op)
+	_, exist := suite.rc.pendingList.Get(1)
+	suite.True(exist)
 
 	// add more stores
-	s.cluster.AddLeaderStore(2, 1)
-	s.cluster.AddLeaderStore(3, 1)
-	op = s.rc.Check(s.cluster.GetRegion(1))
-	c.Assert(op, NotNil)
-	c.Assert(op.Desc(), Equals, "add-rule-peer")
-	c.Assert(op.GetPriorityLevel(), Equals, core.HighPriority)
-	c.Assert(op.Step(0).(operator.AddLearner).ToStore, Equals, uint64(3))
-	_, exist = s.rc.pendingList.Get(1)
-	c.Assert(exist, IsFalse)
+	suite.cluster.AddLeaderStore(2, 1)
+	suite.cluster.AddLeaderStore(3, 1)
+	op = suite.rc.Check(suite.cluster.GetRegion(1))
+	suite.NotNil(op)
+	suite.Equal("add-rule-peer", op.Desc())
+	suite.Equal(core.High, op.GetPriorityLevel())
+	suite.Equal(uint64(3), op.Step(0).(operator.AddLearner).ToStore)
+	_, exist = suite.rc.pendingList.Get(1)
+	suite.False(exist)
 }
