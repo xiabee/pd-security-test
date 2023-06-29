@@ -17,13 +17,16 @@ package encryption
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
 )
+
+type testRegionCrypterSuite struct{}
+
+var _ = Suite(&testRegionCrypterSuite{})
 
 type testKeyManager struct {
 	Keys              *encryptionpb.KeyDictionary
@@ -69,20 +72,16 @@ func (m *testKeyManager) GetKey(keyID uint64) (*encryptionpb.DataKey, error) {
 	return key, nil
 }
 
-func TestNilRegion(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testRegionCrypterSuite) TestNilRegion(c *C) {
 	m := newTestKeyManager()
 	region, err := EncryptRegion(nil, m)
-	re.Error(err)
-	re.Nil(region)
+	c.Assert(err, NotNil)
+	c.Assert(region, IsNil)
 	err = DecryptRegion(nil, m)
-	re.Error(err)
+	c.Assert(err, NotNil)
 }
 
-func TestEncryptRegionWithoutKeyManager(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testRegionCrypterSuite) TestEncryptRegionWithoutKeyManager(c *C) {
 	region := &metapb.Region{
 		Id:             10,
 		StartKey:       []byte("abc"),
@@ -90,16 +89,14 @@ func TestEncryptRegionWithoutKeyManager(t *testing.T) {
 		EncryptionMeta: nil,
 	}
 	region, err := EncryptRegion(region, nil)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// check the region isn't changed
-	re.Equal("abc", string(region.StartKey))
-	re.Equal("xyz", string(region.EndKey))
-	re.Nil(region.EncryptionMeta)
+	c.Assert(string(region.StartKey), Equals, "abc")
+	c.Assert(string(region.EndKey), Equals, "xyz")
+	c.Assert(region.EncryptionMeta, IsNil)
 }
 
-func TestEncryptRegionWhileEncryptionDisabled(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testRegionCrypterSuite) TestEncryptRegionWhileEncryptionDisabled(c *C) {
 	region := &metapb.Region{
 		Id:             10,
 		StartKey:       []byte("abc"),
@@ -109,16 +106,14 @@ func TestEncryptRegionWhileEncryptionDisabled(t *testing.T) {
 	m := newTestKeyManager()
 	m.EncryptionEnabled = false
 	region, err := EncryptRegion(region, m)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// check the region isn't changed
-	re.Equal("abc", string(region.StartKey))
-	re.Equal("xyz", string(region.EndKey))
-	re.Nil(region.EncryptionMeta)
+	c.Assert(string(region.StartKey), Equals, "abc")
+	c.Assert(string(region.EndKey), Equals, "xyz")
+	c.Assert(region.EncryptionMeta, IsNil)
 }
 
-func TestEncryptRegion(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testRegionCrypterSuite) TestEncryptRegion(c *C) {
 	startKey := []byte("abc")
 	endKey := []byte("xyz")
 	region := &metapb.Region{
@@ -131,29 +126,27 @@ func TestEncryptRegion(t *testing.T) {
 	copy(region.EndKey, endKey)
 	m := newTestKeyManager()
 	outRegion, err := EncryptRegion(region, m)
-	re.NoError(err)
-	re.NotEqual(region, outRegion)
+	c.Assert(err, IsNil)
+	c.Assert(outRegion, Not(Equals), region)
 	// check region is encrypted
-	re.NotNil(outRegion.EncryptionMeta)
-	re.Equal(uint64(2), outRegion.EncryptionMeta.KeyId)
-	re.Len(outRegion.EncryptionMeta.Iv, ivLengthCTR)
+	c.Assert(outRegion.EncryptionMeta, Not(IsNil))
+	c.Assert(outRegion.EncryptionMeta.KeyId, Equals, uint64(2))
+	c.Assert(outRegion.EncryptionMeta.Iv, HasLen, ivLengthCTR)
 	// Check encrypted content
 	_, currentKey, err := m.GetCurrentKey()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	block, err := aes.NewCipher(currentKey.Key)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	stream := cipher.NewCTR(block, outRegion.EncryptionMeta.Iv)
 	ciphertextStartKey := make([]byte, len(startKey))
 	stream.XORKeyStream(ciphertextStartKey, startKey)
-	re.Equal(string(ciphertextStartKey), string(outRegion.StartKey))
+	c.Assert(string(outRegion.StartKey), Equals, string(ciphertextStartKey))
 	ciphertextEndKey := make([]byte, len(endKey))
 	stream.XORKeyStream(ciphertextEndKey, endKey)
-	re.Equal(string(ciphertextEndKey), string(outRegion.EndKey))
+	c.Assert(string(outRegion.EndKey), Equals, string(ciphertextEndKey))
 }
 
-func TestDecryptRegionNotEncrypted(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testRegionCrypterSuite) TestDecryptRegionNotEncrypted(c *C) {
 	region := &metapb.Region{
 		Id:             10,
 		StartKey:       []byte("abc"),
@@ -162,16 +155,14 @@ func TestDecryptRegionNotEncrypted(t *testing.T) {
 	}
 	m := newTestKeyManager()
 	err := DecryptRegion(region, m)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// check the region isn't changed
-	re.Equal("abc", string(region.StartKey))
-	re.Equal("xyz", string(region.EndKey))
-	re.Nil(region.EncryptionMeta)
+	c.Assert(string(region.StartKey), Equals, "abc")
+	c.Assert(string(region.EndKey), Equals, "xyz")
+	c.Assert(region.EncryptionMeta, IsNil)
 }
 
-func TestDecryptRegionWithoutKeyManager(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testRegionCrypterSuite) TestDecryptRegionWithoutKeyManager(c *C) {
 	region := &metapb.Region{
 		Id:       10,
 		StartKey: []byte("abc"),
@@ -182,16 +173,14 @@ func TestDecryptRegionWithoutKeyManager(t *testing.T) {
 		},
 	}
 	err := DecryptRegion(region, nil)
-	re.Error(err)
+	c.Assert(err, Not(IsNil))
 }
 
-func TestDecryptRegionWhileKeyMissing(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testRegionCrypterSuite) TestDecryptRegionWhileKeyMissing(c *C) {
 	keyID := uint64(3)
 	m := newTestKeyManager()
 	_, err := m.GetKey(3)
-	re.Error(err)
+	c.Assert(err, Not(IsNil))
 
 	region := &metapb.Region{
 		Id:       10,
@@ -203,12 +192,10 @@ func TestDecryptRegionWhileKeyMissing(t *testing.T) {
 		},
 	}
 	err = DecryptRegion(region, m)
-	re.Error(err)
+	c.Assert(err, Not(IsNil))
 }
 
-func TestDecryptRegion(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testRegionCrypterSuite) TestDecryptRegion(c *C) {
 	keyID := uint64(1)
 	startKey := []byte("abc")
 	endKey := []byte("xyz")
@@ -227,19 +214,19 @@ func TestDecryptRegion(t *testing.T) {
 	copy(region.EncryptionMeta.Iv, iv)
 	m := newTestKeyManager()
 	err := DecryptRegion(region, m)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// check region is decrypted
-	re.Nil(region.EncryptionMeta)
+	c.Assert(region.EncryptionMeta, IsNil)
 	// Check decrypted content
 	key, err := m.GetKey(keyID)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	block, err := aes.NewCipher(key.Key)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	stream := cipher.NewCTR(block, iv)
 	plaintextStartKey := make([]byte, len(startKey))
 	stream.XORKeyStream(plaintextStartKey, startKey)
-	re.Equal(string(plaintextStartKey), string(region.StartKey))
+	c.Assert(string(region.StartKey), Equals, string(plaintextStartKey))
 	plaintextEndKey := make([]byte, len(endKey))
 	stream.XORKeyStream(plaintextEndKey, endKey)
-	re.Equal(string(plaintextEndKey), string(region.EndKey))
+	c.Assert(string(region.EndKey), Equals, string(plaintextEndKey))
 }

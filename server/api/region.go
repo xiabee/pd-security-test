@@ -22,7 +22,6 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/failpoint"
@@ -34,7 +33,7 @@ import (
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule/filter"
+	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/statistics"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
@@ -61,9 +60,6 @@ type PDPeerStats struct {
 }
 
 func fromPeer(peer *metapb.Peer) MetaPeer {
-	if peer == nil {
-		return MetaPeer{}
-	}
 	return MetaPeer{
 		Peer:      peer,
 		RoleName:  peer.GetRole().String(),
@@ -112,7 +108,6 @@ type RegionInfo struct {
 	Leader          MetaPeer      `json:"leader,omitempty"`
 	DownPeers       []PDPeerStats `json:"down_peers,omitempty"`
 	PendingPeers    []MetaPeer    `json:"pending_peers,omitempty"`
-	CPUUsage        uint64        `json:"cpu_usage"`
 	WrittenBytes    uint64        `json:"written_bytes"`
 	ReadBytes       uint64        `json:"read_bytes"`
 	WrittenKeys     uint64        `json:"written_keys"`
@@ -141,12 +136,12 @@ func fromPBReplicationStatus(s *replication_modepb.RegionReplicationStatus) *Rep
 	}
 }
 
-// NewAPIRegionInfo create a new API RegionInfo.
-func NewAPIRegionInfo(r *core.RegionInfo) *RegionInfo {
+// NewRegionInfo create a new api RegionInfo.
+func NewRegionInfo(r *core.RegionInfo) *RegionInfo {
 	return InitRegion(r, &RegionInfo{})
 }
 
-// InitRegion init a new API RegionInfo from the core.RegionInfo.
+// InitRegion init a new api RegionInfo from the core.RegionInfo.
 func InitRegion(r *core.RegionInfo, s *RegionInfo) *RegionInfo {
 	if r == nil {
 		return nil
@@ -160,7 +155,6 @@ func InitRegion(r *core.RegionInfo, s *RegionInfo) *RegionInfo {
 	s.Leader = fromPeer(r.GetLeader())
 	s.DownPeers = fromPeerStatsSlice(r.GetDownPeers())
 	s.PendingPeers = fromPeerSlice(r.GetPendingPeers())
-	s.CPUUsage = r.GetCPUUsage()
 	s.WrittenBytes = r.GetBytesWritten()
 	s.WrittenKeys = r.GetKeysWritten()
 	s.ReadBytes = r.GetBytesRead()
@@ -233,7 +227,7 @@ func (h *regionHandler) GetRegionByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	regionInfo := rc.GetRegion(regionID)
-	h.rd.JSON(w, http.StatusOK, NewAPIRegionInfo(regionInfo))
+	h.rd.JSON(w, http.StatusOK, NewRegionInfo(regionInfo))
 }
 
 // @Tags     region
@@ -252,7 +246,7 @@ func (h *regionHandler) GetRegion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	regionInfo := rc.GetRegionByKey([]byte(key))
-	h.rd.JSON(w, http.StatusOK, NewAPIRegionInfo(regionInfo))
+	h.rd.JSON(w, http.StatusOK, NewRegionInfo(regionInfo))
 }
 
 // @Tags     region
@@ -283,7 +277,7 @@ func (h *regionsHandler) CheckRegionsReplicated(w http.ResponseWriter, r *http.R
 	regions := rc.ScanRegions(startKey, endKey, -1)
 	state := "REPLICATED"
 	for _, region := range regions {
-		if !filter.IsRegionReplicated(rc, region) {
+		if !schedule.IsRegionReplicated(rc, region) {
 			state = "INPROGRESS"
 			if rc.GetCoordinator().IsPendingRegion(region.GetID()) {
 				state = "PENDING"
@@ -774,19 +768,6 @@ func (h *regionsHandler) GetTopKeysRegions(w http.ResponseWriter, r *http.Reques
 }
 
 // @Tags     region
-// @Summary  List regions with the highest CPU usage.
-// @Param    limit  query  integer  false  "Limit count"  default(16)
-// @Produce  json
-// @Success  200  {object}  RegionsInfo
-// @Failure  400  {string}  string  "The input is invalid."
-// @Router   /regions/cpu [get]
-func (h *regionsHandler) GetTopCPURegions(w http.ResponseWriter, r *http.Request) {
-	h.GetTopNRegions(w, r, func(a, b *core.RegionInfo) bool {
-		return a.GetCPUUsage() < b.GetCPUUsage()
-	})
-}
-
-// @Tags     region
 // @Summary  Accelerate regions scheduling a in given range, only receive hex format for keys
 // @Accept   json
 // @Param    body   body   object   true   "json params"
@@ -835,64 +816,6 @@ func (h *regionsHandler) AccelerateRegionsScheduleInRange(w http.ResponseWriter,
 		rc.AddSuspectRegions(regionsIDList...)
 	}
 	h.rd.Text(w, http.StatusOK, fmt.Sprintf("Accelerate regions scheduling in a given range [%s,%s)", rawStartKey, rawEndKey))
-}
-
-// @Tags     region
-// @Summary  Accelerate regions scheduling in given ranges, only receive hex format for keys
-// @Accept   json
-// @Param    body   body   object   true   "json params"
-// @Param    limit  query  integer  false  "Limit count"  default(256)
-// @Produce  json
-// @Success  200  {string}  string  "Accelerate regions scheduling in given ranges [startKey1, endKey1), [startKey2, endKey2), ..."
-// @Failure  400  {string}  string  "The input is invalid."
-// @Router   /regions/accelerate-schedule/batch [post]
-func (h *regionsHandler) AccelerateRegionsScheduleInRanges(w http.ResponseWriter, r *http.Request) {
-	rc := getCluster(r)
-	var input []map[string]interface{}
-	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &input); err != nil {
-		return
-	}
-	limit := 256
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil {
-			h.rd.JSON(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	if limit > maxRegionLimit {
-		limit = maxRegionLimit
-	}
-	var msgBuilder strings.Builder
-	msgBuilder.Grow(128)
-	msgBuilder.WriteString("Accelerate regions scheduling in given ranges: ")
-	regionsIDSet := make(map[uint64]struct{})
-	for _, rg := range input {
-		startKey, rawStartKey, err := apiutil.ParseKey("start_key", rg)
-		if err != nil {
-			h.rd.JSON(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		endKey, rawEndKey, err := apiutil.ParseKey("end_key", rg)
-		if err != nil {
-			h.rd.JSON(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		regions := rc.ScanRegions(startKey, endKey, limit)
-		for _, region := range regions {
-			regionsIDSet[region.GetID()] = struct{}{}
-		}
-		msgBuilder.WriteString(fmt.Sprintf("[%s,%s), ", rawStartKey, rawEndKey))
-	}
-	if len(regionsIDSet) > 0 {
-		regionsIDList := make([]uint64, 0, len(regionsIDSet))
-		for id := range regionsIDSet {
-			regionsIDList = append(regionsIDList, id)
-		}
-		rc.AddSuspectRegions(regionsIDList...)
-	}
-	h.rd.Text(w, http.StatusOK, msgBuilder.String())
 }
 
 func (h *regionsHandler) GetTopNRegions(w http.ResponseWriter, r *http.Request, less func(a, b *core.RegionInfo) bool) {

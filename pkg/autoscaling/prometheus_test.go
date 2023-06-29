@@ -24,14 +24,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
+	promClient "github.com/prometheus/client_golang/api"
 )
 
 const (
-	mockDuration                = time.Second
+	mockDuration                = 1 * time.Second
 	mockClusterName             = "mock"
 	mockTiDBInstanceNamePattern = "%s-tidb-%d"
 	mockTiKVInstanceNamePattern = "%s-tikv-%d"
@@ -40,6 +40,8 @@ const (
 
 	instanceCount = 3
 )
+
+var _ = Suite(&testPrometheusQuerierSuite{})
 
 var podNameTemplate = map[ComponentType]string{
 	TiDB: mockTiDBInstanceNamePattern,
@@ -73,6 +75,8 @@ var podAddresses = map[ComponentType][]string{
 	TiDB: generateAddresses(TiDB),
 	TiKV: generateAddresses(TiKV),
 }
+
+type testPrometheusQuerierSuite struct{}
 
 // For building mock data only
 type response struct {
@@ -172,16 +176,14 @@ func (c *normalClient) URL(ep string, args map[string]string) *url.URL {
 	return doURL(ep, args)
 }
 
-func (c *normalClient) Do(_ context.Context, req *http.Request) (response *http.Response, body []byte, err error) {
+func (c *normalClient) Do(_ context.Context, req *http.Request) (response *http.Response, body []byte, warnings promClient.Warnings, err error) {
 	req.ParseForm()
 	query := req.Form.Get("query")
 	response, body, err = makeJSONResponse(c.mockData[query])
 	return
 }
 
-func TestRetrieveCPUMetrics(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testPrometheusQuerierSuite) TestRetrieveCPUMetrics(c *C) {
 	client := &normalClient{
 		mockData: make(map[string]*response),
 	}
@@ -192,15 +194,15 @@ func TestRetrieveCPUMetrics(t *testing.T) {
 		for _, metric := range metrics {
 			options := NewQueryOptions(component, metric, addresses[:len(addresses)-1], time.Now(), mockDuration)
 			result, err := querier.Query(options)
-			re.NoError(err)
+			c.Assert(err, IsNil)
 			for i := 0; i < len(addresses)-1; i++ {
 				value, ok := result[addresses[i]]
-				re.True(ok)
-				re.True(math.Abs(value-mockResultValue) < 1e-6)
+				c.Assert(ok, IsTrue)
+				c.Assert(math.Abs(value-mockResultValue) < 1e-6, IsTrue)
 			}
 
 			_, ok := result[addresses[len(addresses)-1]]
-			re.False(ok)
+			c.Assert(ok, IsFalse)
 		}
 	}
 }
@@ -211,7 +213,7 @@ func (c *emptyResponseClient) URL(ep string, args map[string]string) *url.URL {
 	return doURL(ep, args)
 }
 
-func (c *emptyResponseClient) Do(_ context.Context, req *http.Request) (r *http.Response, body []byte, err error) {
+func (c *emptyResponseClient) Do(_ context.Context, req *http.Request) (r *http.Response, body []byte, warnings promClient.Warnings, err error) {
 	promResp := &response{
 		Status: "success",
 		Data: data{
@@ -224,15 +226,13 @@ func (c *emptyResponseClient) Do(_ context.Context, req *http.Request) (r *http.
 	return
 }
 
-func TestEmptyResponse(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testPrometheusQuerierSuite) TestEmptyResponse(c *C) {
 	client := &emptyResponseClient{}
 	querier := NewPrometheusQuerier(client)
 	options := NewQueryOptions(TiDB, CPUUsage, podAddresses[TiDB], time.Now(), mockDuration)
 	result, err := querier.Query(options)
-	re.Nil(result)
-	re.Error(err)
+	c.Assert(result, IsNil)
+	c.Assert(err, NotNil)
 }
 
 type errorHTTPStatusClient struct{}
@@ -241,7 +241,7 @@ func (c *errorHTTPStatusClient) URL(ep string, args map[string]string) *url.URL 
 	return doURL(ep, args)
 }
 
-func (c *errorHTTPStatusClient) Do(_ context.Context, req *http.Request) (r *http.Response, body []byte, err error) {
+func (c *errorHTTPStatusClient) Do(_ context.Context, req *http.Request) (r *http.Response, body []byte, warnings promClient.Warnings, err error) {
 	promResp := &response{}
 
 	r, body, err = makeJSONResponse(promResp)
@@ -252,15 +252,13 @@ func (c *errorHTTPStatusClient) Do(_ context.Context, req *http.Request) (r *htt
 	return
 }
 
-func TestErrorHTTPStatus(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testPrometheusQuerierSuite) TestErrorHTTPStatus(c *C) {
 	client := &errorHTTPStatusClient{}
 	querier := NewPrometheusQuerier(client)
 	options := NewQueryOptions(TiDB, CPUUsage, podAddresses[TiDB], time.Now(), mockDuration)
 	result, err := querier.Query(options)
-	re.Nil(result)
-	re.Error(err)
+	c.Assert(result, IsNil)
+	c.Assert(err, NotNil)
 }
 
 type errorPrometheusStatusClient struct{}
@@ -269,7 +267,7 @@ func (c *errorPrometheusStatusClient) URL(ep string, args map[string]string) *ur
 	return doURL(ep, args)
 }
 
-func (c *errorPrometheusStatusClient) Do(_ context.Context, req *http.Request) (r *http.Response, body []byte, err error) {
+func (c *errorPrometheusStatusClient) Do(_ context.Context, req *http.Request) (r *http.Response, body []byte, warnings promClient.Warnings, err error) {
 	promResp := &response{
 		Status: "error",
 	}
@@ -278,21 +276,17 @@ func (c *errorPrometheusStatusClient) Do(_ context.Context, req *http.Request) (
 	return
 }
 
-func TestErrorPrometheusStatus(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testPrometheusQuerierSuite) TestErrorPrometheusStatus(c *C) {
 	client := &errorPrometheusStatusClient{}
 	querier := NewPrometheusQuerier(client)
 	options := NewQueryOptions(TiDB, CPUUsage, podAddresses[TiDB], time.Now(), mockDuration)
 	result, err := querier.Query(options)
-	re.Nil(result)
-	re.Error(err)
+	c.Assert(result, IsNil)
+	c.Assert(err, NotNil)
 }
 
-func TestGetInstanceNameFromAddress(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	testCases := []struct {
+func (s *testPrometheusQuerierSuite) TestGetInstanceNameFromAddress(c *C) {
+	testcases := []struct {
 		address              string
 		expectedInstanceName string
 	}{
@@ -317,20 +311,18 @@ func TestGetInstanceNameFromAddress(t *testing.T) {
 			expectedInstanceName: "",
 		},
 	}
-	for _, testCase := range testCases {
-		instanceName, err := getInstanceNameFromAddress(testCase.address)
-		if testCase.expectedInstanceName == "" {
-			re.Error(err)
+	for _, testcase := range testcases {
+		instanceName, err := getInstanceNameFromAddress(testcase.address)
+		if testcase.expectedInstanceName == "" {
+			c.Assert(err, NotNil)
 		} else {
-			re.Equal(testCase.expectedInstanceName, instanceName)
+			c.Assert(instanceName, Equals, testcase.expectedInstanceName)
 		}
 	}
 }
 
-func TestGetDurationExpression(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	testCases := []struct {
+func (s *testPrometheusQuerierSuite) TestGetDurationExpression(c *C) {
+	testcases := []struct {
 		duration           time.Duration
 		expectedExpression string
 	}{
@@ -339,7 +331,7 @@ func TestGetDurationExpression(t *testing.T) {
 			expectedExpression: "30s",
 		},
 		{
-			duration:           time.Minute,
+			duration:           60 * time.Second,
 			expectedExpression: "60s",
 		},
 		{
@@ -352,8 +344,8 @@ func TestGetDurationExpression(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
-		expression := getDurationExpression(testCase.duration)
-		re.Equal(testCase.expectedExpression, expression)
+	for _, testcase := range testcases {
+		expression := getDurationExpression(testcase.duration)
+		c.Assert(expression, Equals, testcase.expectedExpression)
 	}
 }

@@ -17,14 +17,21 @@ package slice_test
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 	"github.com/tikv/pd/pkg/slice"
 )
 
-func TestSlice(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	testCases := []struct {
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testSliceSuite{})
+
+type testSliceSuite struct {
+}
+
+func (s *testSliceSuite) Test(c *C) {
+	tests := []struct {
 		a      []int
 		anyOf  bool
 		noneOf bool
@@ -36,26 +43,24 @@ func TestSlice(t *testing.T) {
 		{[]int{2, 2, 4}, true, false, true},
 	}
 
-	for _, testCase := range testCases {
-		even := func(i int) bool { return testCase.a[i]%2 == 0 }
-		re.Equal(testCase.anyOf, slice.AnyOf(testCase.a, even))
-		re.Equal(testCase.noneOf, slice.NoneOf(testCase.a, even))
-		re.Equal(testCase.allOf, slice.AllOf(testCase.a, even))
+	for _, t := range tests {
+		even := func(i int) bool { return t.a[i]%2 == 0 }
+		c.Assert(slice.AnyOf(t.a, even), Equals, t.anyOf)
+		c.Assert(slice.NoneOf(t.a, even), Equals, t.noneOf)
+		c.Assert(slice.AllOf(t.a, even), Equals, t.allOf)
 	}
 }
 
-func TestSliceContains(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testSliceSuite) TestSliceContains(c *C) {
 	ss := []string{"a", "b", "c"}
-	re.Contains(ss, "a")
-	re.NotContains(ss, "d")
+	c.Assert(slice.Contains(ss, "a"), IsTrue)
+	c.Assert(slice.Contains(ss, "d"), IsFalse)
 
 	us := []uint64{1, 2, 3}
-	re.Contains(us, uint64(1))
-	re.NotContains(us, uint64(4))
+	c.Assert(slice.Contains(us, uint64(1)), IsTrue)
+	c.Assert(slice.Contains(us, uint64(4)), IsFalse)
 
 	is := []int64{1, 2, 3}
-	re.Contains(is, int64(1))
-	re.NotContains(is, int64(4))
+	c.Assert(slice.Contains(is, int64(1)), IsTrue)
+	c.Assert(slice.Contains(is, int64(4)), IsFalse)
 }

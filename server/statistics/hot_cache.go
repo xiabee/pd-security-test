@@ -22,6 +22,12 @@ import (
 	"github.com/tikv/pd/server/core"
 )
 
+// Denoising is an option to calculate flow base on the real heartbeats. Should
+// only turned off by the simulator and the test.
+var Denoising = true
+
+const queueCap = 20000
+
 // HotCache is a cache hold hot regions.
 type HotCache struct {
 	ctx        context.Context
@@ -42,7 +48,7 @@ func NewHotCache(ctx context.Context) *HotCache {
 }
 
 // CheckWriteAsync puts the flowItem into queue, and check it asynchronously
-func (w *HotCache) CheckWriteAsync(task FlowItemTask) bool {
+func (w *HotCache) CheckWriteAsync(task flowItemTask) bool {
 	select {
 	case w.writeCache.taskQueue <- task:
 		return true
@@ -52,7 +58,7 @@ func (w *HotCache) CheckWriteAsync(task FlowItemTask) bool {
 }
 
 // CheckReadAsync puts the flowItem into queue, and check it asynchronously
-func (w *HotCache) CheckReadAsync(task FlowItemTask) bool {
+func (w *HotCache) CheckReadAsync(task flowItemTask) bool {
 	select {
 	case w.readCache.taskQueue <- task:
 		return true
@@ -79,30 +85,14 @@ func (w *HotCache) RegionStats(kind RWType, minHotDegree int) map[uint64][]*HotP
 
 // IsRegionHot checks if the region is hot.
 func (w *HotCache) IsRegionHot(region *core.RegionInfo, minHotDegree int) bool {
-	checkRegionHotWriteTask := newCheckRegionHotTask(region, minHotDegree)
-	checkRegionHotReadTask := newCheckRegionHotTask(region, minHotDegree)
-	succ1 := w.CheckWriteAsync(checkRegionHotWriteTask)
-	succ2 := w.CheckReadAsync(checkRegionHotReadTask)
+	writeIsRegionHotTask := newIsRegionHotTask(region, minHotDegree)
+	readIsRegionHotTask := newIsRegionHotTask(region, minHotDegree)
+	succ1 := w.CheckWriteAsync(writeIsRegionHotTask)
+	succ2 := w.CheckReadAsync(readIsRegionHotTask)
 	if succ1 && succ2 {
-		return checkRegionHotWriteTask.waitRet(w.ctx) || checkRegionHotReadTask.waitRet(w.ctx)
+		return writeIsRegionHotTask.waitRet(w.ctx) || readIsRegionHotTask.waitRet(w.ctx)
 	}
 	return false
-}
-
-// GetHotPeerStat returns hot peer stat with specified regionID and storeID.
-func (w *HotCache) GetHotPeerStat(kind RWType, regionID, storeID uint64) *HotPeerStat {
-	task := newGetHotPeerStatTask(regionID, storeID)
-	var succ bool
-	switch kind {
-	case Read:
-		succ = w.CheckReadAsync(task)
-	case Write:
-		succ = w.CheckWriteAsync(task)
-	}
-	if !succ {
-		return nil
-	}
-	return task.waitRet(w.ctx)
 }
 
 // CollectMetrics collects the hot cache metrics.
@@ -128,7 +118,7 @@ func incMetrics(name string, storeID uint64, kind RWType) {
 	}
 }
 
-func (w *HotCache) updateItems(queue <-chan FlowItemTask, runTask func(task FlowItemTask)) {
+func (w *HotCache) updateItems(queue <-chan flowItemTask, runTask func(task flowItemTask)) {
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -139,7 +129,7 @@ func (w *HotCache) updateItems(queue <-chan FlowItemTask, runTask func(task Flow
 	}
 }
 
-func (w *HotCache) runReadTask(task FlowItemTask) {
+func (w *HotCache) runReadTask(task flowItemTask) {
 	if task != nil {
 		// TODO: do we need a run-task timeout to protect the queue won't be stuck by a task?
 		task.runTask(w.readCache)
@@ -147,7 +137,7 @@ func (w *HotCache) runReadTask(task FlowItemTask) {
 	}
 }
 
-func (w *HotCache) runWriteTask(task FlowItemTask) {
+func (w *HotCache) runWriteTask(task flowItemTask) {
 	if task != nil {
 		// TODO: do we need a run-task timeout to protect the queue won't be stuck by a task?
 		task.runTask(w.writeCache)
@@ -157,8 +147,8 @@ func (w *HotCache) runWriteTask(task FlowItemTask) {
 
 // Update updates the cache.
 // This is used for mockcluster, for test purpose.
-func (w *HotCache) Update(item *HotPeerStat, kind RWType) {
-	switch kind {
+func (w *HotCache) Update(item *HotPeerStat) {
+	switch item.Kind {
 	case Write:
 		w.writeCache.updateStat(item)
 	case Read:
@@ -196,21 +186,9 @@ func (w *HotCache) GetFilledPeriod(kind RWType) int {
 	var reportIntervalSecs int
 	switch kind {
 	case Write:
-		reportIntervalSecs = w.writeCache.kind.ReportInterval()
+		reportIntervalSecs = w.writeCache.reportIntervalSecs
 	case Read:
-		reportIntervalSecs = w.readCache.kind.ReportInterval()
+		reportIntervalSecs = w.readCache.reportIntervalSecs
 	}
 	return movingaverage.NewTimeMedian(DefaultAotSize, rollingWindowsSize, time.Duration(reportIntervalSecs)*time.Second).GetFilledPeriod()
-}
-
-// GetThresholds returns thresholds.
-// This is used for test purpose.
-func (w *HotCache) GetThresholds(kind RWType, storeID uint64) []float64 {
-	switch kind {
-	case Write:
-		return w.writeCache.calcHotThresholds(storeID)
-	case Read:
-		return w.readCache.calcHotThresholds(storeID)
-	}
-	return nil
 }

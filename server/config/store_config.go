@@ -17,7 +17,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"reflect"
 	"sync/atomic"
@@ -48,10 +48,6 @@ var (
 // nolint
 type StoreConfig struct {
 	Coprocessor `json:"coprocessor"`
-
-	RegionMaxSizeMB    uint64 `json:"_"`
-	RegionSplitSizeMB  uint64 `json:"_"`
-	RegionBucketSizeMB uint64 `json:"_"`
 }
 
 // Coprocessor is the config of coprocessor.
@@ -67,11 +63,6 @@ type Coprocessor struct {
 	RegionBucketSize   string `json:"region-bucket-size"`
 }
 
-// Equal returns true if the two configs are equal.
-func (c *StoreConfig) Equal(other *StoreConfig) bool {
-	return reflect.DeepEqual(c.Coprocessor, other.Coprocessor)
-}
-
 // String implements fmt.Stringer interface.
 func (c *StoreConfig) String() string {
 	data, err := json.MarshalIndent(c, "", "  ")
@@ -83,23 +74,23 @@ func (c *StoreConfig) String() string {
 
 // GetRegionMaxSize returns the max region size in MB
 func (c *StoreConfig) GetRegionMaxSize() uint64 {
-	if c == nil || len(c.RegionMaxSize) == 0 {
+	if c == nil || len(c.Coprocessor.RegionMaxSize) == 0 {
 		return defaultRegionMaxSize
 	}
-	return c.RegionMaxSizeMB
+	return typeutil.ParseMBFromText(c.Coprocessor.RegionMaxSize, defaultRegionMaxSize)
 }
 
 // GetRegionSplitSize returns the region split size in MB
 func (c *StoreConfig) GetRegionSplitSize() uint64 {
-	if c == nil || len(c.RegionSplitSize) == 0 {
+	if c == nil || len(c.Coprocessor.RegionSplitSize) == 0 {
 		return defaultRegionSplitSize
 	}
-	return c.RegionSplitSizeMB
+	return typeutil.ParseMBFromText(c.Coprocessor.RegionSplitSize, defaultRegionSplitSize)
 }
 
 // GetRegionSplitKeys returns the region split keys
 func (c *StoreConfig) GetRegionSplitKeys() uint64 {
-	if c == nil || c.RegionSplitKeys == 0 {
+	if c == nil || c.Coprocessor.RegionSplitKeys == 0 {
 		return defaultRegionSplitKey
 	}
 	return uint64(c.Coprocessor.RegionSplitKeys)
@@ -107,13 +98,13 @@ func (c *StoreConfig) GetRegionSplitKeys() uint64 {
 
 // GetRegionMaxKeys returns the region split keys
 func (c *StoreConfig) GetRegionMaxKeys() uint64 {
-	if c == nil || c.RegionMaxKeys == 0 {
+	if c == nil || c.Coprocessor.RegionMaxKeys == 0 {
 		return defaultRegionMaxKey
 	}
-	return uint64(c.RegionMaxKeys)
+	return uint64(c.Coprocessor.RegionMaxKeys)
 }
 
-// IsEnableRegionBucket return true if the region bucket is enabled.
+// IsEnableRegionBucket return ture if the region bucket is enabled.
 func (c *StoreConfig) IsEnableRegionBucket() bool {
 	if c == nil {
 		return false
@@ -126,10 +117,10 @@ func (c *StoreConfig) GetRegionBucketSize() uint64 {
 	if c == nil || !c.Coprocessor.EnableRegionBucket {
 		return 0
 	}
-	if len(c.RegionBucketSize) == 0 {
+	if len(c.Coprocessor.RegionBucketSize) == 0 {
 		return defaultBucketSize
 	}
-	return c.RegionBucketSizeMB
+	return typeutil.ParseMBFromText(c.Coprocessor.RegionBucketSize, defaultBucketSize)
 }
 
 // CheckRegionSize return error if the smallest region's size is less than mergeSize
@@ -197,18 +188,11 @@ func (m *StoreConfigManager) ObserveConfig(address string) error {
 		return err
 	}
 	old := m.GetStoreConfig()
-	if cfg != nil && !old.Equal(cfg) {
+	if cfg != nil && !reflect.DeepEqual(cfg, old) {
 		log.Info("sync the store config successful", zap.String("store-address", address), zap.String("store-config", cfg.String()))
-		m.update(cfg)
+		m.config.Store(cfg)
 	}
 	return nil
-}
-
-func (m *StoreConfigManager) update(cfg *StoreConfig) {
-	cfg.RegionMaxSizeMB = typeutil.ParseMBFromText(cfg.RegionMaxSize, defaultRegionMaxSize)
-	cfg.RegionSplitSizeMB = typeutil.ParseMBFromText(cfg.RegionSplitSize, defaultRegionSplitSize)
-	cfg.RegionBucketSizeMB = typeutil.ParseMBFromText(cfg.RegionBucketSize, defaultBucketSize)
-	m.config.Store(cfg)
 }
 
 // GetStoreConfig returns the current store configuration.
@@ -246,7 +230,7 @@ func (s TiKVConfigSource) GetConfig(statusAddress string) (*StoreConfig, error) 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +257,10 @@ func (f *FakeSource) GetConfig(url string) (*StoreConfig, error) {
 	if !slice.Contains(f.whiteList, url) {
 		return nil, fmt.Errorf("[url:%s] is not in white list", url)
 	}
-	config := &StoreConfig{}
-	config.RegionMaxSize = "10MiB"
+	config := &StoreConfig{
+		Coprocessor{
+			RegionMaxSize: "10MiB",
+		},
+	}
 	return config, nil
 }

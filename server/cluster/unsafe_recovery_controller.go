@@ -110,7 +110,6 @@ type unsafeRecoveryController struct {
 	step         uint64
 	failedStores map[uint64]struct{}
 	timeout      time.Time
-	autoDetect   bool
 
 	// collected reports from store, if not reported yet, it would be nil
 	storeReports      map[uint64]*pdpb.StoreReport
@@ -169,7 +168,7 @@ func (u *unsafeRecoveryController) isRunningLocked() bool {
 }
 
 // RemoveFailedStores removes failed stores from the cluster.
-func (u *unsafeRecoveryController) RemoveFailedStores(failedStores map[uint64]struct{}, timeout uint64, autoDetect bool) error {
+func (u *unsafeRecoveryController) RemoveFailedStores(failedStores map[uint64]struct{}, timeout uint64) error {
 	u.Lock()
 	defer u.Unlock()
 
@@ -177,25 +176,23 @@ func (u *unsafeRecoveryController) RemoveFailedStores(failedStores map[uint64]st
 		return errs.ErrUnsafeRecoveryIsRunning.FastGenByArgs()
 	}
 
-	if !autoDetect {
-		if len(failedStores) == 0 {
-			return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs("no store specified")
-		}
+	if len(failedStores) == 0 {
+		return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs("no store specified")
+	}
 
-		// validate the stores and mark the store as tombstone forcibly
-		for failedStore := range failedStores {
-			store := u.cluster.GetStore(failedStore)
-			if store == nil {
-				return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs(fmt.Sprintf("store %v doesn't exist", failedStore))
-			} else if (store.IsPreparing() || store.IsServing()) && !store.IsDisconnected() {
-				return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs(fmt.Sprintf("store %v is up and connected", failedStore))
-			}
+	// validate the stores and mark the store as tombstone forcibly
+	for failedStore := range failedStores {
+		store := u.cluster.GetStore(failedStore)
+		if store == nil {
+			return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs(fmt.Sprintf("store %v doesn't exist", failedStore))
+		} else if (store.IsPreparing() || store.IsServing()) && !store.IsDisconnected() {
+			return errs.ErrUnsafeRecoveryInvalidInput.FastGenByArgs(fmt.Sprintf("store %v is up and connected", failedStore))
 		}
-		for failedStore := range failedStores {
-			err := u.cluster.BuryStore(failedStore, true)
-			if err != nil && !errors.ErrorEqual(err, errs.ErrStoreNotFound.FastGenByArgs(failedStore)) {
-				return err
-			}
+	}
+	for failedStore := range failedStores {
+		err := u.cluster.BuryStore(failedStore, true)
+		if err != nil && !errors.ErrorEqual(err, errs.ErrStoreNotFound.FastGenByArgs(failedStore)) {
+			return err
 		}
 	}
 
@@ -212,7 +209,6 @@ func (u *unsafeRecoveryController) RemoveFailedStores(failedStores map[uint64]st
 
 	u.timeout = time.Now().Add(time.Duration(timeout) * time.Second)
 	u.failedStores = failedStores
-	u.autoDetect = autoDetect
 	u.changeStage(collectReport)
 	return nil
 }
@@ -421,7 +417,7 @@ func (u *unsafeRecoveryController) dispatchPlan(heartbeat *pdpb.StoreHeartbeatRe
 
 	if reported, exist := u.storeReports[storeID]; reported != nil || !exist {
 		// the plan has been executed, no need to dispatch again
-		// or no need to dispatch plan to this store(e.g. Tiflash)
+		// or no need to displan plan to this store(e.g. Tiflash)
 		return
 	}
 
@@ -482,23 +478,17 @@ func (u *unsafeRecoveryController) changeStage(stage unsafeRecoveryStage) {
 	switch u.stage {
 	case idle:
 	case collectReport:
-		// TODO: clean up existing operators
-		output.Info = "Unsafe recovery enters collect report stage"
-		if u.autoDetect {
-			output.Details = append(output.Details, "auto detect mode with no specified failed stores")
-		} else {
-			stores := ""
-			count := 0
-			for store := range u.failedStores {
-				count += 1
-				stores += fmt.Sprintf("%d", store)
-				if count != len(u.failedStores) {
-					stores += ", "
-				}
+		stores := ""
+		count := 0
+		for store := range u.failedStores {
+			count += 1
+			stores += fmt.Sprintf("%d", store)
+			if count != len(u.failedStores) {
+				stores += ", "
 			}
-			output.Details = append(output.Details, fmt.Sprintf("failed stores %s", stores))
 		}
-
+		// TODO: clean up existing operators
+		output.Info = fmt.Sprintf("Unsafe recovery enters collect report stage: failed stores %s", stores)
 	case tombstoneTiFlashLearner:
 		output.Info = "Unsafe recovery enters tombstone TiFlash learner stage"
 		output.Actions = u.getTombstoneTiFlashLearnerDigest()
@@ -658,22 +648,13 @@ func (u *unsafeRecoveryController) recordAffectedRegion(region *metapb.Region) {
 	}
 }
 
-func (u *unsafeRecoveryController) isFailed(peer *metapb.Peer) bool {
-	_, isFailed := u.failedStores[peer.StoreId]
-	_, isLive := u.storeReports[peer.StoreId]
-	if isFailed || (u.autoDetect && !isLive) {
-		return true
-	}
-	return false
-}
-
 func (u *unsafeRecoveryController) canElectLeader(region *metapb.Region, onlyIncoming bool) bool {
 	hasQuorum := func(voters []*metapb.Peer) bool {
 		numFailedVoters := 0
 		numLiveVoters := 0
 
 		for _, voter := range voters {
-			if u.isFailed(voter) {
+			if _, ok := u.failedStores[voter.StoreId]; ok {
 				numFailedVoters += 1
 			} else {
 				numLiveVoters += 1
@@ -709,12 +690,14 @@ func (u *unsafeRecoveryController) getFailedPeers(region *metapb.Region) []*meta
 		if peer.Role == metapb.PeerRole_Learner || peer.Role == metapb.PeerRole_DemotingVoter {
 			continue
 		}
-		if u.isFailed(peer) {
+		if _, ok := u.failedStores[peer.StoreId]; ok {
 			failedPeers = append(failedPeers, peer)
 		}
 	}
 	return failedPeers
 }
+
+var _ btree.Item = &regionItem{}
 
 type regionItem struct {
 	report  *pdpb.PeerReport
@@ -722,9 +705,9 @@ type regionItem struct {
 }
 
 // Less returns true if the region start key is less than the other.
-func (r *regionItem) Less(other *regionItem) bool {
+func (r *regionItem) Less(other btree.Item) bool {
 	left := r.Region().GetStartKey()
-	right := other.Region().GetStartKey()
+	right := other.(*regionItem).Region().GetStartKey()
 	return bytes.Compare(left, right) < 0
 }
 
@@ -791,13 +774,13 @@ const (
 
 type regionTree struct {
 	regions map[uint64]*regionItem
-	tree    *btree.BTreeG[*regionItem]
+	tree    *btree.BTree
 }
 
 func newRegionTree() *regionTree {
 	return &regionTree{
 		regions: make(map[uint64]*regionItem),
-		tree:    btree.NewG[*regionItem](defaultBTreeDegree),
+		tree:    btree.New(defaultBTreeDegree),
 	}
 }
 
@@ -825,8 +808,8 @@ func (t *regionTree) getOverlaps(item *regionItem) []*regionItem {
 
 	end := item.Region().GetEndKey()
 	var overlaps []*regionItem
-	t.tree.AscendGreaterOrEqual(result, func(i *regionItem) bool {
-		over := i
+	t.tree.AscendGreaterOrEqual(result, func(i btree.Item) bool {
+		over := i.(*regionItem)
 		if len(end) > 0 && bytes.Compare(end, over.Region().GetStartKey()) <= 0 {
 			return false
 		}
@@ -839,8 +822,8 @@ func (t *regionTree) getOverlaps(item *regionItem) []*regionItem {
 // find is a helper function to find an item that contains the regions start key.
 func (t *regionTree) find(item *regionItem) *regionItem {
 	var result *regionItem
-	t.tree.DescendLessOrEqual(item, func(i *regionItem) bool {
-		result = i
+	t.tree.DescendLessOrEqual(item, func(i btree.Item) bool {
+		result = i.(*regionItem)
 		return false
 	})
 
@@ -942,8 +925,8 @@ func (u *unsafeRecoveryController) generateTombstoneTiFlashLearnerPlan(newestReg
 	hasPlan := false
 
 	var err error
-	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
-		region := item.Region()
+	newestRegionTree.tree.Ascend(func(item btree.Item) bool {
+		region := item.(*regionItem).Region()
 		if !u.canElectLeader(region, false) {
 			leader := u.selectLeader(peersMap, region)
 			if leader == nil {
@@ -982,9 +965,9 @@ func (u *unsafeRecoveryController) generateForceLeaderPlan(newestRegionTree *reg
 	var err error
 	// Check the regions in newest Region Tree to see if it can still elect leader
 	// considering the failed stores
-	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
-		report := item.report
-		region := item.Region()
+	newestRegionTree.tree.Ascend(func(item btree.Item) bool {
+		report := item.(*regionItem).report
+		region := item.(*regionItem).Region()
 		if !u.canElectLeader(region, false) {
 			if hasForceLeader(region) {
 				// already is a force leader, skip
@@ -1011,21 +994,6 @@ func (u *unsafeRecoveryController) generateForceLeaderPlan(newestRegionTree *reg
 				storeRecoveryPlan.ForceLeader = &pdpb.ForceLeader{}
 				for store := range u.failedStores {
 					storeRecoveryPlan.ForceLeader.FailedStores = append(storeRecoveryPlan.ForceLeader.FailedStores, store)
-				}
-			}
-			if u.autoDetect {
-				// For auto detect, the failedStores is empty. So need to add the detected failed store to the list
-				for _, peer := range u.getFailedPeers(leader.Region()) {
-					found := false
-					for _, store := range storeRecoveryPlan.ForceLeader.FailedStores {
-						if store == peer.StoreId {
-							found = true
-							break
-						}
-					}
-					if !found {
-						storeRecoveryPlan.ForceLeader.FailedStores = append(storeRecoveryPlan.ForceLeader.FailedStores, peer.StoreId)
-					}
 				}
 			}
 			storeRecoveryPlan.ForceLeader.EnterForceLeaders = append(storeRecoveryPlan.ForceLeader.EnterForceLeaders, region.GetId())
@@ -1068,8 +1036,8 @@ func (u *unsafeRecoveryController) generateDemoteFailedVoterPlan(newestRegionTre
 
 	// Check the regions in newest Region Tree to see if it can still elect leader
 	// considering the failed stores
-	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
-		region := item.Region()
+	newestRegionTree.tree.Ascend(func(item btree.Item) bool {
+		region := item.(*regionItem).Region()
 		if !u.canElectLeader(region, false) {
 			leader := findForceLeader(peersMap, region)
 			if leader == nil {
@@ -1145,9 +1113,9 @@ func (u *unsafeRecoveryController) generateCreateEmptyRegionPlan(newestRegionTre
 	// regions that cover them and evenly distribute newly created regions among all stores.
 	lastEnd := []byte("")
 	var lastStoreID uint64
-	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
-		region := item.Region()
-		storeID := item.storeID
+	newestRegionTree.tree.Ascend(func(item btree.Item) bool {
+		region := item.(*regionItem).Region()
+		storeID := item.(*regionItem).storeID
 		if !bytes.Equal(region.StartKey, lastEnd) {
 			if u.cluster.GetStore(storeID).IsTiFlash() {
 				storeID = getRandomStoreID()

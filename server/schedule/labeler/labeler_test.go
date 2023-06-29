@@ -23,14 +23,32 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/storage/endpoint"
 )
 
-func TestAdjustRule(t *testing.T) {
-	re := require.New(t)
+func TestT(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testLabelerSuite{})
+
+type testLabelerSuite struct {
+	store   endpoint.RuleStorage
+	labeler *RegionLabeler
+}
+
+func (s *testLabelerSuite) SetUpTest(c *C) {
+	s.store = storage.NewStorageWithMemoryBackend()
+	var err error
+	s.labeler, err = NewRegionLabeler(context.Background(), s.store, time.Millisecond*10)
+	c.Assert(err, IsNil)
+}
+
+func (s *testLabelerSuite) TestAdjustRule(c *C) {
 	rule := LabelRule{
 		ID: "foo",
 		Labels: []RegionLabel{
@@ -40,22 +58,21 @@ func TestAdjustRule(t *testing.T) {
 		Data:     makeKeyRanges("12abcd", "34cdef", "56abcd", "78cdef"),
 	}
 	err := rule.checkAndAdjust()
-	re.NoError(err)
-	re.Len(rule.Data.([]*KeyRangeRule), 2)
-	re.Equal([]byte{0x12, 0xab, 0xcd}, rule.Data.([]*KeyRangeRule)[0].StartKey)
-	re.Equal([]byte{0x34, 0xcd, 0xef}, rule.Data.([]*KeyRangeRule)[0].EndKey)
-	re.Equal([]byte{0x56, 0xab, 0xcd}, rule.Data.([]*KeyRangeRule)[1].StartKey)
-	re.Equal([]byte{0x78, 0xcd, 0xef}, rule.Data.([]*KeyRangeRule)[1].EndKey)
+	c.Assert(err, IsNil)
+	c.Assert(rule.Data.([]*KeyRangeRule), HasLen, 2)
+	c.Assert(rule.Data.([]*KeyRangeRule)[0].StartKey, BytesEquals, []byte{0x12, 0xab, 0xcd})
+	c.Assert(rule.Data.([]*KeyRangeRule)[0].EndKey, BytesEquals, []byte{0x34, 0xcd, 0xef})
+	c.Assert(rule.Data.([]*KeyRangeRule)[1].StartKey, BytesEquals, []byte{0x56, 0xab, 0xcd})
+	c.Assert(rule.Data.([]*KeyRangeRule)[1].EndKey, BytesEquals, []byte{0x78, 0xcd, 0xef})
 }
 
-func TestAdjustRule2(t *testing.T) {
-	re := require.New(t)
+func (s *testLabelerSuite) TestAdjustRule2(c *C) {
 	ruleData := `{"id":"id", "labels": [{"key": "k1", "value": "v1"}], "rule_type":"key-range", "data": [{"start_key":"", "end_key":""}]}`
 	var rule LabelRule
 	err := json.Unmarshal([]byte(ruleData), &rule)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	err = rule.checkAndAdjust()
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	badRuleData := []string{
 		// no id
@@ -78,44 +95,40 @@ func TestAdjustRule2(t *testing.T) {
 		`{"id":"id", "labels": [{"key": "k1", "value": "v1"}], "rule_type":"key-range", "data": [{"start_key":"abcd", "end_key":"123"}]}`,
 		`{"id":"id", "labels": [{"key": "k1", "value": "v1"}], "rule_type":"key-range", "data": [{"start_key":"abcd", "end_key":"1234"}]}`,
 	}
-	for _, str := range badRuleData {
+	for i, str := range badRuleData {
 		var rule LabelRule
 		err := json.Unmarshal([]byte(str), &rule)
-		re.NoError(err)
+		c.Assert(err, IsNil, Commentf("#%d", i))
 		err = rule.checkAndAdjust()
-		re.Error(err)
+		c.Assert(err, NotNil, Commentf("#%d", i))
 	}
 }
 
-func TestGetSetRule(t *testing.T) {
-	re := require.New(t)
-	store := storage.NewStorageWithMemoryBackend()
-	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
-	re.NoError(err)
+func (s *testLabelerSuite) TestGetSetRule(c *C) {
 	rules := []*LabelRule{
 		{ID: "rule1", Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: makeKeyRanges("1234", "5678")},
 		{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: makeKeyRanges("ab12", "cd12")},
 		{ID: "rule3", Labels: []RegionLabel{{Key: "k3", Value: "v3"}}, RuleType: "key-range", Data: makeKeyRanges("abcd", "efef")},
 	}
 	for _, r := range rules {
-		err := labeler.SetLabelRule(r)
-		re.NoError(err)
+		err := s.labeler.SetLabelRule(r)
+		c.Assert(err, IsNil)
 	}
 
-	allRules := labeler.GetAllLabelRules()
+	allRules := s.labeler.GetAllLabelRules()
 	sort.Slice(allRules, func(i, j int) bool { return allRules[i].ID < allRules[j].ID })
-	re.Equal(rules, allRules)
+	c.Assert(allRules, DeepEquals, rules)
 
-	byIDs, err := labeler.GetLabelRules([]string{"rule3", "rule1"})
-	re.NoError(err)
-	re.Equal([]*LabelRule{rules[2], rules[0]}, byIDs)
+	byIDs, err := s.labeler.GetLabelRules([]string{"rule3", "rule1"})
+	c.Assert(err, IsNil)
+	c.Assert(byIDs, DeepEquals, []*LabelRule{rules[2], rules[0]})
 
-	err = labeler.DeleteLabelRule("rule2")
-	re.NoError(err)
-	re.Nil(labeler.GetLabelRule("rule2"))
-	byIDs, err = labeler.GetLabelRules([]string{"rule1", "rule2"})
-	re.NoError(err)
-	re.Equal([]*LabelRule{rules[0]}, byIDs)
+	err = s.labeler.DeleteLabelRule("rule2")
+	c.Assert(err, IsNil)
+	c.Assert(s.labeler.GetLabelRule("rule2"), IsNil)
+	byIDs, err = s.labeler.GetLabelRules([]string{"rule1", "rule2"})
+	c.Assert(err, IsNil)
+	c.Assert(byIDs, DeepEquals, []*LabelRule{rules[0]})
 
 	// patch
 	patch := LabelRulePatch{
@@ -124,20 +137,16 @@ func TestGetSetRule(t *testing.T) {
 		},
 		DeleteRules: []string{"rule1"},
 	}
-	err = labeler.Patch(patch)
-	re.NoError(err)
-	allRules = labeler.GetAllLabelRules()
+	err = s.labeler.Patch(patch)
+	c.Assert(err, IsNil)
+	allRules = s.labeler.GetAllLabelRules()
 	sort.Slice(allRules, func(i, j int) bool { return allRules[i].ID < allRules[j].ID })
 	for id, rule := range allRules {
-		expectSameRules(re, rule, rules[id+1])
+		expectSameRules(c, rule, rules[id+1])
 	}
 }
 
-func TestIndex(t *testing.T) {
-	re := require.New(t)
-	store := storage.NewStorageWithMemoryBackend()
-	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
-	re.NoError(err)
+func (s *testLabelerSuite) TestIndex(c *C) {
 	rules := []*LabelRule{
 		{ID: "rule0", Labels: []RegionLabel{{Key: "k1", Value: "v0"}}, RuleType: "key-range", Data: makeKeyRanges("", "")},
 		{ID: "rule1", Index: 1, Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: makeKeyRanges("1234", "5678")},
@@ -145,8 +154,8 @@ func TestIndex(t *testing.T) {
 		{ID: "rule3", Index: 1, Labels: []RegionLabel{{Key: "k2", Value: "v3"}}, RuleType: "key-range", Data: makeKeyRanges("abcd", "efef")},
 	}
 	for _, r := range rules {
-		err := labeler.SetLabelRule(r)
-		re.NoError(err)
+		err := s.labeler.SetLabelRule(r)
+		c.Assert(err, IsNil)
 	}
 
 	type testCase struct {
@@ -160,79 +169,71 @@ func TestIndex(t *testing.T) {
 		{"abcd", "cd12", map[string]string{"k1": "v0", "k2": "v2"}},
 		{"cdef", "efef", map[string]string{"k1": "v0", "k2": "v3"}},
 	}
-	for _, testCase := range testCases {
-		start, _ := hex.DecodeString(testCase.start)
-		end, _ := hex.DecodeString(testCase.end)
+	for _, tc := range testCases {
+		start, _ := hex.DecodeString(tc.start)
+		end, _ := hex.DecodeString(tc.end)
 		region := core.NewTestRegionInfo(start, end)
-		labels := labeler.GetRegionLabels(region)
-		re.Len(labels, len(testCase.labels))
+		labels := s.labeler.GetRegionLabels(region)
+		c.Assert(labels, HasLen, len(tc.labels))
 		for _, l := range labels {
-			re.Equal(testCase.labels[l.Key], l.Value)
+			c.Assert(l.Value, Equals, tc.labels[l.Key])
 		}
 		for _, k := range []string{"k1", "k2"} {
-			re.Equal(testCase.labels[k], labeler.GetRegionLabel(region, k))
+			c.Assert(s.labeler.GetRegionLabel(region, k), Equals, tc.labels[k])
 		}
 	}
 }
 
-func TestSaveLoadRule(t *testing.T) {
-	re := require.New(t)
-	store := storage.NewStorageWithMemoryBackend()
-	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
-	re.NoError(err)
+func (s *testLabelerSuite) TestSaveLoadRule(c *C) {
 	rules := []*LabelRule{
 		{ID: "rule1", Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: makeKeyRanges("1234", "5678")},
 		{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: makeKeyRanges("ab12", "cd12")},
 		{ID: "rule3", Labels: []RegionLabel{{Key: "k3", Value: "v3"}}, RuleType: "key-range", Data: makeKeyRanges("abcd", "efef")},
 	}
 	for _, r := range rules {
-		err := labeler.SetLabelRule(r)
-		re.NoError(err)
+		err := s.labeler.SetLabelRule(r)
+		c.Assert(err, IsNil)
 	}
 
-	labeler, err = NewRegionLabeler(context.Background(), store, time.Millisecond*100)
-	re.NoError(err)
+	labeler, err := NewRegionLabeler(context.Background(), s.store, time.Millisecond*100)
+	c.Assert(err, IsNil)
 	for _, r := range rules {
 		r2 := labeler.GetLabelRule(r.ID)
-		expectSameRules(re, r2, r)
+		expectSameRules(c, r2, r)
 	}
 }
 
-func expectSameRegionLabels(re *require.Assertions, r1, r2 *RegionLabel) {
+func expectSameRegionLabels(c *C, r1, r2 *RegionLabel) {
 	r1.checkAndAdjustExpire()
 	r2.checkAndAdjustExpire()
 	if len(r1.TTL) == 0 {
-		re.Equal(r1, r2)
+		c.Assert(r2, DeepEquals, r1)
 	}
 
 	r2.StartAt = r1.StartAt
 	r2.checkAndAdjustExpire()
 
-	re.Equal(r1, r2)
+	c.Assert(r2, DeepEquals, r1)
 }
 
-func expectSameRules(re *require.Assertions, r1, r2 *LabelRule) {
-	re.Len(r1.Labels, len(r2.Labels))
+func expectSameRules(c *C, r1, r2 *LabelRule) {
+	c.Assert(r1.Labels, HasLen, len(r2.Labels))
 	for id := 0; id < len(r1.Labels); id++ {
-		expectSameRegionLabels(re, &r1.Labels[id], &r2.Labels[id])
+		expectSameRegionLabels(c, &r1.Labels[id], &r2.Labels[id])
 	}
 
-	re.Equal(r1, r2)
+	c.Assert(r2, DeepEquals, r1)
 }
 
-func TestKeyRange(t *testing.T) {
-	re := require.New(t)
-	store := storage.NewStorageWithMemoryBackend()
-	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
-	re.NoError(err)
+func (s *testLabelerSuite) TestKeyRange(c *C) {
 	rules := []*LabelRule{
 		{ID: "rule1", Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: makeKeyRanges("1234", "5678")},
 		{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: makeKeyRanges("ab12", "cd12")},
 		{ID: "rule3", Labels: []RegionLabel{{Key: "k3", Value: "v3"}}, RuleType: "key-range", Data: makeKeyRanges("abcd", "efef")},
 	}
 	for _, r := range rules {
-		err := labeler.SetLabelRule(r)
-		re.NoError(err)
+		err := s.labeler.SetLabelRule(r)
+		c.Assert(err, IsNil)
 	}
 
 	type testCase struct {
@@ -246,26 +247,22 @@ func TestKeyRange(t *testing.T) {
 		{"cd12", "dddd", map[string]string{"k3": "v3"}},
 		{"ffee", "ffff", map[string]string{}},
 	}
-	for _, testCase := range testCases {
-		start, _ := hex.DecodeString(testCase.start)
-		end, _ := hex.DecodeString(testCase.end)
+	for _, tc := range testCases {
+		start, _ := hex.DecodeString(tc.start)
+		end, _ := hex.DecodeString(tc.end)
 		region := core.NewTestRegionInfo(start, end)
-		labels := labeler.GetRegionLabels(region)
-		re.Len(labels, len(testCase.labels))
+		labels := s.labeler.GetRegionLabels(region)
+		c.Assert(labels, HasLen, len(tc.labels))
 		for _, l := range labels {
-			re.Equal(l.Value, testCase.labels[l.Key])
+			c.Assert(tc.labels[l.Key], Equals, l.Value)
 		}
 		for _, k := range []string{"k1", "k2", "k3"} {
-			re.Equal(testCase.labels[k], labeler.GetRegionLabel(region, k))
+			c.Assert(s.labeler.GetRegionLabel(region, k), Equals, tc.labels[k])
 		}
 	}
 }
 
-func TestLabelerRuleTTL(t *testing.T) {
-	re := require.New(t)
-	store := storage.NewStorageWithMemoryBackend()
-	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
-	re.NoError(err)
+func (s *testLabelerSuite) TestLabelerRuleTTL(c *C) {
 	rules := []*LabelRule{
 		{
 			ID: "rule1",
@@ -294,57 +291,56 @@ func TestLabelerRuleTTL(t *testing.T) {
 	end, _ := hex.DecodeString("5678")
 	region := core.NewTestRegionInfo(start, end)
 	// the region has no lable rule at the beginning.
-	re.Empty(labeler.GetRegionLabels(region))
+	c.Assert(s.labeler.GetRegionLabels(region), HasLen, 0)
 
 	// set rules for the region.
 	for _, r := range rules {
-		err := labeler.SetLabelRule(r)
-		re.NoError(err)
+		err := s.labeler.SetLabelRule(r)
+		c.Assert(err, IsNil)
 	}
 	// get rule with "rule2".
-	re.NotNil(labeler.GetLabelRule("rule2"))
-	re.NoError(failpoint.Enable("github.com/tikv/pd/server/schedule/labeler/regionLabelExpireSub1Minute", "return(true)"))
+	c.Assert(s.labeler.GetLabelRule("rule2"), NotNil)
+	c.Assert(failpoint.Enable("github.com/tikv/pd/server/schedule/labeler/regionLabelExpireSub1Minute", "return(true)"), IsNil)
 
 	// rule2 should expire and only 2 labels left.
-	labels := labeler.GetRegionLabels(region)
-	re.Len(labels, 2)
+	labels := s.labeler.GetRegionLabels(region)
+	c.Assert(labels, HasLen, 2)
 
-	re.NoError(failpoint.Disable("github.com/tikv/pd/server/schedule/labeler/regionLabelExpireSub1Minute"))
+	c.Assert(failpoint.Disable("github.com/tikv/pd/server/schedule/labeler/regionLabelExpireSub1Minute"), IsNil)
 	// rule2 should be exist since `GetRegionLabels` won't clear it physically.
-	checkRuleInMemoryAndStoage(re, labeler, "rule2", true)
-	re.Nil(labeler.GetLabelRule("rule2"))
+	s.checkRuleInMemoryAndStoage(c, "rule2", true)
+	c.Assert(s.labeler.GetLabelRule("rule2"), IsNil)
 	// rule2 should be physically clear.
-	checkRuleInMemoryAndStoage(re, labeler, "rule2", false)
+	s.checkRuleInMemoryAndStoage(c, "rule2", false)
 
-	re.Equal("", labeler.GetRegionLabel(region, "k2"))
+	c.Assert(s.labeler.GetRegionLabel(region, "k2"), Equals, "")
 
-	re.NotNil(labeler.GetLabelRule("rule3"))
-	re.NotNil(labeler.GetLabelRule("rule1"))
+	c.Assert(s.labeler.GetLabelRule("rule3"), NotNil)
+	c.Assert(s.labeler.GetLabelRule("rule1"), NotNil)
 }
 
-func checkRuleInMemoryAndStoage(re *require.Assertions, labeler *RegionLabeler, ruleID string, exist bool) {
-	re.Equal(exist, labeler.labelRules[ruleID] != nil)
+func (s *testLabelerSuite) checkRuleInMemoryAndStoage(c *C, ruleID string, exist bool) {
+	c.Assert(s.labeler.labelRules[ruleID] != nil, Equals, exist)
 	existInStorage := false
-	labeler.storage.LoadRegionRules(func(k, v string) {
+	s.labeler.storage.LoadRegionRules(func(k, v string) {
 		if k == ruleID {
 			existInStorage = true
 		}
 	})
-	re.Equal(exist, existInStorage)
+	c.Assert(existInStorage, Equals, exist)
 }
 
-func TestGC(t *testing.T) {
-	re := require.New(t)
+func (s *testLabelerSuite) TestGC(c *C) {
 	// set gcInterval to 1 hour.
 	store := storage.NewStorageWithMemoryBackend()
 	labeler, err := NewRegionLabeler(context.Background(), store, time.Hour)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	ttls := []string{"1ms", "1ms", "1ms", "5ms", "5ms", "10ms", "1h", "24h"}
 	start, _ := hex.DecodeString("1234")
 	end, _ := hex.DecodeString("5678")
 	region := core.NewTestRegionInfo(start, end)
 	// the region has no lable rule at the beginning.
-	re.Empty(labeler.GetRegionLabels(region))
+	c.Assert(labeler.GetRegionLabels(region), HasLen, 0)
 
 	labels := []RegionLabel{}
 	for id, ttl := range ttls {
@@ -355,10 +351,10 @@ func TestGC(t *testing.T) {
 			RuleType: "key-range",
 			Data:     makeKeyRanges("1234", "5678")}
 		err := labeler.SetLabelRule(rule)
-		re.NoError(err)
+		c.Assert(err, IsNil)
 	}
 
-	re.Len(labeler.labelRules, len(ttls))
+	c.Assert(labeler.labelRules, HasLen, len(ttls))
 
 	// check all rules unitl some rule expired.
 	for {
@@ -370,14 +366,14 @@ func TestGC(t *testing.T) {
 	}
 
 	// no rule was cleared because the gc interval is big.
-	re.Len(labeler.labelRules, len(ttls))
+	c.Assert(labeler.labelRules, HasLen, len(ttls))
 
 	labeler.checkAndClearExpiredLabels()
 
 	labeler.RLock()
 	currentRuleLen := len(labeler.labelRules)
 	labeler.RUnlock()
-	re.LessOrEqual(currentRuleLen, 5)
+	c.Assert(currentRuleLen <= 5, IsTrue)
 }
 
 func makeKeyRanges(keys ...string) []interface{} {

@@ -41,12 +41,10 @@ const (
 	Version3_0
 	Version4_0
 	Version5_0
-	// JointConsensus is supported in ConfChangeV2, which supports safe conf change across data center.
-	ConfChangeV2
+	// JointConsensus can support safe conf change across data center.
+	JointConsensus
 	// HotScheduleWithQuery supports schedule hot region with query info.
 	HotScheduleWithQuery
-	// SwitchWithess supports switch between witness and non-witness.
-	SwitchWitness
 )
 
 var featuresDict = map[Feature]string{
@@ -57,9 +55,8 @@ var featuresDict = map[Feature]string{
 	Version3_0:           "3.0.0",
 	Version4_0:           "4.0.0",
 	Version5_0:           "5.0.0",
-	ConfChangeV2:         "5.0.0",
+	JointConsensus:       "5.0.0",
 	HotScheduleWithQuery: "5.2.0",
-	SwitchWitness:        "6.5.0",
 }
 
 // MinSupportedVersion returns the minimum support version for the specified feature.

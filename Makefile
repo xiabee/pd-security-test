@@ -135,20 +135,20 @@ SHELL := env PATH='$(PATH)' GOBIN='$(GO_TOOLS_BIN_PATH)' $(shell which bash)
 
 install-tools:
 	@mkdir -p $(GO_TOOLS_BIN_PATH)
-	@which golangci-lint >/dev/null 2>&1 || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GO_TOOLS_BIN_PATH) v1.48.0
+	@which golangci-lint >/dev/null 2>&1 || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GO_TOOLS_BIN_PATH) v1.46.0
 	@grep '_' tools.go | sed 's/"//g' | awk '{print $$2}' | xargs go install
 
 .PHONY: install-tools
 
 #### Static checks ####
 
-check: install-tools static tidy generate-errdoc check-plugin check-test
+check: install-tools static tidy check-plugin errdoc check-testing-t
 
 static: install-tools
 	@ echo "gofmt ..."
 	@ gofmt -s -l -d $(PACKAGE_DIRECTORIES) 2>&1 | awk '{ print } END { if (NR > 0) { exit 1 } }'
 	@ echo "golangci-lint ..."
-	@ golangci-lint run --verbose $(PACKAGE_DIRECTORIES)
+	@ golangci-lint run $(PACKAGE_DIRECTORIES)
 	@ echo "revive ..."
 	@ revive -formatter friendly -config revive.toml $(PACKAGES)
 
@@ -158,22 +158,21 @@ tidy:
 	@ go mod tidy
 	git diff go.mod go.sum | cat
 	git diff --quiet go.mod go.sum
-
+	
 	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) tidy && cd - > /dev/null; done
 
-generate-errdoc: install-tools
-	@echo "generating errors.toml..."
-	./scripts/generate-errdoc.sh
-
 check-plugin:
-	@echo "checking plugin..."
+	@echo "checking plugin"
 	cd ./plugin/scheduler_example && $(MAKE) evictLeaderPlugin.so && rm evictLeaderPlugin.so
 
-check-test:
-	@echo "checking test..."
-	./scripts/check-test.sh
+errdoc: install-tools
+	@echo "generator errors.toml"
+	./scripts/check-errdoc.sh
 
-.PHONY: check static tidy generate-errdoc check-plugin check-test
+check-testing-t:
+	./scripts/check-testing-t.sh
+
+.PHONY: check static tidy check-plugin errdoc docker-build-test check-testing-t
 
 #### Test utils ####
 

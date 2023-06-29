@@ -17,11 +17,14 @@ package statistics
 import (
 	"math/rand"
 	"sort"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
+
+var _ = Suite(&testTopNSuite{})
+
+type testTopNSuite struct{}
 
 type item struct {
 	id     uint64
@@ -36,22 +39,21 @@ func (it *item) Less(k int, than TopNItem) bool {
 	return it.values[k] < than.(*item).values[k]
 }
 
-func TestPut(t *testing.T) {
-	re := require.New(t)
+func (s *testTopNSuite) TestPut(c *C) {
 	const Total, N = 10000, 50
-	tn := NewTopN(DimLen, N, time.Hour)
+	tn := NewTopN(DimLen, N, 1*time.Hour)
 
-	putPerm(re, tn, Total, func(x int) float64 {
+	putPerm(c, tn, Total, func(x int) float64 {
 		return float64(-x) + 1
 	}, false /*insert*/)
 
-	putPerm(re, tn, Total, func(x int) float64 {
+	putPerm(c, tn, Total, func(x int) float64 {
 		return float64(-x)
 	}, true /*update*/)
 
 	// check GetTopNMin
 	for k := 0; k < DimLen; k++ {
-		re.Equal(float64(1-N), tn.GetTopNMin(k).(*item).values[k])
+		c.Assert(tn.GetTopNMin(k).(*item).values[k], Equals, float64(1-N))
 	}
 
 	{
@@ -63,7 +65,7 @@ func TestPut(t *testing.T) {
 		}
 		// check update worked
 		for i, v := range topns {
-			re.Equal(float64(-i), v)
+			c.Assert(v, Equals, float64(-i))
 		}
 	}
 
@@ -76,7 +78,7 @@ func TestPut(t *testing.T) {
 		}
 		// check update worked
 		for i, v := range all {
-			re.Equal(float64(-i), v)
+			c.Assert(v, Equals, float64(-i))
 		}
 	}
 
@@ -94,19 +96,19 @@ func TestPut(t *testing.T) {
 			}
 			sort.Sort(sort.Reverse(sort.Float64Slice(all)))
 
-			re.Equal(all[:N], topn)
+			c.Assert(topn, DeepEquals, all[:N])
 		}
 	}
 
 	// check Get
 	for i := uint64(0); i < Total; i++ {
 		it := tn.Get(i).(*item)
-		re.Equal(i, it.id)
-		re.Equal(-float64(i), it.values[0])
+		c.Assert(it.id, Equals, i)
+		c.Assert(it.values[0], Equals, -float64(i))
 	}
 }
 
-func putPerm(re *require.Assertions, tn *TopN, total int, f func(x int) float64, isUpdate bool) {
+func putPerm(c *C, tn *TopN, total int, f func(x int) float64, isUpdate bool) {
 	{ // insert
 		dims := make([][]int, DimLen)
 		for k := 0; k < DimLen; k++ {
@@ -120,17 +122,16 @@ func putPerm(re *require.Assertions, tn *TopN, total int, f func(x int) float64,
 			for k := 0; k < DimLen; k++ {
 				item.values[k] = f(dims[k][i])
 			}
-			re.Equal(isUpdate, tn.Put(item))
+			c.Assert(tn.Put(item), Equals, isUpdate)
 		}
 	}
 }
 
-func TestRemove(t *testing.T) {
-	re := require.New(t)
+func (s *testTopNSuite) TestRemove(c *C) {
 	const Total, N = 10000, 50
-	tn := NewTopN(DimLen, N, time.Hour)
+	tn := NewTopN(DimLen, N, 1*time.Hour)
 
-	putPerm(re, tn, Total, func(x int) float64 {
+	putPerm(c, tn, Total, func(x int) float64 {
 		return float64(-x)
 	}, false /*insert*/)
 
@@ -138,28 +139,28 @@ func TestRemove(t *testing.T) {
 	for i := 0; i < Total; i++ {
 		if i%3 != 0 {
 			it := tn.Remove(uint64(i)).(*item)
-			re.Equal(uint64(i), it.id)
+			c.Assert(it.id, Equals, uint64(i))
 		}
 	}
 
 	// check Remove worked
 	for i := 0; i < Total; i++ {
 		if i%3 != 0 {
-			re.Nil(tn.Remove(uint64(i)))
+			c.Assert(tn.Remove(uint64(i)), IsNil)
 		}
 	}
 
-	re.Equal(uint64(3*(N-1)), tn.GetTopNMin(0).(*item).id)
+	c.Assert(tn.GetTopNMin(0).(*item).id, Equals, uint64(3*(N-1)))
 
 	{
 		topns := make([]float64, N)
 		for _, it := range tn.GetAllTopN(0) {
 			it := it.(*item)
 			topns[it.id/3] = it.values[0]
-			re.Equal(uint64(0), it.id%3)
+			c.Assert(it.id%3, Equals, uint64(0))
 		}
 		for i, v := range topns {
-			re.Equal(float64(-i*3), v)
+			c.Assert(v, Equals, float64(-i*3))
 		}
 	}
 
@@ -168,10 +169,10 @@ func TestRemove(t *testing.T) {
 		for _, it := range tn.GetAll() {
 			it := it.(*item)
 			all[it.id/3] = it.values[0]
-			re.Equal(uint64(0), it.id%3)
+			c.Assert(it.id%3, Equals, uint64(0))
 		}
 		for i, v := range all {
-			re.Equal(float64(-i*3), v)
+			c.Assert(v, Equals, float64(-i*3))
 		}
 	}
 
@@ -189,23 +190,22 @@ func TestRemove(t *testing.T) {
 			}
 			sort.Sort(sort.Reverse(sort.Float64Slice(all)))
 
-			re.Equal(all[:N], topn)
+			c.Assert(topn, DeepEquals, all[:N])
 		}
 	}
 
 	for i := uint64(0); i < Total; i += 3 {
 		it := tn.Get(i).(*item)
-		re.Equal(i, it.id)
-		re.Equal(-float64(i), it.values[0])
+		c.Assert(it.id, Equals, i)
+		c.Assert(it.values[0], Equals, -float64(i))
 	}
 }
 
-func TestTTL(t *testing.T) {
-	re := require.New(t)
+func (s *testTopNSuite) TestTTL(c *C) {
 	const Total, N = 1000, 50
 	tn := NewTopN(DimLen, 50, 900*time.Millisecond)
 
-	putPerm(re, tn, Total, func(x int) float64 {
+	putPerm(c, tn, Total, func(x int) float64 {
 		return float64(-x)
 	}, false /*insert*/)
 
@@ -215,27 +215,27 @@ func TestTTL(t *testing.T) {
 		for k := 1; k < DimLen; k++ {
 			item.values = append(item.values, rand.NormFloat64())
 		}
-		re.True(tn.Put(item))
+		c.Assert(tn.Put(item), IsTrue)
 	}
 	for i := 3; i < Total; i += 3 {
 		item := &item{id: uint64(i), values: []float64{float64(-i) + 100}}
 		for k := 1; k < DimLen; k++ {
 			item.values = append(item.values, rand.NormFloat64())
 		}
-		re.False(tn.Put(item))
+		c.Assert(tn.Put(item), IsFalse)
 	}
 	tn.RemoveExpired()
 
-	re.Equal(Total/3+1, tn.Len())
+	c.Assert(tn.Len(), Equals, Total/3+1)
 	items := tn.GetAllTopN(0)
 	v := make([]float64, N)
 	for _, it := range items {
 		it := it.(*item)
-		re.Equal(uint64(0), it.id%3)
+		c.Assert(it.id%3, Equals, uint64(0))
 		v[it.id/3] = it.values[0]
 	}
 	for i, x := range v {
-		re.Equal(float64(-i*3)+100, x)
+		c.Assert(x, Equals, float64(-i*3)+100)
 	}
 
 	{ // check all dimensions
@@ -252,7 +252,7 @@ func TestTTL(t *testing.T) {
 			}
 			sort.Sort(sort.Reverse(sort.Float64Slice(all)))
 
-			re.Equal(all[:N], topn)
+			c.Assert(topn, DeepEquals, all[:N])
 		}
 	}
 }

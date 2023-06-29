@@ -17,7 +17,6 @@ package cases
 import (
 	"time"
 
-	"github.com/docker/go-units"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
@@ -29,20 +28,29 @@ func newRedundantBalanceRegion() *Case {
 	var simCase Case
 
 	storeNum := simutil.CaseConfigure.StoreNum
-	regionNum := simutil.CaseConfigure.RegionNum
+	regionNum := simutil.CaseConfigure.RegionNum * storeNum / 3
 	if storeNum == 0 || regionNum == 0 {
 		storeNum, regionNum = 6, 4000
 	}
 
 	for i := 0; i < storeNum; i++ {
-		s := &Store{
-			ID:     IDAllocator.nextID(),
-			Status: metapb.StoreState_Up,
-		}
 		if i%2 == 1 {
-			s.HasExtraUsedSpace = true
+			simCase.Stores = append(simCase.Stores, &Store{
+				ID:        IDAllocator.nextID(),
+				Status:    metapb.StoreState_Up,
+				Capacity:  1 * TB,
+				Available: 980 * GB,
+				Version:   "2.1.0",
+			})
+		} else {
+			simCase.Stores = append(simCase.Stores, &Store{
+				ID:        IDAllocator.nextID(),
+				Status:    metapb.StoreState_Up,
+				Capacity:  1 * TB,
+				Available: 1 * TB,
+				Version:   "2.1.0",
+			})
 		}
-		simCase.Stores = append(simCase.Stores, s)
 	}
 
 	for i := 0; i < regionNum; i++ {
@@ -55,7 +63,7 @@ func newRedundantBalanceRegion() *Case {
 			ID:     IDAllocator.nextID(),
 			Peers:  peers,
 			Leader: peers[0],
-			Size:   96 * units.MiB,
+			Size:   96 * MB,
 			Keys:   960000,
 		})
 	}

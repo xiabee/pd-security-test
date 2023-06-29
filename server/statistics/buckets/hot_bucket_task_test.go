@@ -18,12 +18,16 @@ import (
 	"context"
 	"math"
 	"strconv"
-	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
 )
+
+var _ = Suite(&testHotBucketTaskCache{})
+
+type testHotBucketTaskCache struct {
+}
 
 func getAllBucketStats(ctx context.Context, hotCache *HotBucketCache) map[uint64][]*BucketStat {
 	task := NewCollectBucketStatsTask(minHotDegree)
@@ -31,8 +35,7 @@ func getAllBucketStats(ctx context.Context, hotCache *HotBucketCache) map[uint64
 	return task.WaitRet(ctx)
 }
 
-func TestColdHot(t *testing.T) {
-	re := require.New(t)
+func (s *testHotBucketTaskCache) TestColdHot(c *C) {
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 	hotCache := NewBucketsCache(ctx)
@@ -49,63 +52,60 @@ func TestColdHot(t *testing.T) {
 	for _, v := range testdata {
 		for i := 0; i < 20; i++ {
 			task := NewCheckPeerTask(v.buckets)
-			re.True(hotCache.CheckAsync(task))
+			c.Assert(hotCache.CheckAsync(task), IsTrue)
 			hotBuckets := getAllBucketStats(ctx, hotCache)
 			time.Sleep(time.Millisecond * 10)
 			item := hotBuckets[v.buckets.RegionId]
-			re.NotNil(item)
+			c.Assert(item, NotNil)
 			if v.isHot {
-				re.Equal(i+1, item[0].HotDegree)
+				c.Assert(item[0].HotDegree, Equals, i+1)
 			} else {
-				re.Equal(-i-1, item[0].HotDegree)
+				c.Assert(item[0].HotDegree, Equals, -i-1)
 			}
 		}
 	}
 }
 
-func TestCheckBucketsTask(t *testing.T) {
-	re := require.New(t)
+func (s *testHotBucketTaskCache) TestCheckBucketsTask(c *C) {
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 	hotCache := NewBucketsCache(ctx)
 	// case1： add bucket successfully
 	buckets := newTestBuckets(1, 1, [][]byte{[]byte("10"), []byte("20"), []byte("30")}, 0)
 	task := NewCheckPeerTask(buckets)
-	re.True(hotCache.CheckAsync(task))
+	c.Assert(hotCache.CheckAsync(task), IsTrue)
 	time.Sleep(time.Millisecond * 10)
 
 	hotBuckets := getAllBucketStats(ctx, hotCache)
-	re.Len(hotBuckets, 1)
+	c.Assert(hotBuckets, HasLen, 1)
 	item := hotBuckets[uint64(1)]
-	re.NotNil(item)
-
-	re.Len(item, 2)
-	re.Equal(-1, item[0].HotDegree)
-	re.Equal(-1, item[1].HotDegree)
+	c.Assert(item, NotNil)
+	c.Assert(item, HasLen, 2)
+	c.Assert(item[0].HotDegree, Equals, -1)
+	c.Assert(item[1].HotDegree, Equals, -1)
 
 	// case2: add bucket successful and the hot degree should inherit from the old one.
 	buckets = newTestBuckets(2, 1, [][]byte{[]byte("20"), []byte("30")}, 0)
 	task = NewCheckPeerTask(buckets)
-	re.True(hotCache.CheckAsync(task))
+	c.Assert(hotCache.CheckAsync(task), IsTrue)
 	hotBuckets = getAllBucketStats(ctx, hotCache)
 	time.Sleep(time.Millisecond * 10)
 	item = hotBuckets[uint64(2)]
-	re.Len(item, 1)
-	re.Equal(-2, item[0].HotDegree)
+	c.Assert(item, HasLen, 1)
+	c.Assert(item[0].HotDegree, Equals, -2)
 
 	// case3：add bucket successful and the hot degree should inherit from the old one.
 	buckets = newTestBuckets(1, 1, [][]byte{[]byte("10"), []byte("20")}, 0)
 	task = NewCheckPeerTask(buckets)
-	re.True(hotCache.CheckAsync(task))
+	c.Assert(hotCache.CheckAsync(task), IsTrue)
 	hotBuckets = getAllBucketStats(ctx, hotCache)
 	time.Sleep(time.Millisecond * 10)
 	item = hotBuckets[uint64(1)]
-	re.Len(item, 1)
-	re.Equal(-2, item[0].HotDegree)
+	c.Assert(item, HasLen, 1)
+	c.Assert(item[0].HotDegree, Equals, -2)
 }
 
-func TestCollectBucketStatsTask(t *testing.T) {
-	re := require.New(t)
+func (s *testHotBucketTaskCache) TestCollectBucketStatsTask(c *C) {
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 	hotCache := NewBucketsCache(ctx)
@@ -117,11 +117,11 @@ func TestCollectBucketStatsTask(t *testing.T) {
 	}
 	time.Sleep(time.Millisecond * 10)
 	task := NewCollectBucketStatsTask(-100)
-	re.True(hotCache.CheckAsync(task))
+	c.Assert(hotCache.CheckAsync(task), IsTrue)
 	stats := task.WaitRet(ctx)
-	re.Len(stats, 10)
+	c.Assert(stats, HasLen, 10)
 	task = NewCollectBucketStatsTask(1)
-	re.True(hotCache.CheckAsync(task))
+	c.Assert(hotCache.CheckAsync(task), IsTrue)
 	stats = task.WaitRet(ctx)
-	re.Empty(stats)
+	c.Assert(stats, HasLen, 0)
 }

@@ -27,14 +27,13 @@ import (
 	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
 	"go.uber.org/zap"
 )
 
 const (
 	watchInterval = 100 * time.Millisecond
-	timeout       = time.Minute
+	timeout       = 1 * time.Minute
 )
 
 // SplitRegionsHandler used to handle region splitting
@@ -166,7 +165,7 @@ func (r *RegionSplitter) checkRegionValid(region *core.RegionInfo) bool {
 	if r.cluster.IsRegionHot(region) {
 		return false
 	}
-	if !filter.IsRegionReplicated(r.cluster, region) {
+	if !IsRegionReplicated(r.cluster, region) {
 		r.cluster.AddSuspectRegions(region.GetID())
 		return false
 	}

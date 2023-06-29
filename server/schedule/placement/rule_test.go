@@ -17,13 +17,15 @@ package placement
 import (
 	"encoding/hex"
 	"math/rand"
-	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestPrepareRulesForApply(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testRuleSuite{})
+
+type testRuleSuite struct{}
+
+func (s *testRuleSuite) TestPrepareRulesForApply(c *C) {
 	rules := []*Rule{
 		{GroupID: "g1", Index: 0, ID: "id5"},
 		{GroupID: "g1", Index: 0, ID: "id6"},
@@ -54,13 +56,13 @@ func TestPrepareRulesForApply(t *testing.T) {
 	sortRules(rules)
 	rules = prepareRulesForApply(rules)
 
-	re.Len(rules, len(expected))
+	c.Assert(len(rules), Equals, len(expected))
 	for i := range rules {
-		re.Equal(expected[i], rules[i].Key())
+		c.Assert(rules[i].Key(), Equals, expected[i])
 	}
 }
-func TestGroupProperties(t *testing.T) {
-	re := require.New(t)
+
+func (s *testRuleSuite) TestGroupProperties(c *C) {
 	testCases := []struct {
 		rules  []*Rule
 		expect [][2]string
@@ -97,18 +99,19 @@ func TestGroupProperties(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
-		rand.Shuffle(len(testCase.rules), func(i, j int) { testCase.rules[i], testCase.rules[j] = testCase.rules[j], testCase.rules[i] })
-		sortRules(testCase.rules)
-		rules := prepareRulesForApply(testCase.rules)
-		re.Len(rules, len(testCase.expect))
+	for _, tc := range testCases {
+		rand.Shuffle(len(tc.rules), func(i, j int) { tc.rules[i], tc.rules[j] = tc.rules[j], tc.rules[i] })
+		sortRules(tc.rules)
+		rules := prepareRulesForApply(tc.rules)
+		c.Assert(rules, HasLen, len(tc.expect))
 		for i := range rules {
-			re.Equal(testCase.expect[i], rules[i].Key())
+			c.Assert(rules[i].Key(), Equals, tc.expect[i])
 		}
 	}
 }
-func TestBuildRuleList(t *testing.T) {
-	re := require.New(t)
+
+// TODO: fulfill unit test case to cover BuildRuleList
+func (s *testRuleSuite) TestBuildRuleList(c *C) {
 	defaultRule := &Rule{
 		GroupID:  "pd",
 		ID:       "default",
@@ -118,9 +121,9 @@ func TestBuildRuleList(t *testing.T) {
 		Count:    3,
 	}
 	byteStart, err := hex.DecodeString("a1")
-	re.NoError(err)
+	c.Check(err, IsNil)
 	byteEnd, err := hex.DecodeString("a2")
-	re.NoError(err)
+	c.Check(err, IsNil)
 	ruleMeta := &Rule{
 		GroupID:  "pd",
 		ID:       "meta",
@@ -132,7 +135,7 @@ func TestBuildRuleList(t *testing.T) {
 		Count:    5,
 	}
 
-	testCases := []struct {
+	testcases := []struct {
 		name   string
 		rules  map[[2]string]*Rule
 		expect ruleList
@@ -178,11 +181,11 @@ func TestBuildRuleList(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
-		t.Log(testCase.name)
-		config := &ruleConfig{rules: testCase.rules}
+	for _, testcase := range testcases {
+		c.Log(testcase.name)
+		config := &ruleConfig{rules: testcase.rules}
 		result, err := buildRuleList(config)
-		re.NoError(err)
-		re.Equal(testCase.expect.ranges, result.ranges)
+		c.Assert(err, IsNil)
+		c.Assert(result.ranges, DeepEquals, testcase.expect.ranges)
 	}
 }

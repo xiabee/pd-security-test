@@ -18,9 +18,18 @@ import (
 	"math"
 	"time"
 
+	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/movingaverage"
 	"github.com/tikv/pd/pkg/slice"
 	"go.uber.org/zap"
+)
+
+// Indicator dims.
+const (
+	ByteDim int = iota
+	KeyDim
+	QueryDim
+	DimLen
 )
 
 type dimStat struct {
@@ -74,25 +83,32 @@ func (d *dimStat) Clone() *dimStat {
 type HotPeerStat struct {
 	StoreID  uint64 `json:"store_id"`
 	RegionID uint64 `json:"region_id"`
-	// HotDegree records the times for the region considered as hot spot during each report.
+
+	// HotDegree records the times for the region considered as hot spot during each HandleRegionHeartbeat
 	HotDegree int `json:"hot_degree"`
-	// AntiCount used to eliminate some noise when remove region in cache.
+	// AntiCount used to eliminate some noise when remove region in cache
 	AntiCount int `json:"anti_count"`
-	// Loads contains only Kind-related statistics and is DimLen in length.
+
+	Kind  RWType    `json:"-"`
 	Loads []float64 `json:"loads"`
-	// rolling statistics contains denoising data, it's DimLen in length.
+
+	// rolling statistics, recording some recently added records.
 	rollingLoads []*dimStat
-	// stores contains the all peer's storeID in this region.
-	stores []uint64
-	// actionType is the action type of the region, add, update or remove.
-	actionType ActionType
-	// isLeader is true means that the region has a leader on this store.
-	isLeader bool
-	// lastTransferLeaderTime is used to cool down frequent transfer leader.
+
+	// LastUpdateTime used to calculate average write
+	LastUpdateTime time.Time `json:"last_update_time"`
+
+	actionType             ActionType
+	isLeader               bool
+	interval               uint64
+	thresholds             []float64
+	peers                  []*metapb.Peer
 	lastTransferLeaderTime time.Time
 	// If the peer didn't been send by store heartbeat when it is already stored as hot peer stat,
 	// we will handle it as cold peer and mark the inCold flag
 	inCold bool
+	// source represents the statistics item source, such as direct, inherit.
+	source sourceKind
 	// If the item in storeA is just inherited from storeB,
 	// then other store, such as storeC, will be forbidden to inherit from storeA until the item in storeA is hot.
 	allowInherited bool
@@ -104,28 +120,33 @@ func (stat *HotPeerStat) ID() uint64 {
 }
 
 // Less compares two HotPeerStat.Implementing TopNItem.
-func (stat *HotPeerStat) Less(dim int, than TopNItem) bool {
-	return stat.GetLoad(dim) < than.(*HotPeerStat).GetLoad(dim)
+func (stat *HotPeerStat) Less(k int, than TopNItem) bool {
+	return stat.GetLoad(RegionStatKind(k)) < than.(*HotPeerStat).GetLoad(RegionStatKind(k))
 }
 
 // Log is used to output some info
 func (stat *HotPeerStat) Log(str string, level func(msg string, fields ...zap.Field)) {
 	level(str,
+		zap.Uint64("interval", stat.interval),
 		zap.Uint64("region-id", stat.RegionID),
+		zap.Uint64("store", stat.StoreID),
 		zap.Bool("is-leader", stat.isLeader),
+		zap.String("type", stat.Kind.String()),
 		zap.Float64s("loads", stat.GetLoads()),
 		zap.Float64s("loads-instant", stat.Loads),
+		zap.Float64s("thresholds", stat.thresholds),
 		zap.Int("hot-degree", stat.HotDegree),
 		zap.Int("hot-anti-count", stat.AntiCount),
 		zap.Duration("sum-interval", stat.getIntervalSum()),
+		zap.String("source", stat.source.String()),
 		zap.Bool("allow-inherited", stat.allowInherited),
 		zap.String("action-type", stat.actionType.String()),
 		zap.Time("last-transfer-leader-time", stat.lastTransferLeaderTime))
 }
 
 // IsNeedCoolDownTransferLeader use cooldown time after transfer leader to avoid unnecessary schedule
-func (stat *HotPeerStat) IsNeedCoolDownTransferLeader(minHotDegree int, rwTy RWType) bool {
-	return time.Since(stat.lastTransferLeaderTime).Seconds() < float64(minHotDegree*rwTy.ReportInterval())
+func (stat *HotPeerStat) IsNeedCoolDownTransferLeader(minHotDegree int) bool {
+	return time.Since(stat.lastTransferLeaderTime).Seconds() < float64(minHotDegree*stat.hotStatReportInterval())
 }
 
 // IsLeader indicates the item belong to the leader.
@@ -139,39 +160,43 @@ func (stat *HotPeerStat) GetActionType() ActionType {
 }
 
 // GetLoad returns denoising load if possible.
-func (stat *HotPeerStat) GetLoad(dim int) float64 {
-	if stat.rollingLoads != nil {
-		return math.Round(stat.rollingLoads[dim].Get())
+func (stat *HotPeerStat) GetLoad(k RegionStatKind) float64 {
+	if len(stat.rollingLoads) > int(k) {
+		return math.Round(stat.rollingLoads[int(k)].Get())
 	}
-	return math.Round(stat.Loads[dim])
+	return math.Round(stat.Loads[int(k)])
 }
 
-// GetLoads returns denoising loads if possible.
+// GetLoads returns denoising load if possible.
 func (stat *HotPeerStat) GetLoads() []float64 {
-	if stat.rollingLoads != nil {
-		ret := make([]float64, len(stat.rollingLoads))
-		for dim := range ret {
-			ret[dim] = math.Round(stat.rollingLoads[dim].Get())
-		}
-		return ret
+	regionStats := stat.Kind.RegionStats()
+	loads := make([]float64, len(regionStats))
+	for i, k := range regionStats {
+		loads[i] = stat.GetLoad(k)
 	}
-	return stat.Loads
+	return loads
 }
 
-// Clone clones the HotPeerStat.
+// GetThresholds returns thresholds.
+// Only for test purpose.
+func (stat *HotPeerStat) GetThresholds() []float64 {
+	return stat.thresholds
+}
+
+// Clone clones the HotPeerStat
 func (stat *HotPeerStat) Clone() *HotPeerStat {
 	ret := *stat
-	ret.Loads = make([]float64, DimLen)
-	for i := 0; i < DimLen; i++ {
+	ret.Loads = make([]float64, RegionStatCount)
+	for i := RegionStatKind(0); i < RegionStatCount; i++ {
 		ret.Loads[i] = stat.GetLoad(i) // replace with denoising loads
 	}
 	ret.rollingLoads = nil
 	return &ret
 }
 
-func (stat *HotPeerStat) isHot(thresholds []float64) bool {
+func (stat *HotPeerStat) isHot() bool {
 	return slice.AnyOf(stat.rollingLoads, func(i int) bool {
-		return stat.rollingLoads[i].isLastAverageHot(thresholds[i])
+		return stat.rollingLoads[i].isLastAverageHot(stat.thresholds[i])
 	})
 }
 
@@ -181,14 +206,16 @@ func (stat *HotPeerStat) clearLastAverage() {
 	}
 }
 
+func (stat *HotPeerStat) hotStatReportInterval() int {
+	if stat.Kind == Read {
+		return ReadReportInterval
+	}
+	return WriteReportInterval
+}
+
 func (stat *HotPeerStat) getIntervalSum() time.Duration {
 	if len(stat.rollingLoads) == 0 || stat.rollingLoads[0] == nil {
 		return 0
 	}
 	return stat.rollingLoads[0].lastAverage.GetIntervalSum()
-}
-
-// GetStores returns the stores of all peers in the region.
-func (stat *HotPeerStat) GetStores() []uint64 {
-	return stat.stores
 }

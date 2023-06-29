@@ -18,18 +18,23 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/check"
 )
 
-func TestNilFail(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func Test(t *testing.T) {
+	check.TestingT(t)
+}
+
+var _ = check.Suite(&testAssertUtilSuite{})
+
+type testAssertUtilSuite struct{}
+
+func (s *testAssertUtilSuite) TestNilFail(c *check.C) {
 	var failErr error
-	checker := NewChecker()
-	checker.FailNow = func() {
+	checker := NewChecker(func() {
 		failErr = errors.New("called assert func not exist")
-	}
-	re.Nil(checker.IsNil)
+	})
+	c.Assert(checker.IsNil, check.IsNil)
 	checker.AssertNil(nil)
-	re.Error(failErr)
+	c.Assert(failErr, check.NotNil)
 }

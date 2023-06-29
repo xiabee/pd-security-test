@@ -32,6 +32,13 @@ func NewSafeQueue() *SafeQueue {
 	return sq
 }
 
+// Init implement init
+func (sq *SafeQueue) Init() {
+	sq.mu.Lock()
+	defer sq.mu.Unlock()
+	sq.que.Init()
+}
+
 // PushBack implement PushBack
 func (sq *SafeQueue) PushBack(v interface{}) {
 	sq.mu.Lock()
@@ -50,7 +57,7 @@ func (sq *SafeQueue) PopFront() interface{} {
 func (sq *SafeQueue) Clone() *SafeQueue {
 	sq.mu.Lock()
 	defer sq.mu.Unlock()
-	q := queue.New()
+	q := queue.New().Init()
 	for i := 0; i < sq.que.Len(); i++ {
 		v := sq.que.PopFront()
 		sq.que.PushBack(v)

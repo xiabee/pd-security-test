@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -121,7 +120,7 @@ type RegionScatterer struct {
 	name           string
 	cluster        Cluster
 	ordinaryEngine engineContext
-	specialEngines sync.Map
+	specialEngines map[string]engineContext
 	opController   *OperatorController
 }
 
@@ -129,36 +128,31 @@ type RegionScatterer struct {
 // RegionScatter is used for the `Lightning`, it will scatter the specified regions before import data.
 func NewRegionScatterer(ctx context.Context, cluster Cluster, opController *OperatorController) *RegionScatterer {
 	return &RegionScatterer{
-		ctx:          ctx,
-		name:         regionScatterName,
-		cluster:      cluster,
-		opController: opController,
-		ordinaryEngine: newEngineContext(ctx, func() filter.Filter {
-			return filter.NewEngineFilter(regionScatterName, filter.NotSpecialEngines)
-		}),
+		ctx:            ctx,
+		name:           regionScatterName,
+		cluster:        cluster,
+		ordinaryEngine: newEngineContext(ctx, filter.NewOrdinaryEngineFilter(regionScatterName)),
+		specialEngines: make(map[string]engineContext),
+		opController:   opController,
 	}
 }
 
-type filterFunc func() filter.Filter
-
 type engineContext struct {
-	filterFuncs    []filterFunc
+	filters        []filter.Filter
 	selectedPeer   *selectedStores
 	selectedLeader *selectedStores
 }
 
-func newEngineContext(ctx context.Context, filterFuncs ...filterFunc) engineContext {
-	filterFuncs = append(filterFuncs, func() filter.Filter {
-		return &filter.StoreStateFilter{ActionScope: regionScatterName, MoveRegion: true, ScatterRegion: true}
-	})
+func newEngineContext(ctx context.Context, filters ...filter.Filter) engineContext {
+	filters = append(filters, &filter.StoreStateFilter{ActionScope: regionScatterName, MoveRegion: true, ScatterRegion: true})
 	return engineContext{
-		filterFuncs:    filterFuncs,
+		filters:        filters,
 		selectedPeer:   newSelectedStores(ctx),
 		selectedLeader: newSelectedStores(ctx),
 	}
 }
 
-const maxSleepDuration = time.Minute
+const maxSleepDuration = 1 * time.Minute
 const initialSleepDuration = 100 * time.Millisecond
 const maxRetryLimit = 30
 
@@ -267,7 +261,7 @@ func (r *RegionScatterer) scatterRegions(regions map[uint64]*core.RegionInfo, fa
 // Scatter relocates the region. If the group is defined, the regions' leader with the same group would be scattered
 // in a group level instead of cluster level.
 func (r *RegionScatterer) Scatter(region *core.RegionInfo, group string) (*operator.Operator, error) {
-	if !filter.IsRegionReplicated(r.cluster, region) {
+	if !IsRegionReplicated(r.cluster, region) {
 		r.cluster.AddSuspectRegions(region.GetID())
 		scatterCounter.WithLabelValues("skip", "not-replicated").Inc()
 		log.Warn("region not replicated during scatter", zap.Uint64("region-id", region.GetID()))
@@ -290,7 +284,7 @@ func (r *RegionScatterer) Scatter(region *core.RegionInfo, group string) (*opera
 }
 
 func (r *RegionScatterer) scatterRegion(region *core.RegionInfo, group string) *operator.Operator {
-	engineFilter := filter.NewEngineFilter(r.name, filter.NotSpecialEngines)
+	ordinaryFilter := filter.NewOrdinaryEngineFilter(r.name)
 	ordinaryPeers := make(map[uint64]*metapb.Peer, len(region.GetPeers()))
 	specialPeers := make(map[string]map[uint64]*metapb.Peer)
 	oldFit := r.cluster.GetRuleManager().FitRegion(r.cluster, region)
@@ -300,7 +294,7 @@ func (r *RegionScatterer) scatterRegion(region *core.RegionInfo, group string) *
 		if store == nil {
 			return nil
 		}
-		if engineFilter.Target(r.cluster.GetOpts(), store).IsOK() {
+		if ordinaryFilter.Target(r.cluster.GetOpts(), store) {
 			ordinaryPeers[peer.GetStoreId()] = peer
 		} else {
 			engine := store.GetLabelValue(core.EngineKey)
@@ -324,7 +318,7 @@ func (r *RegionScatterer) scatterRegion(region *core.RegionInfo, group string) *
 				continue
 			}
 			for {
-				candidates := r.selectCandidates(region, oldFit, peer.GetStoreId(), selectedStores, context)
+				candidates := r.selectCandidates(region, peer.GetStoreId(), selectedStores, context)
 				newPeer := r.selectStore(group, peer, peer.GetStoreId(), candidates, context)
 				targetPeers[newPeer.GetStoreId()] = newPeer
 				selectedStores[newPeer.GetStoreId()] = struct{}{}
@@ -353,14 +347,12 @@ func (r *RegionScatterer) scatterRegion(region *core.RegionInfo, group string) *
 	}
 
 	for engine, peers := range specialPeers {
-		ctx, ok := r.specialEngines.Load(engine)
+		ctx, ok := r.specialEngines[engine]
 		if !ok {
-			ctx = newEngineContext(r.ctx, func() filter.Filter {
-				return filter.NewEngineFilter(r.name, placement.LabelConstraint{Key: core.EngineKey, Op: placement.In, Values: []string{engine}})
-			})
-			r.specialEngines.Store(engine, ctx)
+			ctx = newEngineContext(r.ctx, filter.NewEngineFilter(r.name, engine))
+			r.specialEngines[engine] = ctx
 		}
-		scatterWithSameEngine(peers, ctx.(engineContext))
+		scatterWithSameEngine(peers, ctx)
 	}
 
 	if isSameDistribution(region, targetPeers, targetLeader) {
@@ -381,7 +373,7 @@ func (r *RegionScatterer) scatterRegion(region *core.RegionInfo, group string) *
 	if op != nil {
 		scatterCounter.WithLabelValues("success", "").Inc()
 		r.Put(targetPeers, targetLeader, group)
-		op.SetPriorityLevel(core.High)
+		op.SetPriorityLevel(core.HighPriority)
 	}
 	return op
 }
@@ -391,14 +383,8 @@ func allowLeader(fit *placement.RegionFit, peer *metapb.Peer) bool {
 	case metapb.PeerRole_Learner, metapb.PeerRole_DemotingVoter:
 		return false
 	}
-	if peer.IsWitness {
-		return false
-	}
 	peerFit := fit.GetRuleFit(peer.GetId())
 	if peerFit == nil || peerFit.Rule == nil {
-		return false
-	}
-	if peerFit.Rule.IsWitness {
 		return false
 	}
 	switch peerFit.Rule.Role {
@@ -418,7 +404,7 @@ func isSameDistribution(region *core.RegionInfo, targetPeers map[uint64]*metapb.
 	return region.GetLeader().GetStoreId() == targetLeader
 }
 
-func (r *RegionScatterer) selectCandidates(region *core.RegionInfo, oldFit *placement.RegionFit, sourceStoreID uint64, selectedStores map[uint64]struct{}, context engineContext) []uint64 {
+func (r *RegionScatterer) selectCandidates(region *core.RegionInfo, sourceStoreID uint64, selectedStores map[uint64]struct{}, context engineContext) []uint64 {
 	sourceStore := r.cluster.GetStore(sourceStoreID)
 	if sourceStore == nil {
 		log.Error("failed to get the store", zap.Uint64("store-id", sourceStoreID), errs.ZapError(errs.ErrGetSourceStore))
@@ -427,16 +413,14 @@ func (r *RegionScatterer) selectCandidates(region *core.RegionInfo, oldFit *plac
 	filters := []filter.Filter{
 		filter.NewExcludedFilter(r.name, nil, selectedStores),
 	}
-	scoreGuard := filter.NewPlacementSafeguard(r.name, r.cluster.GetOpts(), r.cluster.GetBasicCluster(), r.cluster.GetRuleManager(), region, sourceStore, oldFit)
-	for _, filterFunc := range context.filterFuncs {
-		filters = append(filters, filterFunc())
-	}
+	scoreGuard := filter.NewPlacementSafeguard(r.name, r.cluster.GetOpts(), r.cluster.GetBasicCluster(), r.cluster.GetRuleManager(), region, sourceStore)
+	filters = append(filters, context.filters...)
 	filters = append(filters, scoreGuard)
 	stores := r.cluster.GetStores()
 	candidates := make([]uint64, 0)
 	maxStoreTotalCount := uint64(0)
 	minStoreTotalCount := uint64(math.MaxUint64)
-	for _, store := range stores {
+	for _, store := range r.cluster.GetStores() {
 		count := context.selectedPeer.TotalCountByStore(store.GetID())
 		if count > maxStoreTotalCount {
 			maxStoreTotalCount = count
@@ -513,7 +497,7 @@ func (r *RegionScatterer) selectAvailableLeaderStore(group string, region *core.
 
 // Put put the final distribution in the context no matter the operator was created
 func (r *RegionScatterer) Put(peers map[uint64]*metapb.Peer, leaderStoreID uint64, group string) {
-	engineFilter := filter.NewEngineFilter(r.name, filter.NotSpecialEngines)
+	ordinaryFilter := filter.NewOrdinaryEngineFilter(r.name)
 	// Group peers by the engine of their stores
 	for _, peer := range peers {
 		storeID := peer.GetStoreId()
@@ -521,7 +505,7 @@ func (r *RegionScatterer) Put(peers map[uint64]*metapb.Peer, leaderStoreID uint6
 		if store == nil {
 			continue
 		}
-		if engineFilter.Target(r.cluster.GetOpts(), store).IsOK() {
+		if ordinaryFilter.Target(r.cluster.GetOpts(), store) {
 			r.ordinaryEngine.selectedPeer.Put(storeID, group)
 			scatterDistributionCounter.WithLabelValues(
 				fmt.Sprintf("%v", storeID),
@@ -529,8 +513,7 @@ func (r *RegionScatterer) Put(peers map[uint64]*metapb.Peer, leaderStoreID uint6
 				core.EngineTiKV).Inc()
 		} else {
 			engine := store.GetLabelValue(core.EngineKey)
-			ctx, _ := r.specialEngines.Load(engine)
-			ctx.(engineContext).selectedPeer.Put(storeID, group)
+			r.specialEngines[engine].selectedPeer.Put(storeID, group)
 			scatterDistributionCounter.WithLabelValues(
 				fmt.Sprintf("%v", storeID),
 				fmt.Sprintf("%v", false),

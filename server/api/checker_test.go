@@ -17,47 +17,42 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/suite"
 	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 )
 
-type checkerTestSuite struct {
-	suite.Suite
+var _ = Suite(&testCheckerSuite{})
+
+type testCheckerSuite struct {
 	svr       *server.Server
 	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
-func TestCheckerTestSuite(t *testing.T) {
-	suite.Run(t, new(checkerTestSuite))
+func (s *testCheckerSuite) SetUpSuite(c *C) {
+	s.svr, s.cleanup = mustNewServer(c)
+	mustWaitLeader(c, []*server.Server{s.svr})
+
+	addr := s.svr.GetAddr()
+	s.urlPrefix = fmt.Sprintf("%s%s/api/v1/checker", addr, apiPrefix)
+
+	mustBootstrapCluster(c, s.svr)
+	mustPutStore(c, s.svr, 1, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
+	mustPutStore(c, s.svr, 2, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
 }
 
-func (suite *checkerTestSuite) SetupSuite() {
-	re := suite.Require()
-	suite.svr, suite.cleanup = mustNewServer(re)
-	server.MustWaitLeader(re, []*server.Server{suite.svr})
-
-	addr := suite.svr.GetAddr()
-	suite.urlPrefix = fmt.Sprintf("%s%s/api/v1/checker", addr, apiPrefix)
-
-	mustBootstrapCluster(re, suite.svr)
-	mustPutStore(re, suite.svr, 1, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
-	mustPutStore(re, suite.svr, 2, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
+func (s *testCheckerSuite) TearDownSuite(c *C) {
+	s.cleanup()
 }
 
-func (suite *checkerTestSuite) TearDownSuite() {
-	suite.cleanup()
-}
+func (s *testCheckerSuite) TestAPI(c *C) {
+	s.testErrCases(c)
 
-func (suite *checkerTestSuite) TestAPI() {
-	suite.testErrCases()
-
-	testCases := []struct {
+	cases := []struct {
 		name string
 	}{
 		{name: "learner"},
@@ -67,105 +62,102 @@ func (suite *checkerTestSuite) TestAPI() {
 		{name: "merge"},
 		{name: "joint-state"},
 	}
-	for _, testCase := range testCases {
-		suite.testGetStatus(testCase.name)
-		suite.testPauseOrResume(testCase.name)
+	for _, ca := range cases {
+		s.testGetStatus(ca.name, c)
+		s.testPauseOrResume(ca.name, c)
 	}
 }
 
-func (suite *checkerTestSuite) testErrCases() {
+func (s *testCheckerSuite) testErrCases(c *C) {
 	// missing args
 	input := make(map[string]interface{})
 	pauseArgs, err := json.Marshal(input)
-	suite.NoError(err)
-	re := suite.Require()
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/merge", pauseArgs, tu.StatusNotOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/merge", pauseArgs, tu.StatusNotOK(c))
+	c.Assert(err, IsNil)
 
 	// negative delay
 	input["delay"] = -10
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/merge", pauseArgs, tu.StatusNotOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/merge", pauseArgs, tu.StatusNotOK(c))
+	c.Assert(err, IsNil)
 
 	// wrong name
 	name := "dummy"
 	input["delay"] = 30
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+name, pauseArgs, tu.StatusNotOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+name, pauseArgs, tu.StatusNotOK(c))
+	c.Assert(err, IsNil)
 	input["delay"] = 0
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+name, pauseArgs, tu.StatusNotOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+name, pauseArgs, tu.StatusNotOK(c))
+	c.Assert(err, IsNil)
 }
 
-func (suite *checkerTestSuite) testGetStatus(name string) {
-	handler := suite.svr.GetHandler()
+func (s *testCheckerSuite) testGetStatus(name string, c *C) {
+	handler := s.svr.GetHandler()
 
 	// normal run
 	resp := make(map[string]interface{})
-	re := suite.Require()
-	err := tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s/%s", suite.urlPrefix, name), &resp)
-	suite.NoError(err)
-	suite.False(resp["paused"].(bool))
+	err := tu.ReadGetJSON(c, testDialClient, fmt.Sprintf("%s/%s", s.urlPrefix, name), &resp)
+	c.Assert(err, IsNil)
+	c.Assert(resp["paused"], IsFalse)
 	// paused
 	err = handler.PauseOrResumeChecker(name, 30)
-	suite.NoError(err)
+	c.Assert(err, IsNil)
 	resp = make(map[string]interface{})
-	err = tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s/%s", suite.urlPrefix, name), &resp)
-	suite.NoError(err)
-	suite.True(resp["paused"].(bool))
+	err = tu.ReadGetJSON(c, testDialClient, fmt.Sprintf("%s/%s", s.urlPrefix, name), &resp)
+	c.Assert(err, IsNil)
+	c.Assert(resp["paused"], IsTrue)
 	// resumed
 	err = handler.PauseOrResumeChecker(name, 1)
-	suite.NoError(err)
+	c.Assert(err, IsNil)
 	time.Sleep(time.Second)
 	resp = make(map[string]interface{})
-	err = tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s/%s", suite.urlPrefix, name), &resp)
-	suite.NoError(err)
-	suite.False(resp["paused"].(bool))
+	err = tu.ReadGetJSON(c, testDialClient, fmt.Sprintf("%s/%s", s.urlPrefix, name), &resp)
+	c.Assert(err, IsNil)
+	c.Assert(resp["paused"], IsFalse)
 }
 
-func (suite *checkerTestSuite) testPauseOrResume(name string) {
-	handler := suite.svr.GetHandler()
+func (s *testCheckerSuite) testPauseOrResume(name string, c *C) {
+	handler := s.svr.GetHandler()
 	input := make(map[string]interface{})
 
 	// test pause.
 	input["delay"] = 30
 	pauseArgs, err := json.Marshal(input)
-	suite.NoError(err)
-	re := suite.Require()
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+name, pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	isPaused, err := handler.IsCheckerPaused(name)
-	suite.NoError(err)
-	suite.True(isPaused)
+	c.Assert(err, IsNil)
+	c.Assert(isPaused, IsTrue)
 	input["delay"] = 1
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+name, pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	time.Sleep(time.Second)
 	isPaused, err = handler.IsCheckerPaused(name)
-	suite.NoError(err)
-	suite.False(isPaused)
+	c.Assert(err, IsNil)
+	c.Assert(isPaused, IsFalse)
 
 	// test resume.
 	input = make(map[string]interface{})
 	input["delay"] = 30
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+name, pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	input["delay"] = 0
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	c.Assert(err, IsNil)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/"+name, pauseArgs, tu.StatusOK(c))
+	c.Assert(err, IsNil)
 	isPaused, err = handler.IsCheckerPaused(name)
-	suite.NoError(err)
-	suite.False(isPaused)
+	c.Assert(err, IsNil)
+	c.Assert(isPaused, IsFalse)
 }

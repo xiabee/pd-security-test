@@ -18,7 +18,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
 type testStruct1 struct {
@@ -34,39 +34,41 @@ type testStruct3 struct {
 	Enable bool `json:"enable,string"`
 }
 
-func TestFindJSONFullTagByChildTag(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testTagSuite{})
+
+type testTagSuite struct{}
+
+func (s *testTagSuite) TestFindJSONFullTagByChildTag(c *C) {
 	key := "enable"
 	result := FindJSONFullTagByChildTag(reflect.TypeOf(testStruct1{}), key)
-	re.Equal("object.action.enable", result)
+	c.Assert(result, Equals, "object.action.enable")
 
 	key = "action"
 	result = FindJSONFullTagByChildTag(reflect.TypeOf(testStruct1{}), key)
-	re.Equal("object.action", result)
+	c.Assert(result, Equals, "object.action")
 
 	key = "disable"
 	result = FindJSONFullTagByChildTag(reflect.TypeOf(testStruct1{}), key)
-	re.Empty(result)
+	c.Assert(result, HasLen, 0)
 }
 
-func TestFindSameFieldByJSON(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testTagSuite) TestFindSameFieldByJSON(c *C) {
 	input := map[string]interface{}{
 		"name": "test2",
 	}
 	t2 := testStruct2{}
-	re.True(FindSameFieldByJSON(&t2, input))
+	c.Assert(FindSameFieldByJSON(&t2, input), Equals, true)
 	input = map[string]interface{}{
 		"enable": "test2",
 	}
-	re.False(FindSameFieldByJSON(&t2, input))
+	c.Assert(FindSameFieldByJSON(&t2, input), Equals, false)
 }
 
-func TestFindFieldByJSONTag(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testTagSuite) TestFindFieldByJSONTag(c *C) {
 	t1 := testStruct1{}
 	t2 := testStruct2{}
 	t3 := testStruct3{}
@@ -75,17 +77,17 @@ func TestFindFieldByJSONTag(t *testing.T) {
 
 	tags := []string{"object"}
 	result := FindFieldByJSONTag(reflect.TypeOf(t1), tags)
-	re.Equal(type2, result)
+	c.Assert(result, Equals, type2)
 
 	tags = []string{"object", "action"}
 	result = FindFieldByJSONTag(reflect.TypeOf(t1), tags)
-	re.Equal(type3, result)
+	c.Assert(result, Equals, type3)
 
 	tags = []string{"object", "name"}
 	result = FindFieldByJSONTag(reflect.TypeOf(t1), tags)
-	re.Equal(reflect.String, result.Kind())
+	c.Assert(result.Kind(), Equals, reflect.String)
 
 	tags = []string{"object", "action", "enable"}
 	result = FindFieldByJSONTag(reflect.TypeOf(t1), tags)
-	re.Equal(reflect.Bool, result.Kind())
+	c.Assert(result.Kind(), Equals, reflect.Bool)
 }

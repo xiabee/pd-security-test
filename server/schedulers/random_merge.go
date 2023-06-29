@@ -24,7 +24,6 @@ import (
 	"github.com/tikv/pd/server/schedule/checker"
 	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/plan"
 	"github.com/tikv/pd/server/storage/endpoint"
 )
 
@@ -100,22 +99,20 @@ func (s *randomMergeScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool 
 	return allowed
 }
 
-func (s *randomMergeScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (s *randomMergeScheduler) Schedule(cluster schedule.Cluster) []*operator.Operator {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
 
 	store := filter.NewCandidates(cluster.GetStores()).
-		FilterSource(cluster.GetOpts(), nil, nil, &filter.StoreStateFilter{ActionScope: s.conf.Name, MoveRegion: true}).
+		FilterSource(cluster.GetOpts(), &filter.StoreStateFilter{ActionScope: s.conf.Name, MoveRegion: true}).
 		RandomPick()
 	if store == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-source-store").Inc()
-		return nil, nil
+		return nil
 	}
-	pendingFilter := filter.NewRegionPendingFilter()
-	downFilter := filter.NewRegionDownFilter()
-	region := filter.SelectOneRegion(cluster.RandLeaderRegions(store.GetID(), s.conf.Ranges), nil, pendingFilter, downFilter)
+	region := cluster.RandLeaderRegion(store.GetID(), s.conf.Ranges, schedule.IsRegionHealthy)
 	if region == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-region").Inc()
-		return nil, nil
+		return nil
 	}
 
 	other, target := cluster.GetAdjacentRegions(region)
@@ -124,30 +121,28 @@ func (s *randomMergeScheduler) Schedule(cluster schedule.Cluster, dryRun bool) (
 	}
 	if target == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-target-store").Inc()
-		return nil, nil
+		return nil
 	}
 
 	if !s.allowMerge(cluster, region, target) {
 		schedulerCounter.WithLabelValues(s.GetName(), "not-allowed").Inc()
-		return nil, nil
+		return nil
 	}
 
 	ops, err := operator.CreateMergeRegionOperator(RandomMergeType, cluster, region, target, operator.OpMerge)
 	if err != nil {
 		log.Debug("fail to create merge region operator", errs.ZapError(err))
-		return nil, nil
+		return nil
 	}
-	ops[0].SetPriorityLevel(core.Low)
-	ops[1].SetPriorityLevel(core.Low)
 	ops[0].Counters = append(ops[0].Counters, schedulerCounter.WithLabelValues(s.GetName(), "new-operator"))
-	return ops, nil
+	return ops
 }
 
 func (s *randomMergeScheduler) allowMerge(cluster schedule.Cluster, region, target *core.RegionInfo) bool {
-	if !filter.IsRegionHealthy(region) || !filter.IsRegionHealthy(target) {
+	if !schedule.IsRegionHealthy(region) || !schedule.IsRegionHealthy(target) {
 		return false
 	}
-	if !filter.IsRegionReplicated(cluster, region) || !filter.IsRegionReplicated(cluster, target) {
+	if !schedule.IsRegionReplicated(cluster, region) || !schedule.IsRegionReplicated(cluster, target) {
 		return false
 	}
 	if cluster.IsRegionHot(region) || cluster.IsRegionHot(target) {

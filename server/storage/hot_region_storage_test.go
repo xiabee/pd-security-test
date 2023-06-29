@@ -21,10 +21,11 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 	"github.com/tikv/pd/server/core"
 )
 
@@ -103,11 +104,21 @@ func (m *MockPackHotRegionInfo) ClearHotRegion() {
 	m.historyHotWrites = make([]HistoryHotRegion, 0)
 }
 
-func TestHotRegionWrite(t *testing.T) {
-	re := require.New(t)
+var _ = SerialSuites(&testHotRegionStorage{})
+
+type testHotRegionStorage struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (t *testHotRegionStorage) SetUpSuite(c *C) {
+	t.ctx, t.cancel = context.WithCancel(context.Background())
+}
+
+func (t *testHotRegionStorage) TestHotRegionWrite(c *C) {
 	packHotRegionInfo := &MockPackHotRegionInfo{}
 	store, clean, err := newTestHotRegionStorage(10*time.Minute, 1, packHotRegionInfo)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	defer clean()
 	now := time.Now()
 	hotRegionStorages := []HistoryHotRegion{
@@ -161,21 +172,20 @@ func TestHotRegionWrite(t *testing.T) {
 	for next, err := iter.Next(); next != nil && err == nil; next, err = iter.Next() {
 		copyHotRegionStorages[index].StartKey = core.HexRegionKeyStr([]byte(copyHotRegionStorages[index].StartKey))
 		copyHotRegionStorages[index].EndKey = core.HexRegionKeyStr([]byte(copyHotRegionStorages[index].EndKey))
-		re.Equal(&copyHotRegionStorages[index], next)
+		c.Assert(reflect.DeepEqual(&copyHotRegionStorages[index], next), IsTrue)
 		index++
 	}
-	re.NoError(err)
-	re.Equal(3, index)
+	c.Assert(err, IsNil)
+	c.Assert(index, Equals, 3)
 }
 
-func TestHotRegionDelete(t *testing.T) {
-	re := require.New(t)
+func (t *testHotRegionStorage) TestHotRegionDelete(c *C) {
 	defaultRemainDay := 7
 	defaultDelteData := 30
 	deleteDate := time.Now().AddDate(0, 0, 0)
 	packHotRegionInfo := &MockPackHotRegionInfo{}
 	store, clean, err := newTestHotRegionStorage(10*time.Minute, uint64(defaultRemainDay), packHotRegionInfo)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	defer clean()
 	historyHotRegions := make([]HistoryHotRegion, 0)
 	for i := 0; i < defaultDelteData; i++ {
@@ -197,7 +207,7 @@ func TestHotRegionDelete(t *testing.T) {
 	num := 0
 	for next, err := iter.Next(); next != nil && err == nil; next, err = iter.Next() {
 		num++
-		re.Equal(&historyHotRegions[defaultRemainDay-num], next)
+		c.Assert(reflect.DeepEqual(next, &historyHotRegions[defaultRemainDay-num]), IsTrue)
 	}
 }
 
@@ -288,9 +298,12 @@ func newTestHotRegionStorage(pullInterval time.Duration,
 	clear func(), err error) {
 	writePath := "./tmp"
 	ctx := context.Background()
+	if err != nil {
+		return nil, nil, err
+	}
 	packHotRegionInfo.pullInterval = pullInterval
 	packHotRegionInfo.reservedDays = reservedDays
-	// delete data in between today and tomorrow
+	// delete data in between today and tomrrow
 	hotRegionStorage, err = NewHotRegionsStorage(ctx,
 		writePath, nil, packHotRegionInfo)
 	if err != nil {

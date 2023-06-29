@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,18 +18,35 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule/placement"
-	"github.com/tikv/pd/server/schedule/plan"
 )
 
-func TestDistinctScoreFilter(t *testing.T) {
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testFiltersSuite{})
+
+type testFiltersSuite struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func (s *testFiltersSuite) SetUpSuite(c *C) {
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+}
+
+func (s *testFiltersSuite) TearDownTest(c *C) {
+	s.cancel()
+}
+
+func (s *testFiltersSuite) TestDistinctScoreFilter(c *C) {
 	labels := []string{"zone", "rack", "host"}
 	allStores := []*core.StoreInfo{
 		core.NewStoreInfoWithLabel(1, 1, map[string]string{"zone": "z1", "rack": "r1", "host": "h1"}),
@@ -44,64 +61,56 @@ func TestDistinctScoreFilter(t *testing.T) {
 		stores       []uint64
 		source       uint64
 		target       uint64
-		safeGuardRes plan.StatusCode
-		improverRes  plan.StatusCode
+		safeGuardRes bool
+		improverRes  bool
 	}{
-		{[]uint64{1, 2, 3}, 1, 4, plan.StatusOK, plan.StatusOK},
-		{[]uint64{1, 3, 4}, 1, 2, plan.StatusOK, plan.StatusStoreNotMatchIsolation},
-		{[]uint64{1, 4, 6}, 4, 2, plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation},
+		{[]uint64{1, 2, 3}, 1, 4, true, true},
+		{[]uint64{1, 3, 4}, 1, 2, true, false},
+		{[]uint64{1, 4, 6}, 4, 2, false, false},
 	}
-	for _, testCase := range testCases {
+	for _, tc := range testCases {
 		var stores []*core.StoreInfo
-		for _, id := range testCase.stores {
+		for _, id := range tc.stores {
 			stores = append(stores, allStores[id-1])
 		}
-		ls := NewLocationSafeguard("", labels, stores, allStores[testCase.source-1])
-		li := NewLocationImprover("", labels, stores, allStores[testCase.source-1])
-		re.Equal(testCase.safeGuardRes, ls.Target(config.NewTestOptions(), allStores[testCase.target-1]).StatusCode)
-		re.Equal(testCase.improverRes, li.Target(config.NewTestOptions(), allStores[testCase.target-1]).StatusCode)
+		ls := NewLocationSafeguard("", labels, stores, allStores[tc.source-1])
+		li := NewLocationImprover("", labels, stores, allStores[tc.source-1])
+		c.Assert(ls.Target(config.NewTestOptions(), allStores[tc.target-1]), Equals, tc.safeGuardRes)
+		c.Assert(li.Target(config.NewTestOptions(), allStores[tc.target-1]), Equals, tc.improverRes)
 	}
 }
 
-func TestLabelConstraintsFilter(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (s *testFiltersSuite) TestLabelConstraintsFilter(c *C) {
 	opt := config.NewTestOptions()
-	testCluster := mockcluster.NewCluster(ctx, opt)
+	testCluster := mockcluster.NewCluster(s.ctx, opt)
 	store := core.NewStoreInfoWithLabel(1, 1, map[string]string{"id": "1"})
 
 	testCases := []struct {
 		key    string
 		op     string
 		values []string
-		res    plan.StatusCode
+		res    bool
 	}{
-		{"id", "in", []string{"1"}, plan.StatusOK},
-		{"id", "in", []string{"2"}, plan.StatusStoreNotMatchRule},
-		{"id", "in", []string{"1", "2"}, plan.StatusOK},
-		{"id", "notIn", []string{"2", "3"}, plan.StatusOK},
-		{"id", "notIn", []string{"1", "2"}, plan.StatusStoreNotMatchRule},
-		{"id", "exists", []string{}, plan.StatusOK},
-		{"_id", "exists", []string{}, plan.StatusStoreNotMatchRule},
-		{"id", "notExists", []string{}, plan.StatusStoreNotMatchRule},
-		{"_id", "notExists", []string{}, plan.StatusOK},
+		{"id", "in", []string{"1"}, true},
+		{"id", "in", []string{"2"}, false},
+		{"id", "in", []string{"1", "2"}, true},
+		{"id", "notIn", []string{"2", "3"}, true},
+		{"id", "notIn", []string{"1", "2"}, false},
+		{"id", "exists", []string{}, true},
+		{"_id", "exists", []string{}, false},
+		{"id", "notExists", []string{}, false},
+		{"_id", "notExists", []string{}, true},
 	}
-	for _, testCase := range testCases {
-		filter := NewLabelConstraintFilter("", []placement.LabelConstraint{{Key: testCase.key, Op: placement.LabelConstraintOp(testCase.op), Values: testCase.values}})
-		re.Equal(testCase.res, filter.Source(testCluster.GetOpts(), store).StatusCode)
+	for _, tc := range testCases {
+		filter := NewLabelConstaintFilter("", []placement.LabelConstraint{{Key: tc.key, Op: placement.LabelConstraintOp(tc.op), Values: tc.values}})
+		c.Assert(filter.Source(testCluster.GetOpts(), store), Equals, tc.res)
 	}
 }
 
-func TestRuleFitFilter(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (s *testFiltersSuite) TestRuleFitFilter(c *C) {
 	opt := config.NewTestOptions()
 	opt.SetPlacementRuleEnabled(false)
-	testCluster := mockcluster.NewCluster(ctx, opt)
+	testCluster := mockcluster.NewCluster(s.ctx, opt)
 	testCluster.SetLocationLabels([]string{"zone"})
 	testCluster.SetEnablePlacementRules(true)
 	region := core.NewRegionInfo(&metapb.Region{Peers: []*metapb.Peer{
@@ -114,38 +123,28 @@ func TestRuleFitFilter(t *testing.T) {
 		storeID     uint64
 		regionCount int
 		labels      map[string]string
-		sourceRes   plan.StatusCode
-		targetRes   plan.StatusCode
+		sourceRes   bool
+		targetRes   bool
 	}{
-		{1, 1, map[string]string{"zone": "z1"}, plan.StatusOK, plan.StatusOK},
-		{2, 1, map[string]string{"zone": "z1"}, plan.StatusOK, plan.StatusOK},
-		// store 3 and store 1 is the peers of this region, so it will allow transferring leader to store 3.
-		{3, 1, map[string]string{"zone": "z2"}, plan.StatusOK, plan.StatusOK},
-		// the labels of store 4 and store 3 are same, so the isolation score will decrease.
-		{4, 1, map[string]string{"zone": "z2"}, plan.StatusOK, plan.StatusStoreNotMatchRule},
-		// store 5 and store 1 is the peers of this region, so it will allow transferring leader to store 3.
-		{5, 1, map[string]string{"zone": "z3"}, plan.StatusOK, plan.StatusOK},
-		{6, 1, map[string]string{"zone": "z4"}, plan.StatusOK, plan.StatusOK},
+		{1, 1, map[string]string{"zone": "z1"}, true, true},
+		{2, 1, map[string]string{"zone": "z1"}, true, true},
+		{3, 1, map[string]string{"zone": "z2"}, true, false},
+		{4, 1, map[string]string{"zone": "z2"}, true, false},
+		{5, 1, map[string]string{"zone": "z3"}, true, false},
+		{6, 1, map[string]string{"zone": "z4"}, true, true},
 	}
 	// Init cluster
-	for _, testCase := range testCases {
-		testCluster.AddLabelsStore(testCase.storeID, testCase.regionCount, testCase.labels)
+	for _, tc := range testCases {
+		testCluster.AddLabelsStore(tc.storeID, tc.regionCount, tc.labels)
 	}
-	for _, testCase := range testCases {
-		filter := newRuleFitFilter("", testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, nil, 1)
-		re.Equal(testCase.sourceRes, filter.Source(testCluster.GetOpts(), testCluster.GetStore(testCase.storeID)).StatusCode)
-		re.Equal(testCase.targetRes, filter.Target(testCluster.GetOpts(), testCluster.GetStore(testCase.storeID)).StatusCode)
-		leaderFilter := newRuleLeaderFitFilter("", testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, 1, true)
-		re.Equal(testCase.targetRes, leaderFilter.Target(testCluster.GetOpts(), testCluster.GetStore(testCase.storeID)).StatusCode)
+	for _, tc := range testCases {
+		filter := newRuleFitFilter("", testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, 1)
+		c.Assert(filter.Source(testCluster.GetOpts(), testCluster.GetStore(tc.storeID)), Equals, tc.sourceRes)
+		c.Assert(filter.Target(testCluster.GetOpts(), testCluster.GetStore(tc.storeID)), Equals, tc.targetRes)
 	}
-
-	// store-6 is not exist in the peers, so it will not allow transferring leader to store 6.
-	leaderFilter := newRuleLeaderFitFilter("", testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, 1, false)
-	re.False(leaderFilter.Target(testCluster.GetOpts(), testCluster.GetStore(6)).IsOK())
 }
 
-func TestStoreStateFilter(t *testing.T) {
-	re := require.New(t)
+func (s *testFiltersSuite) TestStoreStateFilter(c *C) {
 	filters := []Filter{
 		&StoreStateFilter{TransferLeader: true},
 		&StoreStateFilter{MoveRegion: true},
@@ -157,30 +156,30 @@ func TestStoreStateFilter(t *testing.T) {
 
 	type testCase struct {
 		filterIdx int
-		sourceRes plan.StatusCode
-		targetRes plan.StatusCode
+		sourceRes bool
+		targetRes bool
 	}
 
 	check := func(store *core.StoreInfo, testCases []testCase) {
-		for _, testCase := range testCases {
-			re.Equal(testCase.sourceRes, filters[testCase.filterIdx].Source(opt, store).StatusCode)
-			re.Equal(testCase.targetRes, filters[testCase.filterIdx].Target(opt, store).StatusCode)
+		for _, tc := range testCases {
+			c.Assert(filters[tc.filterIdx].Source(opt, store), Equals, tc.sourceRes)
+			c.Assert(filters[tc.filterIdx].Target(opt, store), Equals, tc.targetRes)
 		}
 	}
 
 	store = store.Clone(core.SetLastHeartbeatTS(time.Now()))
 	testCases := []testCase{
-		{2, plan.StatusOK, plan.StatusOK},
+		{2, true, true},
 	}
 	check(store, testCases)
 
-	// Disconnected
+	// Disconn
 	store = store.Clone(core.SetLastHeartbeatTS(time.Now().Add(-5 * time.Minute)))
 	testCases = []testCase{
-		{0, plan.StatusStoreDisconnected, plan.StatusStoreDisconnected},
-		{1, plan.StatusOK, plan.StatusStoreDisconnected},
-		{2, plan.StatusStoreDisconnected, plan.StatusStoreDisconnected},
-		{3, plan.StatusOK, plan.StatusOK},
+		{0, false, false},
+		{1, true, false},
+		{2, false, false},
+		{3, true, true},
 	}
 	check(store, testCases)
 
@@ -188,76 +187,17 @@ func TestStoreStateFilter(t *testing.T) {
 	store = store.Clone(core.SetLastHeartbeatTS(time.Now())).
 		Clone(core.SetStoreStats(&pdpb.StoreStats{IsBusy: true}))
 	testCases = []testCase{
-		{0, plan.StatusOK, plan.StatusStoreBusy},
-		{1, plan.StatusStoreBusy, plan.StatusStoreBusy},
-		{2, plan.StatusStoreBusy, plan.StatusStoreBusy},
-		{3, plan.StatusOK, plan.StatusOK},
+		{0, true, false},
+		{1, false, false},
+		{2, false, false},
+		{3, true, true},
 	}
 	check(store, testCases)
 }
 
-func TestStoreStateFilterReason(t *testing.T) {
-	re := require.New(t)
-	filters := []Filter{
-		&StoreStateFilter{TransferLeader: true},
-		&StoreStateFilter{MoveRegion: true},
-		&StoreStateFilter{TransferLeader: true, MoveRegion: true},
-		&StoreStateFilter{MoveRegion: true, AllowTemporaryStates: true},
-	}
+func (s *testFiltersSuite) TestIsolationFilter(c *C) {
 	opt := config.NewTestOptions()
-	store := core.NewStoreInfoWithLabel(1, 0, map[string]string{})
-
-	type testCase struct {
-		filterIdx    int
-		sourceReason string
-		targetReason string
-	}
-
-	check := func(store *core.StoreInfo, testCases []testCase) {
-		for _, testCase := range testCases {
-			filters[testCase.filterIdx].Source(opt, store)
-			re.Equal(testCase.sourceReason, filters[testCase.filterIdx].(*StoreStateFilter).Reason.String())
-			filters[testCase.filterIdx].Source(opt, store)
-			re.Equal(testCase.targetReason, filters[testCase.filterIdx].(*StoreStateFilter).Reason.String())
-		}
-	}
-
-	// No reason catched
-	store = store.Clone(core.SetLastHeartbeatTS(time.Now()))
-	testCases := []testCase{
-		{2, "store-state-ok-filter", "store-state-ok-filter"},
-	}
-	check(store, testCases)
-
-	// Disconnected
-	store = store.Clone(core.SetLastHeartbeatTS(time.Now().Add(-5 * time.Minute)))
-	testCases = []testCase{
-		{0, "store-state-disconnect-filter", "store-state-disconnect-filter"},
-		{1, "store-state-ok-filter", "store-state-ok-filter"},
-		{2, "store-state-disconnect-filter", "store-state-disconnect-filter"},
-		{3, "store-state-ok-filter", "store-state-ok-filter"},
-	}
-	check(store, testCases)
-
-	// Busy
-	store = store.Clone(core.SetLastHeartbeatTS(time.Now())).
-		Clone(core.SetStoreStats(&pdpb.StoreStats{IsBusy: true}))
-	testCases = []testCase{
-		{0, "store-state-ok-filter", "store-state-ok-filter"},
-		{1, "store-state-busy-filter", "store-state-busy-filter"},
-		{2, "store-state-busy-filter", "store-state-busy-filter"},
-		{3, "store-state-ok-filter", "store-state-ok-filter"},
-	}
-	check(store, testCases)
-}
-
-func TestIsolationFilter(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	opt := config.NewTestOptions()
-	testCluster := mockcluster.NewCluster(ctx, opt)
+	testCluster := mockcluster.NewCluster(s.ctx, opt)
 	testCluster.SetLocationLabels([]string{"zone", "rack", "host"})
 	allStores := []struct {
 		storeID     uint64
@@ -279,8 +219,8 @@ func TestIsolationFilter(t *testing.T) {
 	testCases := []struct {
 		region         *core.RegionInfo
 		isolationLevel string
-		sourceRes      []plan.StatusCode
-		targetRes      []plan.StatusCode
+		sourceRes      []bool
+		targetRes      []bool
 	}{
 		{
 			core.NewRegionInfo(&metapb.Region{Peers: []*metapb.Peer{
@@ -288,8 +228,8 @@ func TestIsolationFilter(t *testing.T) {
 				{Id: 2, StoreId: 6},
 			}}, &metapb.Peer{StoreId: 1, Id: 1}),
 			"zone",
-			[]plan.StatusCode{plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK},
-			[]plan.StatusCode{plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation, plan.StatusOK},
+			[]bool{true, true, true, true, true, true, true},
+			[]bool{false, false, false, false, false, false, true},
 		},
 		{
 			core.NewRegionInfo(&metapb.Region{Peers: []*metapb.Peer{
@@ -298,8 +238,8 @@ func TestIsolationFilter(t *testing.T) {
 				{Id: 3, StoreId: 7},
 			}}, &metapb.Peer{StoreId: 1, Id: 1}),
 			"rack",
-			[]plan.StatusCode{plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK},
-			[]plan.StatusCode{plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation, plan.StatusOK, plan.StatusOK, plan.StatusStoreNotMatchIsolation},
+			[]bool{true, true, true, true, true, true, true},
+			[]bool{false, false, false, false, true, true, false},
 		},
 		{
 			core.NewRegionInfo(&metapb.Region{Peers: []*metapb.Peer{
@@ -308,28 +248,24 @@ func TestIsolationFilter(t *testing.T) {
 				{Id: 3, StoreId: 6},
 			}}, &metapb.Peer{StoreId: 1, Id: 1}),
 			"host",
-			[]plan.StatusCode{plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK, plan.StatusOK},
-			[]plan.StatusCode{plan.StatusStoreNotMatchIsolation, plan.StatusStoreNotMatchIsolation, plan.StatusOK, plan.StatusStoreNotMatchIsolation, plan.StatusOK, plan.StatusStoreNotMatchIsolation, plan.StatusOK},
+			[]bool{true, true, true, true, true, true, true},
+			[]bool{false, false, true, false, true, false, true},
 		},
 	}
 
-	for _, testCase := range testCases {
-		filter := NewIsolationFilter("", testCase.isolationLevel, testCluster.GetLocationLabels(), testCluster.GetRegionStores(testCase.region))
+	for _, tc := range testCases {
+		filter := NewIsolationFilter("", tc.isolationLevel, testCluster.GetLocationLabels(), testCluster.GetRegionStores(tc.region))
 		for idx, store := range allStores {
-			re.Equal(testCase.sourceRes[idx], filter.Source(testCluster.GetOpts(), testCluster.GetStore(store.storeID)).StatusCode)
-			re.Equal(testCase.targetRes[idx], filter.Target(testCluster.GetOpts(), testCluster.GetStore(store.storeID)).StatusCode)
+			c.Assert(filter.Source(testCluster.GetOpts(), testCluster.GetStore(store.storeID)), Equals, tc.sourceRes[idx])
+			c.Assert(filter.Target(testCluster.GetOpts(), testCluster.GetStore(store.storeID)), Equals, tc.targetRes[idx])
 		}
 	}
 }
 
-func TestPlacementGuard(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (s *testFiltersSuite) TestPlacementGuard(c *C) {
 	opt := config.NewTestOptions()
 	opt.SetPlacementRuleEnabled(false)
-	testCluster := mockcluster.NewCluster(ctx, opt)
+	testCluster := mockcluster.NewCluster(s.ctx, opt)
 	testCluster.SetLocationLabels([]string{"zone"})
 	testCluster.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
 	testCluster.AddLabelsStore(2, 1, map[string]string{"zone": "z1"})
@@ -343,40 +279,13 @@ func TestPlacementGuard(t *testing.T) {
 	}}, &metapb.Peer{StoreId: 1, Id: 1})
 	store := testCluster.GetStore(1)
 
-	re.IsType(NewLocationSafeguard("", []string{"zone"}, testCluster.GetRegionStores(region), store),
-		NewPlacementSafeguard("", testCluster.GetOpts(), testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, store, nil))
+	c.Assert(NewPlacementSafeguard("", testCluster.GetOpts(), testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, store),
+		FitsTypeOf,
+		NewLocationSafeguard("", []string{"zone"}, testCluster.GetRegionStores(region), store))
 	testCluster.SetEnablePlacementRules(true)
-	re.IsType(newRuleFitFilter("", testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, nil, 1),
-		NewPlacementSafeguard("", testCluster.GetOpts(), testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, store, nil))
-}
-
-func TestSpecialUseFilter(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	opt := config.NewTestOptions()
-	testCluster := mockcluster.NewCluster(ctx, opt)
-
-	testCases := []struct {
-		label     map[string]string
-		allowUse  []string
-		sourceRes plan.StatusCode
-		targetRes plan.StatusCode
-	}{
-		{nil, []string{""}, plan.StatusOK, plan.StatusOK},
-		{map[string]string{SpecialUseKey: SpecialUseHotRegion}, []string{""}, plan.StatusStoreNotMatchRule, plan.StatusStoreNotMatchRule},
-		{map[string]string{SpecialUseKey: SpecialUseReserved}, []string{""}, plan.StatusStoreNotMatchRule, plan.StatusStoreNotMatchRule},
-		{map[string]string{SpecialUseKey: SpecialUseReserved}, []string{SpecialUseReserved}, plan.StatusOK, plan.StatusOK},
-		{map[string]string{core.EngineKey: core.EngineTiFlash}, []string{""}, plan.StatusOK, plan.StatusOK},
-		{map[string]string{core.EngineKey: core.EngineTiKV}, []string{""}, plan.StatusOK, plan.StatusOK},
-	}
-	for _, testCase := range testCases {
-		store := core.NewStoreInfoWithLabel(1, 1, testCase.label)
-		filter := NewSpecialUseFilter("", testCase.allowUse...)
-		re.Equal(testCase.sourceRes, filter.Source(testCluster.GetOpts(), store).StatusCode)
-		re.Equal(testCase.targetRes, filter.Target(testCluster.GetOpts(), store).StatusCode)
-	}
+	c.Assert(NewPlacementSafeguard("", testCluster.GetOpts(), testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, store),
+		FitsTypeOf,
+		newRuleFitFilter("", testCluster.GetBasicCluster(), testCluster.GetRuleManager(), region, 1))
 }
 
 func BenchmarkCloneRegionTest(b *testing.B) {

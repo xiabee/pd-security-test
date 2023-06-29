@@ -14,17 +14,13 @@
 
 package config
 
-import "github.com/tikv/pd/pkg/ratelimit"
-
 const (
-	defaultEnableAuditMiddleware     = true
-	defaultEnableRateLimitMiddleware = false
+	defaultEnableAuditMiddleware = false
 )
 
 // ServiceMiddlewareConfig is is the configuration for PD Service middleware.
 type ServiceMiddlewareConfig struct {
-	AuditConfig     `json:"audit"`
-	RateLimitConfig `json:"rate-limit"`
+	AuditConfig `json:"audit"`
 }
 
 // NewServiceMiddlewareConfig returns a new service middleware config
@@ -32,13 +28,8 @@ func NewServiceMiddlewareConfig() *ServiceMiddlewareConfig {
 	audit := AuditConfig{
 		EnableAudit: defaultEnableAuditMiddleware,
 	}
-	ratelimit := RateLimitConfig{
-		EnableRateLimit: defaultEnableRateLimitMiddleware,
-		LimiterConfig:   make(map[string]ratelimit.DimensionConfig),
-	}
 	cfg := &ServiceMiddlewareConfig{
-		AuditConfig:     audit,
-		RateLimitConfig: ratelimit,
+		AuditConfig: audit,
 	}
 	return cfg
 }
@@ -57,20 +48,6 @@ type AuditConfig struct {
 
 // Clone returns a cloned audit config.
 func (c *AuditConfig) Clone() *AuditConfig {
-	cfg := *c
-	return &cfg
-}
-
-// RateLimitConfig is the configuration for rate limit
-type RateLimitConfig struct {
-	// EnableRateLimit controls the switch of the rate limit middleware
-	EnableRateLimit bool `json:"enable-rate-limit,string"`
-	// RateLimitConfig is the config of rate limit middleware
-	LimiterConfig map[string]ratelimit.DimensionConfig `json:"limiter-config"`
-}
-
-// Clone returns a cloned rate limit config.
-func (c *RateLimitConfig) Clone() *RateLimitConfig {
 	cfg := *c
 	return &cfg
 }

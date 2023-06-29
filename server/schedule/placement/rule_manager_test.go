@@ -16,43 +16,43 @@ package placement
 
 import (
 	"encoding/hex"
-	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/codec"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/storage"
 	"github.com/tikv/pd/server/storage/endpoint"
 )
 
-func newTestManager(t *testing.T) (endpoint.RuleStorage, *RuleManager) {
-	re := require.New(t)
-	store := storage.NewStorageWithMemoryBackend()
+var _ = Suite(&testManagerSuite{})
+
+type testManagerSuite struct {
+	store   endpoint.RuleStorage
+	manager *RuleManager
+}
+
+func (s *testManagerSuite) SetUpTest(c *C) {
+	s.store = storage.NewStorageWithMemoryBackend()
 	var err error
-	manager := NewRuleManager(store, nil, nil)
-	err = manager.Initialize(3, []string{"zone", "rack", "host"})
-	re.NoError(err)
-	return store, manager
+	s.manager = NewRuleManager(s.store, nil, nil)
+	err = s.manager.Initialize(3, []string{"zone", "rack", "host"})
+	c.Assert(err, IsNil)
 }
 
-func TestDefault(t *testing.T) {
-	re := require.New(t)
-	_, manager := newTestManager(t)
-	rules := manager.GetAllRules()
-	re.Len(rules, 1)
-	re.Equal("pd", rules[0].GroupID)
-	re.Equal("default", rules[0].ID)
-	re.Equal(0, rules[0].Index)
-	re.Empty(rules[0].StartKey)
-	re.Empty(rules[0].EndKey)
-	re.Equal(Voter, rules[0].Role)
-	re.Equal([]string{"zone", "rack", "host"}, rules[0].LocationLabels)
+func (s *testManagerSuite) TestDefault(c *C) {
+	rules := s.manager.GetAllRules()
+	c.Assert(rules, HasLen, 1)
+	c.Assert(rules[0].GroupID, Equals, "pd")
+	c.Assert(rules[0].ID, Equals, "default")
+	c.Assert(rules[0].Index, Equals, 0)
+	c.Assert(rules[0].StartKey, HasLen, 0)
+	c.Assert(rules[0].EndKey, HasLen, 0)
+	c.Assert(rules[0].Role, Equals, Voter)
+	c.Assert(rules[0].LocationLabels, DeepEquals, []string{"zone", "rack", "host"})
 }
 
-func TestAdjustRule(t *testing.T) {
-	re := require.New(t)
-	_, manager := newTestManager(t)
+func (s *testManagerSuite) TestAdjustRule(c *C) {
 	rules := []Rule{
 		{GroupID: "group", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 3},
 		{GroupID: "", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 3},
@@ -65,38 +65,32 @@ func TestAdjustRule(t *testing.T) {
 		{GroupID: "group", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: -1},
 		{GroupID: "group", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 3, LabelConstraints: []LabelConstraint{{Op: "foo"}}},
 	}
-	re.NoError(manager.adjustRule(&rules[0], "group"))
-
-	re.Equal([]byte{0x12, 0x3a, 0xbc}, rules[0].StartKey)
-	re.Equal([]byte{0x12, 0x3a, 0xbf}, rules[0].EndKey)
-	re.Error(manager.adjustRule(&rules[1], ""))
-
+	c.Assert(s.manager.adjustRule(&rules[0], "group"), IsNil)
+	c.Assert(rules[0].StartKey, DeepEquals, []byte{0x12, 0x3a, 0xbc})
+	c.Assert(rules[0].EndKey, DeepEquals, []byte{0x12, 0x3a, 0xbf})
+	c.Assert(s.manager.adjustRule(&rules[1], ""), NotNil)
 	for i := 2; i < len(rules); i++ {
-		re.Error(manager.adjustRule(&rules[i], "group"))
+		c.Assert(s.manager.adjustRule(&rules[i], "group"), NotNil)
 	}
 
-	manager.SetKeyType(core.Table.String())
-	re.Error(manager.adjustRule(&Rule{GroupID: "group", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 3}, "group"))
-
-	manager.SetKeyType(core.Txn.String())
-	re.Error(manager.adjustRule(&Rule{GroupID: "group", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 3}, "group"))
-
-	re.Error(manager.adjustRule(&Rule{
+	s.manager.SetKeyType(core.Table.String())
+	c.Assert(s.manager.adjustRule(&Rule{GroupID: "group", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 3}, "group"), NotNil)
+	s.manager.SetKeyType(core.Txn.String())
+	c.Assert(s.manager.adjustRule(&Rule{GroupID: "group", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 3}, "group"), NotNil)
+	c.Assert(s.manager.adjustRule(&Rule{
 		GroupID:     "group",
 		ID:          "id",
 		StartKeyHex: hex.EncodeToString(codec.EncodeBytes([]byte{0})),
 		EndKeyHex:   "123abf",
 		Role:        "voter",
 		Count:       3,
-	}, "group"))
+	}, "group"), NotNil)
 }
 
-func TestLeaderCheck(t *testing.T) {
-	re := require.New(t)
-	_, manager := newTestManager(t)
-	re.Regexp(".*needs at least one leader or voter.*", manager.SetRule(&Rule{GroupID: "pd", ID: "default", Role: "learner", Count: 3}).Error())
-	re.Regexp(".*define multiple leaders by count 2.*", manager.SetRule(&Rule{GroupID: "g2", ID: "33", Role: "leader", Count: 2}).Error())
-	re.Regexp(".*multiple leader replicas.*", manager.Batch([]RuleOp{
+func (s *testManagerSuite) TestLeaderCheck(c *C) {
+	c.Assert(s.manager.SetRule(&Rule{GroupID: "pd", ID: "default", Role: "learner", Count: 3}), ErrorMatches, ".*needs at least one leader or voter.*")
+	c.Assert(s.manager.SetRule(&Rule{GroupID: "g2", ID: "33", Role: "leader", Count: 2}), ErrorMatches, ".*define multiple leaders by count 2.*")
+	c.Assert(s.manager.Batch([]RuleOp{
 		{
 			Rule:   &Rule{GroupID: "g2", ID: "foo1", Role: "leader", Count: 1},
 			Action: RuleOpAdd,
@@ -105,55 +99,49 @@ func TestLeaderCheck(t *testing.T) {
 			Rule:   &Rule{GroupID: "g2", ID: "foo2", Role: "leader", Count: 1},
 			Action: RuleOpAdd,
 		},
-	}).Error())
+	}), ErrorMatches, ".*multiple leader replicas.*")
 }
 
-func TestSaveLoad(t *testing.T) {
-	re := require.New(t)
-	store, manager := newTestManager(t)
+func (s *testManagerSuite) TestSaveLoad(c *C) {
 	rules := []*Rule{
 		{GroupID: "pd", ID: "default", Role: "voter", Count: 5},
 		{GroupID: "foo", ID: "baz", StartKeyHex: "", EndKeyHex: "abcd", Role: "voter", Count: 1},
 		{GroupID: "foo", ID: "bar", Role: "learner", Count: 1},
 	}
 	for _, r := range rules {
-		re.NoError(manager.SetRule(r.Clone()))
+		c.Assert(s.manager.SetRule(r.Clone()), IsNil)
 	}
 
-	m2 := NewRuleManager(store, nil, nil)
+	m2 := NewRuleManager(s.store, nil, nil)
 	err := m2.Initialize(3, []string{"no", "labels"})
-	re.NoError(err)
-	re.Len(m2.GetAllRules(), 3)
-	re.Equal(rules[0].String(), m2.GetRule("pd", "default").String())
-	re.Equal(rules[1].String(), m2.GetRule("foo", "baz").String())
-	re.Equal(rules[2].String(), m2.GetRule("foo", "bar").String())
+	c.Assert(err, IsNil)
+	c.Assert(m2.GetAllRules(), HasLen, 3)
+	c.Assert(m2.GetRule("pd", "default").String(), Equals, rules[0].String())
+	c.Assert(m2.GetRule("foo", "baz").String(), Equals, rules[1].String())
+	c.Assert(m2.GetRule("foo", "bar").String(), Equals, rules[2].String())
 }
 
-func TestSetAfterGet(t *testing.T) {
-	re := require.New(t)
-	store, manager := newTestManager(t)
-	rule := manager.GetRule("pd", "default")
+// https://github.com/tikv/pd/issues/3886
+func (s *testManagerSuite) TestSetAfterGet(c *C) {
+	rule := s.manager.GetRule("pd", "default")
 	rule.Count = 1
-	manager.SetRule(rule)
+	s.manager.SetRule(rule)
 
-	m2 := NewRuleManager(store, nil, nil)
+	m2 := NewRuleManager(s.store, nil, nil)
 	err := m2.Initialize(100, []string{})
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	rule = m2.GetRule("pd", "default")
-	re.Equal(1, rule.Count)
+	c.Assert(rule.Count, Equals, 1)
 }
 
-func checkRules(t *testing.T, rules []*Rule, expect [][2]string) {
-	re := require.New(t)
-	re.Len(rules, len(expect))
+func (s *testManagerSuite) checkRules(c *C, rules []*Rule, expect [][2]string) {
+	c.Assert(rules, HasLen, len(expect))
 	for i := range rules {
-		re.Equal(expect[i], rules[i].Key())
+		c.Assert(rules[i].Key(), DeepEquals, expect[i])
 	}
 }
 
-func TestKeys(t *testing.T) {
-	re := require.New(t)
-	_, manager := newTestManager(t)
+func (s *testManagerSuite) TestKeys(c *C) {
 	rules := []*Rule{
 		{GroupID: "1", ID: "1", Role: "voter", Count: 1, StartKeyHex: "", EndKeyHex: ""},
 		{GroupID: "2", ID: "2", Role: "voter", Count: 1, StartKeyHex: "11", EndKeyHex: "ff"},
@@ -162,24 +150,24 @@ func TestKeys(t *testing.T) {
 
 	toDelete := []RuleOp{}
 	for _, r := range rules {
-		manager.SetRule(r)
+		s.manager.SetRule(r)
 		toDelete = append(toDelete, RuleOp{
 			Rule:             r,
 			Action:           RuleOpDel,
 			DeleteByIDPrefix: false,
 		})
 	}
-	checkRules(t, manager.GetAllRules(), [][2]string{{"1", "1"}, {"2", "2"}, {"2", "3"}, {"pd", "default"}})
-	manager.Batch(toDelete)
-	checkRules(t, manager.GetAllRules(), [][2]string{{"pd", "default"}})
+	s.checkRules(c, s.manager.GetAllRules(), [][2]string{{"1", "1"}, {"2", "2"}, {"2", "3"}, {"pd", "default"}})
+	s.manager.Batch(toDelete)
+	s.checkRules(c, s.manager.GetAllRules(), [][2]string{{"pd", "default"}})
 
 	rules = append(rules, &Rule{GroupID: "3", ID: "4", Role: "voter", Count: 1, StartKeyHex: "44", EndKeyHex: "ee"},
 		&Rule{GroupID: "3", ID: "5", Role: "voter", Count: 1, StartKeyHex: "44", EndKeyHex: "dd"})
-	manager.SetRules(rules)
-	checkRules(t, manager.GetAllRules(), [][2]string{{"1", "1"}, {"2", "2"}, {"2", "3"}, {"3", "4"}, {"3", "5"}, {"pd", "default"}})
+	s.manager.SetRules(rules)
+	s.checkRules(c, s.manager.GetAllRules(), [][2]string{{"1", "1"}, {"2", "2"}, {"2", "3"}, {"3", "4"}, {"3", "5"}, {"pd", "default"}})
 
-	manager.DeleteRule("pd", "default")
-	checkRules(t, manager.GetAllRules(), [][2]string{{"1", "1"}, {"2", "2"}, {"2", "3"}, {"3", "4"}, {"3", "5"}})
+	s.manager.DeleteRule("pd", "default")
+	s.checkRules(c, s.manager.GetAllRules(), [][2]string{{"1", "1"}, {"2", "2"}, {"2", "3"}, {"3", "4"}, {"3", "5"}})
 
 	splitKeys := [][]string{
 		{"", "", "11", "22", "44", "dd", "ee", "ff"},
@@ -188,10 +176,10 @@ func TestKeys(t *testing.T) {
 		{"22", "ef", "44", "dd", "ee"},
 	}
 	for _, keys := range splitKeys {
-		splits := manager.GetSplitKeys(dhex(keys[0]), dhex(keys[1]))
-		re.Len(splits, len(keys)-2)
+		splits := s.manager.GetSplitKeys(s.dhex(keys[0]), s.dhex(keys[1]))
+		c.Assert(splits, HasLen, len(keys)-2)
 		for i := range splits {
-			re.Equal(dhex(keys[i+2]), splits[i])
+			c.Assert(splits[i], DeepEquals, s.dhex(keys[i+2]))
 		}
 	}
 
@@ -202,12 +190,12 @@ func TestKeys(t *testing.T) {
 		{{"11", "33"}},
 	}
 	for _, keys := range regionKeys {
-		region := core.NewRegionInfo(&metapb.Region{StartKey: dhex(keys[0][0]), EndKey: dhex(keys[0][1])}, nil)
-		rules := manager.GetRulesForApplyRegion(region)
-		re.Len(rules, len(keys)-1)
+		region := core.NewRegionInfo(&metapb.Region{StartKey: s.dhex(keys[0][0]), EndKey: s.dhex(keys[0][1])}, nil)
+		rules := s.manager.GetRulesForApplyRegion(region)
+		c.Assert(rules, HasLen, len(keys)-1)
 		for i := range rules {
-			re.Equal(keys[i+1][0], rules[i].StartKeyHex)
-			re.Equal(keys[i+1][1], rules[i].EndKeyHex)
+			c.Assert(rules[i].StartKeyHex, Equals, keys[i+1][0])
+			c.Assert(rules[i].EndKeyHex, Equals, keys[i+1][1])
 		}
 	}
 
@@ -217,11 +205,11 @@ func TestKeys(t *testing.T) {
 		{"33", "", "", "11", "ff", "22", "dd"},
 	}
 	for _, keys := range ruleByKeys {
-		rules := manager.GetRulesByKey(dhex(keys[0]))
-		re.Len(rules, (len(keys)-1)/2)
+		rules := s.manager.GetRulesByKey(s.dhex(keys[0]))
+		c.Assert(rules, HasLen, (len(keys)-1)/2)
 		for i := range rules {
-			re.Equal(keys[i*2+1], rules[i].StartKeyHex)
-			re.Equal(keys[i*2+2], rules[i].EndKeyHex)
+			c.Assert(rules[i].StartKeyHex, Equals, keys[i*2+1])
+			c.Assert(rules[i].EndKeyHex, Equals, keys[i*2+2])
 		}
 	}
 
@@ -232,130 +220,126 @@ func TestKeys(t *testing.T) {
 		{"4"},
 	}
 	for _, keys := range rulesByGroup {
-		rules := manager.GetRulesByGroup(keys[0])
-		re.Len(rules, (len(keys)-1)/2)
+		rules := s.manager.GetRulesByGroup(keys[0])
+		c.Assert(rules, HasLen, (len(keys)-1)/2)
 		for i := range rules {
-			re.Equal(keys[i*2+1], rules[i].StartKeyHex)
-			re.Equal(keys[i*2+2], rules[i].EndKeyHex)
+			c.Assert(rules[i].StartKeyHex, Equals, keys[i*2+1])
+			c.Assert(rules[i].EndKeyHex, Equals, keys[i*2+2])
 		}
 	}
 }
 
-func TestDeleteByIDPrefix(t *testing.T) {
-	_, manager := newTestManager(t)
-	manager.SetRules([]*Rule{
+func (s *testManagerSuite) TestDeleteByIDPrefix(c *C) {
+	s.manager.SetRules([]*Rule{
 		{GroupID: "g1", ID: "foo1", Role: "voter", Count: 1},
 		{GroupID: "g2", ID: "foo1", Role: "voter", Count: 1},
 		{GroupID: "g2", ID: "foobar", Role: "voter", Count: 1},
 		{GroupID: "g2", ID: "baz2", Role: "voter", Count: 1},
 	})
-	manager.DeleteRule("pd", "default")
-	checkRules(t, manager.GetAllRules(), [][2]string{{"g1", "foo1"}, {"g2", "baz2"}, {"g2", "foo1"}, {"g2", "foobar"}})
+	s.manager.DeleteRule("pd", "default")
+	s.checkRules(c, s.manager.GetAllRules(), [][2]string{{"g1", "foo1"}, {"g2", "baz2"}, {"g2", "foo1"}, {"g2", "foobar"}})
 
-	manager.Batch([]RuleOp{{
+	s.manager.Batch([]RuleOp{{
 		Rule:             &Rule{GroupID: "g2", ID: "foo"},
 		Action:           RuleOpDel,
 		DeleteByIDPrefix: true,
 	}})
-	checkRules(t, manager.GetAllRules(), [][2]string{{"g1", "foo1"}, {"g2", "baz2"}})
+	s.checkRules(c, s.manager.GetAllRules(), [][2]string{{"g1", "foo1"}, {"g2", "baz2"}})
 }
 
-func TestRangeGap(t *testing.T) {
-	re := require.New(t)
-	_, manager := newTestManager(t)
-	err := manager.DeleteRule("pd", "default")
-	re.Error(err)
+func (s *testManagerSuite) TestRangeGap(c *C) {
+	// |--  default  --|
+	// cannot delete the last rule
+	err := s.manager.DeleteRule("pd", "default")
+	c.Assert(err, NotNil)
 
-	err = manager.SetRule(&Rule{GroupID: "pd", ID: "foo", StartKeyHex: "", EndKeyHex: "abcd", Role: "voter", Count: 1})
-	re.NoError(err)
+	err = s.manager.SetRule(&Rule{GroupID: "pd", ID: "foo", StartKeyHex: "", EndKeyHex: "abcd", Role: "voter", Count: 1})
+	c.Assert(err, IsNil)
 	// |-- default --|
 	// |-- foo --|
 	// still cannot delete default since it will cause ("abcd", "") has no rules inside.
-	err = manager.DeleteRule("pd", "default")
-	re.Error(err)
-	err = manager.SetRule(&Rule{GroupID: "pd", ID: "bar", StartKeyHex: "abcd", EndKeyHex: "", Role: "voter", Count: 1})
-	re.NoError(err)
+	err = s.manager.DeleteRule("pd", "default")
+	c.Assert(err, NotNil)
+	err = s.manager.SetRule(&Rule{GroupID: "pd", ID: "bar", StartKeyHex: "abcd", EndKeyHex: "", Role: "voter", Count: 1})
+	c.Assert(err, IsNil)
 	// now default can be deleted.
-	err = manager.DeleteRule("pd", "default")
-	re.NoError(err)
+	err = s.manager.DeleteRule("pd", "default")
+	c.Assert(err, IsNil)
 	// cannot change range since it will cause ("abaa", "abcd") has no rules inside.
-	err = manager.SetRule(&Rule{GroupID: "pd", ID: "foo", StartKeyHex: "", EndKeyHex: "abaa", Role: "voter", Count: 1})
-	re.Error(err)
+	err = s.manager.SetRule(&Rule{GroupID: "pd", ID: "foo", StartKeyHex: "", EndKeyHex: "abaa", Role: "voter", Count: 1})
+	c.Assert(err, NotNil)
 }
 
-func TestGroupConfig(t *testing.T) {
-	re := require.New(t)
-	_, manager := newTestManager(t)
+func (s *testManagerSuite) TestGroupConfig(c *C) {
+	// group pd
 	pd1 := &RuleGroup{ID: "pd"}
-	re.Equal(pd1, manager.GetRuleGroup("pd"))
+	c.Assert(s.manager.GetRuleGroup("pd"), DeepEquals, pd1)
 
 	// update group pd
 	pd2 := &RuleGroup{ID: "pd", Index: 100, Override: true}
-	err := manager.SetRuleGroup(pd2)
-	re.NoError(err)
-	re.Equal(pd2, manager.GetRuleGroup("pd"))
+	err := s.manager.SetRuleGroup(pd2)
+	c.Assert(err, IsNil)
+	c.Assert(s.manager.GetRuleGroup("pd"), DeepEquals, pd2)
 
 	// new group g without config
-	err = manager.SetRule(&Rule{GroupID: "g", ID: "1", Role: "voter", Count: 1})
-	re.NoError(err)
+	err = s.manager.SetRule(&Rule{GroupID: "g", ID: "1", Role: "voter", Count: 1})
+	c.Assert(err, IsNil)
 	g1 := &RuleGroup{ID: "g"}
-	re.Equal(g1, manager.GetRuleGroup("g"))
-	re.Equal([]*RuleGroup{g1, pd2}, manager.GetRuleGroups())
+	c.Assert(s.manager.GetRuleGroup("g"), DeepEquals, g1)
+	c.Assert(s.manager.GetRuleGroups(), DeepEquals, []*RuleGroup{g1, pd2})
 
 	// update group g
 	g2 := &RuleGroup{ID: "g", Index: 2, Override: true}
-	err = manager.SetRuleGroup(g2)
-	re.NoError(err)
-	re.Equal([]*RuleGroup{g2, pd2}, manager.GetRuleGroups())
+	err = s.manager.SetRuleGroup(g2)
+	c.Assert(err, IsNil)
+	c.Assert(s.manager.GetRuleGroups(), DeepEquals, []*RuleGroup{g2, pd2})
 
 	// delete pd group, restore to default config
-	err = manager.DeleteRuleGroup("pd")
-	re.NoError(err)
-	re.Equal([]*RuleGroup{pd1, g2}, manager.GetRuleGroups())
+	err = s.manager.DeleteRuleGroup("pd")
+	c.Assert(err, IsNil)
+	c.Assert(s.manager.GetRuleGroups(), DeepEquals, []*RuleGroup{pd1, g2})
 
 	// delete rule, the group is removed too
-	err = manager.DeleteRule("pd", "default")
-	re.NoError(err)
-	re.Equal([]*RuleGroup{g2}, manager.GetRuleGroups())
+	err = s.manager.DeleteRule("pd", "default")
+	c.Assert(err, IsNil)
+	c.Assert(s.manager.GetRuleGroups(), DeepEquals, []*RuleGroup{g2})
 }
 
-func TestRuleVersion(t *testing.T) {
-	re := require.New(t)
-	_, manager := newTestManager(t)
-	rule1 := manager.GetRule("pd", "default")
-	re.Equal(uint64(0), rule1.Version)
+func (s *testManagerSuite) TestRuleVersion(c *C) {
+	// default rule
+	rule1 := s.manager.GetRule("pd", "default")
+	c.Assert(rule1.Version, Equals, uint64(0))
 	// create new rule
 	newRule := &Rule{GroupID: "g1", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 3}
-	err := manager.SetRule(newRule)
-	re.NoError(err)
-	newRule = manager.GetRule("g1", "id")
-	re.Equal(uint64(0), newRule.Version)
+	err := s.manager.SetRule(newRule)
+	c.Assert(err, IsNil)
+	newRule = s.manager.GetRule("g1", "id")
+	c.Assert(newRule.Version, Equals, uint64(0))
 	// update rule
 	newRule = &Rule{GroupID: "g1", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 2}
-	err = manager.SetRule(newRule)
-	re.NoError(err)
-	newRule = manager.GetRule("g1", "id")
-	re.Equal(uint64(1), newRule.Version)
+	err = s.manager.SetRule(newRule)
+	c.Assert(err, IsNil)
+	newRule = s.manager.GetRule("g1", "id")
+	c.Assert(newRule.Version, Equals, uint64(1))
 	// delete rule
-	err = manager.DeleteRule("g1", "id")
-	re.NoError(err)
+	err = s.manager.DeleteRule("g1", "id")
+	c.Assert(err, IsNil)
 	// recreate new rule
-	err = manager.SetRule(newRule)
-	re.NoError(err)
+	err = s.manager.SetRule(newRule)
+	c.Assert(err, IsNil)
 	// assert version should be 0 again
-	newRule = manager.GetRule("g1", "id")
-	re.Equal(uint64(0), newRule.Version)
+	newRule = s.manager.GetRule("g1", "id")
+	c.Assert(newRule.Version, Equals, uint64(0))
 }
 
-func TestCheckApplyRules(t *testing.T) {
-	re := require.New(t)
+func (s *testManagerSuite) TestCheckApplyRules(c *C) {
 	err := checkApplyRules([]*Rule{
 		{
 			Role:  Leader,
 			Count: 1,
 		},
 	})
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	err = checkApplyRules([]*Rule{
 		{
@@ -363,7 +347,7 @@ func TestCheckApplyRules(t *testing.T) {
 			Count: 1,
 		},
 	})
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	err = checkApplyRules([]*Rule{
 		{
@@ -375,7 +359,7 @@ func TestCheckApplyRules(t *testing.T) {
 			Count: 1,
 		},
 	})
-	re.NoError(err)
+	c.Assert(err, IsNil)
 
 	err = checkApplyRules([]*Rule{
 		{
@@ -383,7 +367,7 @@ func TestCheckApplyRules(t *testing.T) {
 			Count: 3,
 		},
 	})
-	re.Regexp("multiple leader replicas", err.Error())
+	c.Assert(err, ErrorMatches, "multiple leader replicas")
 
 	err = checkApplyRules([]*Rule{
 		{
@@ -395,7 +379,7 @@ func TestCheckApplyRules(t *testing.T) {
 			Count: 1,
 		},
 	})
-	re.Regexp("multiple leader replicas", err.Error())
+	c.Assert(err, ErrorMatches, "multiple leader replicas")
 
 	err = checkApplyRules([]*Rule{
 		{
@@ -407,10 +391,10 @@ func TestCheckApplyRules(t *testing.T) {
 			Count: 1,
 		},
 	})
-	re.Regexp("needs at least one leader or voter", err.Error())
+	c.Assert(err, ErrorMatches, "needs at least one leader or voter")
 }
 
-func dhex(hk string) []byte {
+func (s *testManagerSuite) dhex(hk string) []byte {
 	k, err := hex.DecodeString(hk)
 	if err != nil {
 		panic("decode fail")

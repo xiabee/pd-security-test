@@ -27,7 +27,6 @@ import (
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/plan"
 	"github.com/tikv/pd/server/statistics/buckets"
 	"github.com/tikv/pd/server/storage/endpoint"
 	"github.com/unrolled/render"
@@ -137,8 +136,8 @@ func newSplitBucketHandler(conf *splitBucketSchedulerConfig) http.Handler {
 		rd:   render.New(render.Options{IndentJSON: true}),
 	}
 	router := mux.NewRouter()
-	router.HandleFunc("/list", h.ListConfig).Methods(http.MethodGet)
-	router.HandleFunc("/config", h.UpdateConfig).Methods(http.MethodPost)
+	router.HandleFunc("/list", h.ListConfig).Methods("GET")
+	router.HandleFunc("/config", h.UpdateConfig).Methods("POST")
 	return router
 }
 
@@ -190,7 +189,7 @@ type splitBucketPlan struct {
 }
 
 // Schedule return operators if some bucket is too hot.
-func (s *splitBucketScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (s *splitBucketScheduler) Schedule(cluster schedule.Cluster) []*operator.Operator {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
 	conf := s.conf.Clone()
 	plan := &splitBucketPlan{
@@ -199,7 +198,7 @@ func (s *splitBucketScheduler) Schedule(cluster schedule.Cluster, dryRun bool) (
 		hotBuckets:         cluster.BucketsStats(conf.Degree),
 		hotRegionSplitSize: cluster.GetOpts().GetMaxMovableHotPeerSize(),
 	}
-	return s.splitBucket(plan), nil
+	return s.splitBucket(plan)
 }
 
 func (s *splitBucketScheduler) splitBucket(plan *splitBucketPlan) []*operator.Operator {

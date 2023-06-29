@@ -18,25 +18,34 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestRateLimiter(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testRateLimiterSuite{})
+
+type testRateLimiterSuite struct {
+}
+
+func (s *testRateLimiterSuite) TestRateLimiter(c *C) {
+	c.Parallel()
+
 	limiter := NewRateLimiter(100, 100)
 
-	re.True(limiter.Available(1))
+	c.Assert(limiter.Available(1), Equals, true)
 
-	re.True(limiter.AllowN(50))
-	re.True(limiter.Available(50))
-	re.False(limiter.Available(100))
-	re.True(limiter.Available(50))
-	re.True(limiter.AllowN(50))
-	re.False(limiter.Available(50))
+	c.Assert(limiter.AllowN(50), Equals, true)
+	c.Assert(limiter.Available(50), Equals, true)
+	c.Assert(limiter.Available(100), Equals, false)
+	c.Assert(limiter.Available(50), Equals, true)
+	c.Assert(limiter.AllowN(50), Equals, true)
+	c.Assert(limiter.Available(50), Equals, false)
 	time.Sleep(time.Second)
-	re.True(limiter.Available(1))
-	re.True(limiter.AllowN(99))
-	re.True(limiter.Allow())
-	re.False(limiter.Available(1))
+	c.Assert(limiter.Available(1), Equals, true)
+	c.Assert(limiter.AllowN(99), Equals, true)
+	c.Assert(limiter.Allow(), Equals, true)
+	c.Assert(limiter.Available(1), Equals, false)
 }

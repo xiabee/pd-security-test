@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -91,32 +92,13 @@ func (s *GrpcServer) unaryMiddleware(ctx context.Context, header *pdpb.RequestHe
 	return nil, nil
 }
 
-func (s *GrpcServer) wrapErrorToHeader(errorType pdpb.ErrorType, message string) *pdpb.ResponseHeader {
-	return s.errorHeader(&pdpb.Error{
-		Type:    errorType,
-		Message: message,
-	})
-}
-
 // GetMembers implements gRPC PDServer.
 func (s *GrpcServer) GetMembers(context.Context, *pdpb.GetMembersRequest) (*pdpb.GetMembersResponse, error) {
 	// Here we purposely do not check the cluster ID because the client does not know the correct cluster ID
 	// at startup and needs to get the cluster ID with the first request (i.e. GetMembers).
-	if s.IsClosed() {
-		return &pdpb.GetMembersResponse{
-			Header: &pdpb.ResponseHeader{
-				Error: &pdpb.Error{
-					Type:    pdpb.ErrorType_UNKNOWN,
-					Message: errs.ErrServerNotStarted.FastGenByArgs().Error(),
-				},
-			},
-		}, nil
-	}
-	members, err := cluster.GetMembers(s.GetClient())
+	members, err := s.Server.GetMembers()
 	if err != nil {
-		return &pdpb.GetMembersResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 
 	var etcdLeader, pdLeader *pdpb.Member
@@ -131,9 +113,7 @@ func (s *GrpcServer) GetMembers(context.Context, *pdpb.GetMembersRequest) (*pdpb
 	tsoAllocatorManager := s.GetTSOAllocatorManager()
 	tsoAllocatorLeaders, err := tsoAllocatorManager.GetLocalAllocatorLeaders()
 	if err != nil {
-		return &pdpb.GetMembersResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 
 	leader := s.member.GetLeader()
@@ -419,9 +399,7 @@ func (s *GrpcServer) Bootstrap(ctx context.Context, request *pdpb.BootstrapReque
 
 	res, err := s.bootstrapCluster(request)
 	if err != nil {
-		return &pdpb.BootstrapResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 
 	res.Header = s.header()
@@ -460,29 +438,12 @@ func (s *GrpcServer) AllocID(ctx context.Context, request *pdpb.AllocIDRequest) 
 	// We can use an allocator for all types ID allocation.
 	id, err := s.idAllocator.Alloc()
 	if err != nil {
-		return &pdpb.AllocIDResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 
 	return &pdpb.AllocIDResponse{
 		Header: s.header(),
 		Id:     id,
-	}, nil
-}
-
-// IsSnapshotRecovering implements gRPC PDServer.
-func (s *GrpcServer) IsSnapshotRecovering(ctx context.Context, request *pdpb.IsSnapshotRecoveringRequest) (*pdpb.IsSnapshotRecoveringResponse, error) {
-	// recovering mark is stored in etcd directly, there's no need to forward.
-	marked, err := s.Server.IsSnapshotRecovering(ctx)
-	if err != nil {
-		return &pdpb.IsSnapshotRecoveringResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-		}, nil
-	}
-	return &pdpb.IsSnapshotRecoveringResponse{
-		Header: s.header(),
-		Marked: marked,
 	}, nil
 }
 
@@ -505,10 +466,7 @@ func (s *GrpcServer) GetStore(ctx context.Context, request *pdpb.GetStoreRequest
 	storeID := request.GetStoreId()
 	store := rc.GetStore(storeID)
 	if store == nil {
-		return &pdpb.GetStoreResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-				fmt.Sprintf("invalid store ID %d, not found", storeID)),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, "invalid store ID %d, not found", storeID)
 	}
 	return &pdpb.GetStoreResponse{
 		Header: s.header(),
@@ -557,16 +515,11 @@ func (s *GrpcServer) PutStore(ctx context.Context, request *pdpb.PutStoreRequest
 
 	// NOTE: can be removed when placement rules feature is enabled by default.
 	if !s.GetConfig().Replication.EnablePlacementRules && core.IsStoreContainLabel(store, core.EngineKey, core.EngineTiFlash) {
-		return &pdpb.PutStoreResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-				"placement rules is disabled"),
-		}, nil
+		return nil, status.Errorf(codes.FailedPrecondition, "placement rules is disabled")
 	}
 
 	if err := rc.PutStore(store); err != nil {
-		return &pdpb.PutStoreResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 
 	log.Info("put store ok", zap.Stringer("store", store))
@@ -639,25 +592,18 @@ func (s *GrpcServer) StoreHeartbeat(ctx context.Context, request *pdpb.StoreHear
 	storeID := request.GetStats().GetStoreId()
 	store := rc.GetStore(storeID)
 	if store == nil {
-		return &pdpb.StoreHeartbeatResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-				fmt.Sprintf("store %v not found", storeID)),
-		}, nil
+		return nil, errors.Errorf("store %v not found", storeID)
 	}
 
-	resp := &pdpb.StoreHeartbeatResponse{Header: s.header()}
 	// Bypass stats handling if the store report for unsafe recover is not empty.
 	if request.GetStoreReport() == nil {
 		storeAddress := store.GetAddress()
 		storeLabel := strconv.FormatUint(storeID, 10)
 		start := time.Now()
 
-		err := rc.HandleStoreHeartbeat(request, resp)
+		err := rc.HandleStoreHeartbeat(request.GetStats())
 		if err != nil {
-			return &pdpb.StoreHeartbeatResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-					err.Error()),
-			}, nil
+			return nil, status.Errorf(codes.Unknown, err.Error())
 		}
 
 		s.handleDamagedStore(request.GetStats())
@@ -669,10 +615,12 @@ func (s *GrpcServer) StoreHeartbeat(ctx context.Context, request *pdpb.StoreHear
 		rc.GetReplicationMode().UpdateStoreDRStatus(request.GetStats().GetStoreId(), status)
 	}
 
-	resp.ReplicationStatus = rc.GetReplicationMode().GetReplicationStatus()
-	resp.ClusterVersion = rc.GetClusterVersion()
+	resp := &pdpb.StoreHeartbeatResponse{
+		Header:            s.header(),
+		ReplicationStatus: rc.GetReplicationMode().GetReplicationStatus(),
+		ClusterVersion:    rc.GetClusterVersion(),
+	}
 	rc.GetUnsafeRecoveryController().HandleStoreHeartbeat(request, resp)
-
 	return resp, nil
 }
 
@@ -866,6 +814,7 @@ func (s *GrpcServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error
 
 	for {
 		request, err := server.Recv()
+		regionHeartbeatCounter.WithLabelValues("fake", "fake", "report", "pending").Inc()
 		if err == io.EOF {
 			return nil
 		}
@@ -1125,10 +1074,7 @@ func (s *GrpcServer) AskSplit(ctx context.Context, request *pdpb.AskSplitRequest
 		return &pdpb.AskSplitResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 	if request.GetRegion() == nil {
-		return &pdpb.AskSplitResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_REGION_NOT_FOUND,
-				"missing region for split"),
-		}, nil
+		return nil, errors.New("missing region for split")
 	}
 	req := &pdpb.AskSplitRequest{
 		Region: request.Region,
@@ -1136,7 +1082,10 @@ func (s *GrpcServer) AskSplit(ctx context.Context, request *pdpb.AskSplitRequest
 	split, err := rc.HandleAskSplit(req)
 	if err != nil {
 		return &pdpb.AskSplitResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
+			Header: s.errorHeader(&pdpb.Error{
+				Type:    pdpb.ErrorType_UNKNOWN,
+				Message: err.Error(),
+			}),
 		}, nil
 	}
 
@@ -1167,10 +1116,7 @@ func (s *GrpcServer) AskBatchSplit(ctx context.Context, request *pdpb.AskBatchSp
 		return &pdpb.AskBatchSplitResponse{Header: s.incompatibleVersion("batch_split")}, nil
 	}
 	if request.GetRegion() == nil {
-		return &pdpb.AskBatchSplitResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_REGION_NOT_FOUND,
-				"missing region for split"),
-		}, nil
+		return nil, errors.New("missing region for split")
 	}
 	req := &pdpb.AskBatchSplitRequest{
 		Region:     request.Region,
@@ -1179,7 +1125,10 @@ func (s *GrpcServer) AskBatchSplit(ctx context.Context, request *pdpb.AskBatchSp
 	split, err := rc.HandleAskBatchSplit(req)
 	if err != nil {
 		return &pdpb.AskBatchSplitResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
+			Header: s.errorHeader(&pdpb.Error{
+				Type:    pdpb.ErrorType_UNKNOWN,
+				Message: err.Error(),
+			}),
 		}, nil
 	}
 
@@ -1206,9 +1155,7 @@ func (s *GrpcServer) ReportSplit(ctx context.Context, request *pdpb.ReportSplitR
 	}
 	_, err := rc.HandleReportSplit(request)
 	if err != nil {
-		return &pdpb.ReportSplitResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 
 	return &pdpb.ReportSplitResponse{
@@ -1234,10 +1181,7 @@ func (s *GrpcServer) ReportBatchSplit(ctx context.Context, request *pdpb.ReportB
 
 	_, err := rc.HandleBatchReportSplit(request)
 	if err != nil {
-		return &pdpb.ReportBatchSplitResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-				err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 
 	return &pdpb.ReportBatchSplitResponse{
@@ -1283,10 +1227,7 @@ func (s *GrpcServer) PutClusterConfig(ctx context.Context, request *pdpb.PutClus
 	}
 	conf := request.GetCluster()
 	if err := rc.PutMetaCluster(conf); err != nil {
-		return &pdpb.PutClusterConfigResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-				err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 
 	log.Info("put cluster config ok", zap.Reflect("config", conf))
@@ -1328,10 +1269,7 @@ func (s *GrpcServer) ScatterRegion(ctx context.Context, request *pdpb.ScatterReg
 	if region == nil {
 		if request.GetRegion() == nil {
 			//nolint
-			return &pdpb.ScatterRegionResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_REGION_NOT_FOUND,
-					"region %d not found"),
-			}, nil
+			return nil, errors.Errorf("region %d not found", request.GetRegionId())
 		}
 		region = core.NewRegionInfo(request.GetRegion(), request.GetLeader())
 	}
@@ -1366,7 +1304,8 @@ func (s *GrpcServer) GetGCSafePoint(ctx context.Context, request *pdpb.GetGCSafe
 		return &pdpb.GetGCSafePointResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 
-	safePoint, err := s.gcSafePointManager.LoadGCSafePoint()
+	var storage endpoint.GCSafePointStorage = s.storage
+	safePoint, err := storage.LoadGCSafePoint()
 	if err != nil {
 		return nil, err
 	}
@@ -1405,13 +1344,19 @@ func (s *GrpcServer) UpdateGCSafePoint(ctx context.Context, request *pdpb.Update
 		return &pdpb.UpdateGCSafePointResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 
-	newSafePoint := request.GetSafePoint()
-	oldSafePoint, err := s.gcSafePointManager.UpdateGCSafePoint(newSafePoint)
+	var storage endpoint.GCSafePointStorage = s.storage
+	oldSafePoint, err := storage.LoadGCSafePoint()
 	if err != nil {
 		return nil, err
 	}
 
+	newSafePoint := request.SafePoint
+
+	// Only save the safe point if it's greater than the previous one
 	if newSafePoint > oldSafePoint {
+		if err := storage.SaveGCSafePoint(newSafePoint); err != nil {
+			return nil, err
+		}
 		log.Info("updated gc safe point",
 			zap.Uint64("safe-point", newSafePoint))
 	} else if newSafePoint < oldSafePoint {
@@ -1429,6 +1374,8 @@ func (s *GrpcServer) UpdateGCSafePoint(ctx context.Context, request *pdpb.Update
 
 // UpdateServiceGCSafePoint update the safepoint for specific service
 func (s *GrpcServer) UpdateServiceGCSafePoint(ctx context.Context, request *pdpb.UpdateServiceGCSafePointRequest) (*pdpb.UpdateServiceGCSafePointResponse, error) {
+	s.serviceSafePointLock.Lock()
+	defer s.serviceSafePointLock.Unlock()
 	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).UpdateServiceGCSafePoint(ctx, request)
 	}
@@ -1454,17 +1401,36 @@ func (s *GrpcServer) UpdateServiceGCSafePoint(ctx context.Context, request *pdpb
 		return nil, err
 	}
 	now, _ := tsoutil.ParseTimestamp(nowTSO)
-	serviceID := string(request.ServiceId)
-	min, updated, err := s.gcSafePointManager.UpdateServiceGCSafePoint(serviceID, request.GetSafePoint(), request.GetTTL(), now)
+	min, err := storage.LoadMinServiceGCSafePoint(now)
 	if err != nil {
 		return nil, err
 	}
-	if updated {
+
+	if request.TTL > 0 && request.SafePoint >= min.SafePoint {
+		ssp := &endpoint.ServiceSafePoint{
+			ServiceID: string(request.ServiceId),
+			ExpiredAt: now.Unix() + request.TTL,
+			SafePoint: request.SafePoint,
+		}
+		if math.MaxInt64-now.Unix() <= request.TTL {
+			ssp.ExpiredAt = math.MaxInt64
+		}
+		if err := storage.SaveServiceGCSafePoint(ssp); err != nil {
+			return nil, err
+		}
 		log.Info("update service GC safe point",
-			zap.String("service-id", serviceID),
-			zap.Int64("expire-at", now.Unix()+request.GetTTL()),
-			zap.Uint64("safepoint", request.GetSafePoint()))
+			zap.String("service-id", ssp.ServiceID),
+			zap.Int64("expire-at", ssp.ExpiredAt),
+			zap.Uint64("safepoint", ssp.SafePoint))
+		// If the min safepoint is updated, load the next one
+		if string(request.ServiceId) == min.ServiceID {
+			min, err = storage.LoadMinServiceGCSafePoint(now)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
+
 	return &pdpb.UpdateServiceGCSafePointResponse{
 		Header:       s.header(),
 		ServiceId:    []byte(min.ServiceID),
@@ -1523,7 +1489,10 @@ func (s *GrpcServer) validateRequest(header *pdpb.RequestHeader) error {
 
 func (s *GrpcServer) header() *pdpb.ResponseHeader {
 	if s.clusterID == 0 {
-		return s.wrapErrorToHeader(pdpb.ErrorType_NOT_BOOTSTRAPPED, "cluster id is not ready")
+		return s.errorHeader(&pdpb.Error{
+			Type:    pdpb.ErrorType_NOT_BOOTSTRAPPED,
+			Message: "cluster id is not ready",
+		})
 	}
 	return &pdpb.ResponseHeader{ClusterId: s.clusterID}
 }
@@ -1550,13 +1519,6 @@ func (s *GrpcServer) incompatibleVersion(tag string) *pdpb.ResponseHeader {
 	})
 }
 
-func (s *GrpcServer) invalidValue(msg string) *pdpb.ResponseHeader {
-	return s.errorHeader(&pdpb.Error{
-		Type:    pdpb.ErrorType_INVALID_VALUE,
-		Message: msg,
-	})
-}
-
 // Only used for the TestLocalAllocatorLeaderChange.
 var mockLocalAllocatorLeaderChangeFlag = false
 
@@ -1569,17 +1531,12 @@ func (s *GrpcServer) SyncMaxTS(_ context.Context, request *pdpb.SyncMaxTSRequest
 	tsoAllocatorManager := s.GetTSOAllocatorManager()
 	// There is no dc-location found in this server, return err.
 	if tsoAllocatorManager.GetClusterDCLocationsNumber() == 0 {
-		return &pdpb.SyncMaxTSResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-				"empty cluster dc-location found, checker may not work properly"),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, "empty cluster dc-location found, checker may not work properly")
 	}
 	// Get all Local TSO Allocator leaders
 	allocatorLeaders, err := tsoAllocatorManager.GetHoldingLocalAllocatorLeaders()
 	if err != nil {
-		return &pdpb.SyncMaxTSResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 	if !request.GetSkipCheck() {
 		var maxLocalTS *pdpb.Timestamp
@@ -1592,9 +1549,7 @@ func (s *GrpcServer) SyncMaxTS(_ context.Context, request *pdpb.SyncMaxTSRequest
 			}
 			currentLocalTSO, err := allocator.GetCurrentTSO()
 			if err != nil {
-				return &pdpb.SyncMaxTSResponse{
-					Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-				}, nil
+				return nil, status.Errorf(codes.Unknown, err.Error())
 			}
 			if tsoutil.CompareTimestamp(currentLocalTSO, maxLocalTS) > 0 {
 				maxLocalTS = currentLocalTSO
@@ -1611,16 +1566,10 @@ func (s *GrpcServer) SyncMaxTS(_ context.Context, request *pdpb.SyncMaxTSRequest
 		})
 
 		if maxLocalTS == nil {
-			return &pdpb.SyncMaxTSResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-					"local tso allocator leaders have changed during the sync, should retry"),
-			}, nil
+			return nil, status.Errorf(codes.Unknown, "local tso allocator leaders have changed during the sync, should retry")
 		}
 		if request.GetMaxTs() == nil {
-			return &pdpb.SyncMaxTSResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-					"empty maxTS in the request, should retry"),
-			}, nil
+			return nil, status.Errorf(codes.Unknown, "empty maxTS in the request, should retry")
 		}
 		// Found a bigger or equal maxLocalTS, return it directly.
 		cmpResult := tsoutil.CompareTimestamp(maxLocalTS, request.GetMaxTs())
@@ -1646,9 +1595,7 @@ func (s *GrpcServer) SyncMaxTS(_ context.Context, request *pdpb.SyncMaxTSRequest
 			continue
 		}
 		if err := allocator.WriteTSO(request.GetMaxTs()); err != nil {
-			return &pdpb.SyncMaxTSResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
+			return nil, status.Errorf(codes.Unknown, err.Error())
 		}
 		syncedDCs = append(syncedDCs, allocator.GetDCLocation())
 	}
@@ -1740,10 +1687,7 @@ func (s *GrpcServer) GetDCLocationInfo(ctx context.Context, request *pdpb.GetDCL
 	info, ok := am.GetDCLocationInfo(request.GetDcLocation())
 	if !ok {
 		am.ClusterDCLocationChecker()
-		return &pdpb.GetDCLocationInfoResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-				fmt.Sprintf("dc-location %s is not found", request.GetDcLocation())),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, "dc-location %s is not found", request.GetDcLocation())
 	}
 	resp := &pdpb.GetDCLocationInfoResponse{
 		Header: s.header(),
@@ -1758,9 +1702,7 @@ func (s *GrpcServer) GetDCLocationInfo(ctx context.Context, request *pdpb.GetDCL
 	// when it becomes the Local TSO Allocator leader.
 	// Please take a look at https://github.com/tikv/pd/issues/3260 for more details.
 	if resp.MaxTs, err = am.GetMaxLocalTSO(ctx); err != nil {
-		return &pdpb.GetDCLocationInfoResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-		}, nil
+		return nil, status.Errorf(codes.Unknown, err.Error())
 	}
 	return resp, nil
 }
@@ -2021,8 +1963,8 @@ func (s *GrpcServer) ReportMinResolvedTS(ctx context.Context, request *pdpb.Repo
 		return &pdpb.ReportMinResolvedTsResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 
-	storeID := request.GetStoreId()
-	minResolvedTS := request.GetMinResolvedTs()
+	storeID := request.StoreId
+	minResolvedTS := request.MinResolvedTs
 	if err := rc.SetMinResolvedTS(storeID, minResolvedTS); err != nil {
 		return nil, err
 	}
@@ -2031,55 +1973,5 @@ func (s *GrpcServer) ReportMinResolvedTS(ctx context.Context, request *pdpb.Repo
 		zap.Uint64("min resolved-ts", minResolvedTS))
 	return &pdpb.ReportMinResolvedTsResponse{
 		Header: s.header(),
-	}, nil
-}
-
-// SetExternalTimestamp implements gRPC PDServer.
-func (s *GrpcServer) SetExternalTimestamp(ctx context.Context, request *pdpb.SetExternalTimestampRequest) (*pdpb.SetExternalTimestampResponse, error) {
-	forwardedHost := getForwardedHost(ctx)
-	if !s.isLocalRequest(forwardedHost) {
-		client, err := s.getDelegateClient(ctx, forwardedHost)
-		if err != nil {
-			return nil, err
-		}
-		ctx = grpcutil.ResetForwardContext(ctx)
-		return pdpb.NewPDClient(client).SetExternalTimestamp(ctx, request)
-	}
-
-	if err := s.validateRequest(request.GetHeader()); err != nil {
-		return nil, err
-	}
-
-	timestamp := request.GetTimestamp()
-	if err := s.SetExternalTS(timestamp); err != nil {
-		return &pdpb.SetExternalTimestampResponse{Header: s.invalidValue(err.Error())}, nil
-	}
-	log.Debug("set external timestamp",
-		zap.Uint64("timestamp", timestamp))
-	return &pdpb.SetExternalTimestampResponse{
-		Header: s.header(),
-	}, nil
-}
-
-// GetExternalTimestamp implements gRPC PDServer.
-func (s *GrpcServer) GetExternalTimestamp(ctx context.Context, request *pdpb.GetExternalTimestampRequest) (*pdpb.GetExternalTimestampResponse, error) {
-	forwardedHost := getForwardedHost(ctx)
-	if !s.isLocalRequest(forwardedHost) {
-		client, err := s.getDelegateClient(ctx, forwardedHost)
-		if err != nil {
-			return nil, err
-		}
-		ctx = grpcutil.ResetForwardContext(ctx)
-		return pdpb.NewPDClient(client).GetExternalTimestamp(ctx, request)
-	}
-
-	if err := s.validateRequest(request.GetHeader()); err != nil {
-		return nil, err
-	}
-
-	timestamp := s.GetExternalTS()
-	return &pdpb.GetExternalTimestampResponse{
-		Header:    s.header(),
-		Timestamp: timestamp,
 	}, nil
 }

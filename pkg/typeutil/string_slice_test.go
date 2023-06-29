@@ -16,34 +16,34 @@ package typeutil
 
 import (
 	"encoding/json"
-	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestStringSliceJSON(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+var _ = Suite(&testStringSliceSuite{})
+
+type testStringSliceSuite struct {
+}
+
+func (s *testStringSliceSuite) TestJSON(c *C) {
 	b := StringSlice([]string{"zone", "rack"})
 	o, err := json.Marshal(b)
-	re.NoError(err)
-	re.Equal("\"zone,rack\"", string(o))
+	c.Assert(err, IsNil)
+	c.Assert(string(o), Equals, "\"zone,rack\"")
 
 	var nb StringSlice
 	err = json.Unmarshal(o, &nb)
-	re.NoError(err)
-	re.Equal(b, nb)
+	c.Assert(err, IsNil)
+	c.Assert(nb, DeepEquals, b)
 }
 
-func TestEmpty(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testStringSliceSuite) TestEmpty(c *C) {
 	ss := StringSlice([]string{})
 	b, err := json.Marshal(ss)
-	re.NoError(err)
-	re.Equal("\"\"", string(b))
+	c.Assert(err, IsNil)
+	c.Assert(string(b), Equals, "\"\"")
 
 	var ss2 StringSlice
-	re.NoError(ss2.UnmarshalJSON(b))
-	re.Equal(ss, ss2)
+	c.Assert(ss2.UnmarshalJSON(b), IsNil)
+	c.Assert(ss2, DeepEquals, ss)
 }
