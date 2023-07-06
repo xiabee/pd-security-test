@@ -26,13 +26,14 @@ import (
 	"github.com/pingcap/errcode"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/core/constant"
+	"github.com/tikv/pd/pkg/core/storelimit"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/core/storelimit"
 	"github.com/unrolled/render"
 )
 
@@ -40,6 +41,25 @@ import (
 type MetaStore struct {
 	*metapb.Store
 	StateName string `json:"state_name"`
+}
+
+// SlowTrend contains slow trend information about a store.
+type SlowTrend struct {
+	// CauseValue is the slow trend detecting raw input, it changes by the performance and pressure along time of the store.
+	// The value itself is not important, what matter is:
+	//   - The comparition result from store to store.
+	//   - The change magnitude along time (represented by CauseRate).
+	// Currently it's one of store's internal latency (duration of waiting in the task queue of raftstore.store).
+	CauseValue float64 `json:"cause_value"`
+	// CauseRate is for mesuring the change magnitude of CauseValue of the store,
+	//   - CauseRate > 0 means the store is become slower currently
+	//   - CauseRate < 0 means the store is become faster currently
+	//   - CauseRate == 0 means the store's performance and pressure does not have significant changes
+	CauseRate float64 `json:"cause_rate"`
+	// ResultValue is the current gRPC QPS of the store.
+	ResultValue float64 `json:"result_value"`
+	// ResultRate is for mesuring the change magnitude of ResultValue of the store.
+	ResultRate float64 `json:"result_rate"`
 }
 
 // StoreStatus contains status about a store.
@@ -55,7 +75,10 @@ type StoreStatus struct {
 	RegionWeight       float64            `json:"region_weight"`
 	RegionScore        float64            `json:"region_score"`
 	RegionSize         int64              `json:"region_size"`
-	SlowScore          uint64             `json:"slow_score"`
+	LearnerCount       int                `json:"learner_count,omitempty"`
+	WitnessCount       int                `json:"witness_count,omitempty"`
+	SlowScore          uint64             `json:"slow_score,omitempty"`
+	SlowTrend          *SlowTrend         `json:"slow_trend,omitempty"`
 	SendingSnapCount   uint32             `json:"sending_snap_count,omitempty"`
 	ReceivingSnapCount uint32             `json:"receiving_snap_count,omitempty"`
 	IsBusy             bool               `json:"is_busy,omitempty"`
@@ -76,6 +99,11 @@ const (
 )
 
 func newStoreInfo(opt *config.ScheduleConfig, store *core.StoreInfo) *StoreInfo {
+	var slowTrend *SlowTrend
+	coreSlowTrend := store.GetSlowTrend()
+	if coreSlowTrend != nil {
+		slowTrend = &SlowTrend{coreSlowTrend.CauseValue, coreSlowTrend.CauseRate, coreSlowTrend.ResultValue, coreSlowTrend.ResultRate}
+	}
 	s := &StoreInfo{
 		Store: &MetaStore{
 			Store:     store.GetMeta(),
@@ -87,13 +115,16 @@ func newStoreInfo(opt *config.ScheduleConfig, store *core.StoreInfo) *StoreInfo 
 			UsedSize:           typeutil.ByteSize(store.GetUsedSize()),
 			LeaderCount:        store.GetLeaderCount(),
 			LeaderWeight:       store.GetLeaderWeight(),
-			LeaderScore:        store.LeaderScore(core.StringToSchedulePolicy(opt.LeaderSchedulePolicy), 0),
+			LeaderScore:        store.LeaderScore(constant.StringToSchedulePolicy(opt.LeaderSchedulePolicy), 0),
 			LeaderSize:         store.GetLeaderSize(),
 			RegionCount:        store.GetRegionCount(),
 			RegionWeight:       store.GetRegionWeight(),
 			RegionScore:        store.RegionScore(opt.RegionScoreFormulaVersion, opt.HighSpaceRatio, opt.LowSpaceRatio, 0),
 			RegionSize:         store.GetRegionSize(),
+			LearnerCount:       store.GetLearnerCount(),
+			WitnessCount:       store.GetWitnessCount(),
 			SlowScore:          store.GetSlowScore(),
+			SlowTrend:          slowTrend,
 			SendingSnapCount:   store.GetSendingSnapCount(),
 			ReceivingSnapCount: store.GetReceivingSnapCount(),
 			IsBusy:             store.IsBusy(),
@@ -295,6 +326,40 @@ func (h *storeHandler) SetStoreLabel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.rd.JSON(w, http.StatusOK, "The store's label is updated.")
+}
+
+// @Tags     store
+// @Summary  delete the store's label.
+// @Param    id    path  integer  true  "Store Id"
+// @Param    body  body  object   true  "Labels in json format"
+// @Produce  json
+// @Success  200  {string}  string  "The store's label is updated."
+// @Failure  400  {string}  string  "The input is invalid."
+// @Failure  500  {string}  string  "PD server failed to proceed the request."
+// @Router   /store/{id}/label [delete]
+func (h *storeHandler) DeleteStoreLabel(w http.ResponseWriter, r *http.Request) {
+	rc := getCluster(r)
+	vars := mux.Vars(r)
+	storeID, errParse := apiutil.ParseUint64VarsField(vars, "id")
+	if errParse != nil {
+		apiutil.ErrorResp(h.rd, w, errcode.NewInvalidInputErr(errParse))
+		return
+	}
+
+	var labelKey string
+	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &labelKey); err != nil {
+		return
+	}
+	if err := config.ValidateLabelKey(labelKey); err != nil {
+		apiutil.ErrorResp(h.rd, w, errcode.NewInvalidInputErr(err))
+		return
+	}
+	if err := rc.DeleteStoreLabel(storeID, labelKey); err != nil {
+		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	h.rd.JSON(w, http.StatusOK, fmt.Sprintf("The label %s is deleted for store %d.", labelKey, storeID))
 }
 
 // FIXME: details of input json body params

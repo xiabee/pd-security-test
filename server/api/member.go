@@ -24,10 +24,10 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/pkg/slice"
+	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
@@ -67,9 +67,15 @@ func getMembers(svr *server.Server) (*pdpb.GetMembersResponse, error) {
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	dclocationDistribution, err := svr.GetTSOAllocatorManager().GetClusterDCLocationsFromEtcd()
-	if err != nil {
-		return nil, errors.WithStack(err)
+	if members.GetHeader().GetError() != nil {
+		return nil, errors.WithStack(errors.New(members.GetHeader().GetError().String()))
+	}
+	dclocationDistribution := make(map[string][]uint64)
+	if !svr.IsAPIServiceMode() {
+		dclocationDistribution, err = svr.GetTSOAllocatorManager().GetClusterDCLocationsFromEtcd()
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
 	}
 	for _, m := range members.GetMembers() {
 		var e error

@@ -81,6 +81,11 @@ error = '''
 get TSO timeout
 '''
 
+["PD:cluster:ErrInvalidStoreID"]
+error = '''
+invalid store id %d, not found
+'''
+
 ["PD:cluster:ErrNotBootstrapped"]
 error = '''
 TiKV cluster not bootstrapped, please start TiKV first
@@ -114,6 +119,11 @@ store %v is paused for leader transfer
 ["PD:core:ErrSlowStoreEvicted"]
 error = '''
 store %v is evicted as a slow store
+'''
+
+["PD:core:ErrSlowTrendEvicted"]
+error = '''
+store %v is evicted as a slow store by trend
 '''
 
 ["PD:core:ErrStoreDestroyed"]
@@ -169,6 +179,26 @@ start dashboard failed
 ["PD:dashboard:ErrDashboardStop"]
 error = '''
 stop dashboard failed
+'''
+
+["PD:diagnostic:ErrDiagnosticDisabled"]
+error = '''
+diagnostic is disabled
+'''
+
+["PD:diagnostic:ErrDiagnosticLoadPlan"]
+error = '''
+load plan failed
+'''
+
+["PD:diagnostic:ErrNoDiagnosticResult"]
+error = '''
+%v has no diagnostic result
+'''
+
+["PD:diagnostic:ErrSchedulerUndiagnosable"]
+error = '''
+%v hasn't supported diagnostic
 '''
 
 ["PD:dir:ErrReadDirName"]
@@ -461,6 +491,11 @@ error = '''
 marshal leader failed
 '''
 
+["PD:member:ErrPreCheckCampaign"]
+error = '''
+pre-check campaign failed
+'''
+
 ["PD:netstat:ErrNetstatTCPSocks"]
 error = '''
 TCP socks error
@@ -546,6 +581,26 @@ error = '''
 region label rule not found for id %s
 '''
 
+["PD:resourcemanager:ErrDeleteReservedGroup"]
+error = '''
+cannot delete reserved group
+'''
+
+["PD:resourcemanager:ErrGroupNotExists"]
+error = '''
+the %s resource group does not exist
+'''
+
+["PD:resourcemanager:ErrInvalidGroup"]
+error = '''
+invalid group settings, please check the group name, priority and the number of resources
+'''
+
+["PD:resourcemanager:ErrResourceGroupAlreadyExists"]
+error = '''
+the %s resource group already exists
+'''
+
 ["PD:schedule:ErrCreateOperator"]
 error = '''
 unable to create operator, %s
@@ -604,6 +659,11 @@ scheduler existed
 ["PD:scheduler:ErrSchedulerNotFound"]
 error = '''
 scheduler not found
+'''
+
+["PD:scheduler:ErrSchedulerTiKVSplitDisabled"]
+error = '''
+tikv split region disabled
 '''
 
 ["PD:semver:ErrSemverNewVersion"]
@@ -676,9 +736,44 @@ error = '''
 get allocator failed, %s
 '''
 
+["PD:tso:ErrGetAllocatorManager"]
+error = '''
+get allocator manager failed, %s
+'''
+
 ["PD:tso:ErrGetLocalAllocator"]
 error = '''
 get local allocator failed, %s
+'''
+
+["PD:tso:ErrKeyspaceGroupIDInvalid"]
+error = '''
+the keyspace group id is invalid, %s
+'''
+
+["PD:tso:ErrKeyspaceGroupNotInitialized"]
+error = '''
+the keyspace group %d isn't initialized
+'''
+
+["PD:tso:ErrKeyspaceNotAssigned"]
+error = '''
+the keyspace %d isn't assigned to any keyspace group
+'''
+
+["PD:tso:ErrLoadKeyspaceGroupsRetryExhausted"]
+error = '''
+load keyspace groups retry exhausted, %s
+'''
+
+["PD:tso:ErrLoadKeyspaceGroupsTerminated"]
+error = '''
+load keyspace groups terminated
+'''
+
+["PD:tso:ErrLoadKeyspaceGroupsTimeout"]
+error = '''
+load keyspace groups timeout
 '''
 
 ["PD:tso:ErrLogicOverflow"]

@@ -90,11 +90,17 @@ func bench(mainCtx context.Context) {
 	fmt.Printf("Create %d client(s) for benchmark\n", *clientNumber)
 	pdClients := make([]pd.Client, *clientNumber)
 	for idx := range pdClients {
-		pdCli, err := pd.NewClientWithContext(mainCtx, []string{*pdAddrs}, pd.SecurityOption{
+		var (
+			pdCli pd.Client
+			err   error
+		)
+
+		pdCli, err = pd.NewClientWithContext(mainCtx, []string{*pdAddrs}, pd.SecurityOption{
 			CAPath:   *caPath,
 			CertPath: *certPath,
 			KeyPath:  *keyPath,
 		})
+
 		pdCli.UpdateOption(pd.MaxTSOBatchWaitInterval, *maxBatchWaitInterval)
 		pdCli.UpdateOption(pd.EnableTSOFollowerProxy, *enableTSOFollowerProxy)
 		if err != nil {
@@ -340,15 +346,28 @@ func reqWorker(ctx context.Context, pdCli pd.Client, durCh chan time.Duration) {
 
 	for {
 		start := time.Now()
-		_, _, err := pdCli.GetLocalTS(reqCtx, *dcLocation)
-		if errors.Cause(err) == context.Canceled {
-			return
-		}
 
+		var (
+			i                      int32
+			err                    error
+			maxRetryTime           int32         = 50
+			sleepIntervalOnFailure time.Duration = 100 * time.Millisecond
+		)
+		for ; i < maxRetryTime; i++ {
+			_, _, err = pdCli.GetLocalTS(reqCtx, *dcLocation)
+			if errors.Cause(err) == context.Canceled {
+				return
+			}
+			if err == nil {
+				break
+			}
+			log.Error(fmt.Sprintf("%v", err))
+			time.Sleep(sleepIntervalOnFailure)
+		}
 		if err != nil {
 			log.Fatal(fmt.Sprintf("%v", err))
 		}
-		dur := time.Since(start)
+		dur := time.Since(start) - time.Duration(i)*sleepIntervalOnFailure
 
 		select {
 		case <-reqCtx.Done():

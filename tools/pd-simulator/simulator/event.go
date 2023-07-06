@@ -17,7 +17,7 @@ package simulator
 import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/cases"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
 	"go.uber.org/zap"
@@ -145,13 +145,12 @@ func (e *AddNodes) Run(raft *RaftEngine, tickCount int64) bool {
 
 	config := raft.storeConfig
 	s := &cases.Store{
-		ID:        id,
-		Status:    metapb.StoreState_Up,
-		Capacity:  config.StoreCapacityGB * cases.GB,
-		Available: config.StoreAvailableGB * cases.GB,
-		Version:   config.StoreVersion,
+		ID:       id,
+		Status:   metapb.StoreState_Up,
+		Capacity: uint64(config.RaftStore.Capacity),
+		Version:  config.StoreVersion,
 	}
-	n, err := NewNode(s, raft.conn.pdAddr, config.StoreIOMBPerSecond)
+	n, err := NewNode(s, raft.conn.pdAddr, config)
 	if err != nil {
 		simutil.Logger.Error("add node failed", zap.Uint64("node-id", id), zap.Error(err))
 		return false
@@ -187,7 +186,7 @@ func (e *DeleteNodes) Run(raft *RaftEngine, tickCount int64) bool {
 
 	regions := raft.GetRegions()
 	for _, region := range regions {
-		storeIDs := region.GetStoreIds()
+		storeIDs := region.GetStoreIDs()
 		if _, ok := storeIDs[id]; ok {
 			downPeer := &pdpb.PeerStats{
 				Peer:        region.GetStorePeer(id),

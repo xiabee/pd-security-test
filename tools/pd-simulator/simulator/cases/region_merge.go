@@ -17,8 +17,9 @@ package cases
 import (
 	"math/rand"
 
+	"github.com/docker/go-units"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
 	"go.uber.org/zap"
@@ -30,11 +31,8 @@ func newRegionMerge() *Case {
 	storeNum, regionNum := getStoreNum(), getRegionNum()
 	for i := 1; i <= storeNum; i++ {
 		simCase.Stores = append(simCase.Stores, &Store{
-			ID:        IDAllocator.nextID(),
-			Status:    metapb.StoreState_Up,
-			Capacity:  1 * TB,
-			Available: 900 * GB,
-			Version:   "2.1.0",
+			ID:     IDAllocator.nextID(),
+			Status: metapb.StoreState_Up,
 		})
 	}
 
@@ -49,7 +47,7 @@ func newRegionMerge() *Case {
 			ID:     IDAllocator.nextID(),
 			Peers:  peers,
 			Leader: peers[0],
-			Size:   10 * MB,
+			Size:   10 * units.MiB,
 			Keys:   100000,
 		})
 	}

@@ -26,9 +26,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/tikv/pd/pkg/reflectutil"
+	"github.com/tikv/pd/pkg/schedule/placement"
+	"github.com/tikv/pd/pkg/utils/reflectutil"
 	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/schedule/placement"
 )
 
 var (
@@ -436,6 +436,7 @@ func NewPlacementRulesCommand() *cobra.Command {
 	show.Flags().String("group", "", "group id")
 	show.Flags().String("id", "", "rule id")
 	show.Flags().String("region", "", "region id")
+	show.Flags().Bool("detail", false, "detailed match info for region")
 	load := &cobra.Command{
 		Use:   "load",
 		Short: "load placement rules to a file",
@@ -467,9 +468,10 @@ func NewPlacementRulesCommand() *cobra.Command {
 	}
 	ruleGroupDelete := &cobra.Command{
 		Use:   "delete <id>",
-		Short: "delete rule group configuration",
-		Run:   deleteRuleGroupFunc,
+		Short: "delete rule group configuration. Note: this command will be deprecated soon, use <rule-bundle delete> instead",
+		Run:   delRuleBundle,
 	}
+	ruleGroupDelete.Flags().Bool("regexp", false, "match group id by regular expression")
 	ruleGroup.AddCommand(ruleGroupShow, ruleGroupSet, ruleGroupDelete)
 	ruleBundle := &cobra.Command{
 		Use:   "rule-bundle",
@@ -552,6 +554,9 @@ func getPlacementRulesFunc(cmd *cobra.Command, args []string) {
 		reqPath, respIsList = path.Join(rulePrefix, group, id), false
 	case region != "" && group == "" && id == "": // rules matches a region
 		reqPath = path.Join(rulesPrefix, "region", region)
+		if ok, _ := cmd.Flags().GetBool("detail"); ok {
+			reqPath = path.Join(reqPath, "detail")
+		}
 	default:
 		cmd.Println(`"region" should not be specified with "group" or "id" at the same time`)
 		return
@@ -657,19 +662,6 @@ func updateRuleGroupFunc(cmd *cobra.Command, args []string) {
 		"index":    index,
 		"override": override,
 	})
-}
-
-func deleteRuleGroupFunc(cmd *cobra.Command, args []string) {
-	if len(args) != 1 {
-		cmd.Println(cmd.UsageString())
-		return
-	}
-	_, err := doRequest(cmd, path.Join(ruleGroupPrefix, args[0]), http.MethodDelete, http.Header{})
-	if err != nil {
-		cmd.Printf("Failed to remove rule group config: %s \n", err)
-		return
-	}
-	cmd.Println("Success!")
 }
 
 func getRuleBundle(cmd *cobra.Command, args []string) {

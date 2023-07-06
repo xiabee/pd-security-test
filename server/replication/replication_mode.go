@@ -27,20 +27,21 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	pb "github.com/pingcap/kvproto/pkg/replication_modepb"
 	"github.com/pingcap/log"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/syncutil"
+	"github.com/tikv/pd/pkg/storage/endpoint"
+	"github.com/tikv/pd/pkg/utils/logutil"
+	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule"
-	"github.com/tikv/pd/server/storage/endpoint"
 	"go.uber.org/zap"
 )
 
 const (
-	modeMajority   = "majority"
-	modeDRAutoSync = "dr-auto-sync"
+	modeMajority                 = "majority"
+	modeDRAutoSync               = "dr-auto-sync"
+	defaultDRTiKVSyncTimeoutHint = time.Minute
 )
 
 func modeToPB(m string) pb.ReplicationMode {
@@ -86,19 +87,17 @@ type ModeManager struct {
 	drSampleTotalRegion  int // number of regions in sample
 	drTotalRegion        int // number of all regions
 
-	drMemberWaitAsyncTime map[uint64]time.Time // last sync time with follower nodes
-	drStoreStatus         sync.Map
+	drStoreStatus sync.Map
 }
 
 // NewReplicationModeManager creates the replicate mode manager.
 func NewReplicationModeManager(config config.ReplicationModeConfig, storage endpoint.ReplicationStatusStorage, cluster schedule.Cluster, fileReplicater FileReplicater) (*ModeManager, error) {
 	m := &ModeManager{
-		initTime:              time.Now(),
-		config:                config,
-		storage:               storage,
-		cluster:               cluster,
-		fileReplicater:        fileReplicater,
-		drMemberWaitAsyncTime: make(map[uint64]time.Time),
+		initTime:       time.Now(),
+		config:         config,
+		storage:        storage,
+		cluster:        cluster,
+		fileReplicater: fileReplicater,
 	}
 	switch config.ReplicationMode {
 	case modeMajority:
@@ -129,15 +128,6 @@ func (m *ModeManager) UpdateConfig(config config.ReplicationModeConfig) error {
 	return nil
 }
 
-// UpdateMemberWaitAsyncTime updates a member's wait async time.
-func (m *ModeManager) UpdateMemberWaitAsyncTime(memberID uint64) {
-	m.Lock()
-	defer m.Unlock()
-	t := time.Now()
-	log.Info("udpate member wait async time", zap.Uint64("memberID", memberID), zap.Time("time", t))
-	m.drMemberWaitAsyncTime[memberID] = t
-}
-
 // GetReplicationStatus returns the status to sync with tikv servers.
 func (m *ModeManager) GetReplicationStatus() *pb.ReplicationStatus {
 	m.RLock()
@@ -150,10 +140,11 @@ func (m *ModeManager) GetReplicationStatus() *pb.ReplicationStatus {
 	case modeMajority:
 	case modeDRAutoSync:
 		p.DrAutoSync = &pb.DRAutoSync{
-			LabelKey:            m.config.DRAutoSync.LabelKey,
-			State:               pb.DRAutoSyncState(pb.DRAutoSyncState_value[strings.ToUpper(m.drAutoSync.State)]),
-			StateId:             m.drAutoSync.StateID,
-			WaitSyncTimeoutHint: int32(m.config.DRAutoSync.WaitSyncTimeout.Seconds()),
+			LabelKey: m.config.DRAutoSync.LabelKey,
+			State:    pb.DRAutoSyncState(pb.DRAutoSyncState_value[strings.ToUpper(m.drAutoSync.State)]),
+			StateId:  m.drAutoSync.StateID,
+			// TODO: make it works, ref https://github.com/tikv/tikv/issues/7945
+			WaitSyncTimeoutHint: int32(defaultDRTiKVSyncTimeoutHint.Seconds()),
 			AvailableStores:     m.drAutoSync.AvailableStores,
 			PauseRegionSplit:    m.config.DRAutoSync.PauseRegionSplit && m.drAutoSync.State != drStateSync,
 		}
@@ -177,6 +168,7 @@ type HTTPReplicationStatus struct {
 		LabelKey        string  `json:"label_key"`
 		State           string  `json:"state"`
 		StateID         uint64  `json:"state_id,omitempty"`
+		ACIDConsistent  bool    `json:"acid_consistent"`
 		TotalRegions    int     `json:"total_regions,omitempty"`
 		SyncedRegions   int     `json:"synced_regions,omitempty"`
 		RecoverProgress float32 `json:"recover_progress,omitempty"`
@@ -195,6 +187,7 @@ func (m *ModeManager) GetReplicationStatusHTTP() *HTTPReplicationStatus {
 		status.DrAutoSync.LabelKey = m.config.DRAutoSync.LabelKey
 		status.DrAutoSync.State = m.drAutoSync.State
 		status.DrAutoSync.StateID = m.drAutoSync.StateID
+		status.DrAutoSync.ACIDConsistent = m.drAutoSync.State != drStateSyncRecover
 		status.DrAutoSync.RecoverProgress = m.drAutoSync.RecoverProgress
 		status.DrAutoSync.TotalRegions = m.drAutoSync.TotalRegions
 		status.DrAutoSync.SyncedRegions = m.drAutoSync.SyncedRegions
@@ -235,23 +228,6 @@ func (m *ModeManager) loadDRAutoSync() error {
 		return m.drSwitchToSync()
 	}
 	return nil
-}
-
-func (m *ModeManager) drCheckAsyncTimeout() bool {
-	m.RLock()
-	defer m.RUnlock()
-	timeout := m.config.DRAutoSync.WaitAsyncTimeout.Duration
-	if timeout == 0 {
-		return true
-	}
-	// make sure all members are timeout.
-	for _, t := range m.drMemberWaitAsyncTime {
-		if time.Since(t) <= timeout {
-			return false
-		}
-	}
-	// make sure all members that have synced with previous leader are timeout.
-	return time.Since(m.initTime) > timeout
 }
 
 func (m *ModeManager) drSwitchToAsyncWait(availableStores []uint64) error {
@@ -393,7 +369,7 @@ func (m *ModeManager) drGetState() string {
 
 const (
 	idleTimeout  = time.Minute
-	tickInterval = time.Second * 10
+	tickInterval = 500 * time.Millisecond
 )
 
 // Run starts the background job.
@@ -469,7 +445,7 @@ func (m *ModeManager) tickDR() {
 	switch m.drGetState() {
 	case drStateSync:
 		// If hasMajority is false, the cluster is always unavailable. Switch to async won't help.
-		if !canSync && hasMajority && m.drCheckAsyncTimeout() {
+		if !canSync && hasMajority {
 			m.drSwitchToAsyncWait(stores[primaryUp])
 		}
 	case drStateAsyncWait:
@@ -525,6 +501,10 @@ func (m *ModeManager) checkStoreStatus() [][]uint64 {
 	stores := make([][]uint64, storeStatusTypeCount)
 	for _, s := range m.cluster.GetStores() {
 		if s.IsRemoved() {
+			continue
+		}
+		// learner peers do not participate in major commit or vote, so it should not count in primary/dr as a normal store.
+		if s.GetRegionCount() == s.GetLearnerCount() {
 			continue
 		}
 		down := s.DownTime() >= m.config.DRAutoSync.WaitStoreTimeout.Duration

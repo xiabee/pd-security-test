@@ -30,13 +30,14 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/cache"
-	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/core/constant"
+	"github.com/tikv/pd/pkg/core/storelimit"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/typeutil"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/core/storelimit"
-	"github.com/tikv/pd/server/storage/endpoint"
+	"github.com/tikv/pd/pkg/storage/endpoint"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"go.etcd.io/etcd/clientv3"
+	"go.uber.org/zap"
 )
 
 // PersistOptions wraps all configurations that need to persist to storage and
@@ -171,6 +172,13 @@ func (o *PersistOptions) SetPlacementRulesCacheEnabled(enabled bool) {
 	o.SetReplicationConfig(v)
 }
 
+// SetWitnessEnabled set EanbleWitness
+func (o *PersistOptions) SetWitnessEnabled(enabled bool) {
+	v := o.GetScheduleConfig().Clone()
+	v.EnableWitness = enabled
+	o.SetScheduleConfig(v)
+}
+
 // GetStrictlyMatchLabel returns whether check label strict.
 func (o *PersistOptions) GetStrictlyMatchLabel() bool {
 	return o.GetReplicationConfig().StrictlyMatchLabel
@@ -188,6 +196,15 @@ func (o *PersistOptions) SetMaxReplicas(replicas int) {
 	o.SetReplicationConfig(v)
 }
 
+// UseRaftV2 set some config for raft store v2 by default temporary.
+// todo: remove this after raft store support this.
+// disable merge check
+func (o *PersistOptions) UseRaftV2() {
+	v := o.GetScheduleConfig().Clone()
+	v.MaxMergeRegionSize = 0
+	o.SetScheduleConfig(v)
+}
+
 const (
 	maxSnapshotCountKey            = "schedule.max-snapshot-count"
 	maxMergeRegionSizeKey          = "schedule.max-merge-region-size"
@@ -195,11 +212,14 @@ const (
 	maxMergeRegionKeysKey          = "schedule.max-merge-region-keys"
 	leaderScheduleLimitKey         = "schedule.leader-schedule-limit"
 	regionScheduleLimitKey         = "schedule.region-schedule-limit"
+	witnessScheduleLimitKey        = "schedule.witness-schedule-limit"
 	replicaRescheduleLimitKey      = "schedule.replica-schedule-limit"
 	mergeScheduleLimitKey          = "schedule.merge-schedule-limit"
 	hotRegionScheduleLimitKey      = "schedule.hot-region-schedule-limit"
 	schedulerMaxWaitingOperatorKey = "schedule.scheduler-max-waiting-operator"
 	enableLocationReplacement      = "schedule.enable-location-replacement"
+	// it's related to schedule, but it's not an explicit config
+	enableTiKVSplitRegion = "schedule.enable-tikv-split-region"
 )
 
 var supportedTTLConfigs = []string{
@@ -214,6 +234,7 @@ var supportedTTLConfigs = []string{
 	hotRegionScheduleLimitKey,
 	schedulerMaxWaitingOperatorKey,
 	enableLocationReplacement,
+	enableTiKVSplitRegion,
 	"default-add-peer",
 	"default-remove-peer",
 }
@@ -244,8 +265,17 @@ func (o *PersistOptions) GetMaxMergeRegionSize() uint64 {
 }
 
 // GetMaxMergeRegionKeys returns the max number of keys.
+// It returns size * 10000 if the key of max-merge-region-Keys doesn't exist.
 func (o *PersistOptions) GetMaxMergeRegionKeys() uint64 {
-	return o.getTTLUintOr(maxMergeRegionKeysKey, o.GetScheduleConfig().MaxMergeRegionKeys)
+	keys, exist, err := o.getTTLUint(maxMergeRegionKeysKey)
+	if exist && err == nil {
+		return keys
+	}
+	size, exist, err := o.getTTLUint(maxMergeRegionSizeKey)
+	if exist && err == nil {
+		return size * 10000
+	}
+	return o.GetScheduleConfig().GetMaxMergeRegionKeys()
 }
 
 // GetSplitMergeInterval returns the interval between finishing split and starting to merge.
@@ -257,6 +287,35 @@ func (o *PersistOptions) GetSplitMergeInterval() time.Duration {
 func (o *PersistOptions) SetSplitMergeInterval(splitMergeInterval time.Duration) {
 	v := o.GetScheduleConfig().Clone()
 	v.SplitMergeInterval = typeutil.Duration{Duration: splitMergeInterval}
+	o.SetScheduleConfig(v)
+}
+
+// GetSwitchWitnessInterval returns the interval between promote to non-witness and starting to switch to witness.
+func (o *PersistOptions) GetSwitchWitnessInterval() time.Duration {
+	return o.GetScheduleConfig().SwitchWitnessInterval.Duration
+}
+
+// IsDiagnosticAllowed returns whether is enable to use diagnostic.
+func (o *PersistOptions) IsDiagnosticAllowed() bool {
+	return o.GetScheduleConfig().EnableDiagnostic
+}
+
+// SetEnableDiagnostic to set the option for diagnose. It's only used to test.
+func (o *PersistOptions) SetEnableDiagnostic(enable bool) {
+	v := o.GetScheduleConfig().Clone()
+	v.EnableDiagnostic = enable
+	o.SetScheduleConfig(v)
+}
+
+// IsWitnessAllowed returns whether is enable to use witness.
+func (o *PersistOptions) IsWitnessAllowed() bool {
+	return o.GetScheduleConfig().EnableWitness
+}
+
+// SetEnableWitness to set the option for witness. It's only used to test.
+func (o *PersistOptions) SetEnableWitness(enable bool) {
+	v := o.GetScheduleConfig().Clone()
+	v.EnableWitness = enable
 	o.SetScheduleConfig(v)
 }
 
@@ -355,6 +414,11 @@ func (o *PersistOptions) GetRegionScheduleLimit() uint64 {
 	return o.getTTLUintOr(regionScheduleLimitKey, o.GetScheduleConfig().RegionScheduleLimit)
 }
 
+// GetWitnessScheduleLimit returns the limit for region schedule.
+func (o *PersistOptions) GetWitnessScheduleLimit() uint64 {
+	return o.getTTLUintOr(witnessScheduleLimitKey, o.GetScheduleConfig().WitnessScheduleLimit)
+}
+
 // GetReplicaScheduleLimit returns the limit for replica schedule.
 func (o *PersistOptions) GetReplicaScheduleLimit() uint64 {
 	return o.getTTLUintOr(replicaRescheduleLimitKey, o.GetScheduleConfig().ReplicaScheduleLimit)
@@ -386,7 +450,7 @@ func (o *PersistOptions) GetStoreLimit(storeID uint64) (returnSC StoreLimitConfi
 	}
 	v, ok1, err := o.getTTLFloat("default-add-peer")
 	if err != nil {
-		log.Warn("failed to parse default-add-peer from PersistOptions's ttl storage")
+		log.Warn("failed to parse default-add-peer from PersistOptions's ttl storage", zap.Error(err))
 	}
 	canSetAddPeer := ok1 && err == nil
 	if canSetAddPeer {
@@ -395,7 +459,7 @@ func (o *PersistOptions) GetStoreLimit(storeID uint64) (returnSC StoreLimitConfi
 
 	v, ok2, err := o.getTTLFloat("default-remove-peer")
 	if err != nil {
-		log.Warn("failed to parse default-remove-peer from PersistOptions's ttl storage")
+		log.Warn("failed to parse default-remove-peer from PersistOptions's ttl storage", zap.Error(err))
 	}
 	canSetRemovePeer := ok2 && err == nil
 	if canSetRemovePeer {
@@ -425,6 +489,9 @@ func (o *PersistOptions) GetStoreLimitByType(storeID uint64, typ storelimit.Type
 		return limit.AddPeer
 	case storelimit.RemovePeer:
 		return limit.RemovePeer
+	// todo: impl it in store limit v2.
+	case storelimit.SendSnapshot:
+		return 0.0
 	default:
 		panic("no such limit type")
 	}
@@ -440,6 +507,11 @@ func (o *PersistOptions) GetStoreLimitMode() string {
 	return o.GetScheduleConfig().StoreLimitMode
 }
 
+// GetStoreLimitVersion returns the limit version of store.
+func (o *PersistOptions) GetStoreLimitVersion() string {
+	return o.GetScheduleConfig().StoreLimitVersion
+}
+
 // GetTolerantSizeRatio gets the tolerant size ratio.
 func (o *PersistOptions) GetTolerantSizeRatio() float64 {
 	return o.GetScheduleConfig().TolerantSizeRatio
@@ -448,6 +520,11 @@ func (o *PersistOptions) GetTolerantSizeRatio() float64 {
 // GetLowSpaceRatio returns the low space ratio.
 func (o *PersistOptions) GetLowSpaceRatio() float64 {
 	return o.GetScheduleConfig().LowSpaceRatio
+}
+
+// GetSlowStoreEvictingAffectedStoreRatioThreshold returns the affected ratio threshold when judging a store is slow.
+func (o *PersistOptions) GetSlowStoreEvictingAffectedStoreRatioThreshold() float64 {
+	return o.GetScheduleConfig().SlowStoreEvictingAffectedStoreRatioThreshold
 }
 
 // GetHighSpaceRatio returns the high space ratio.
@@ -466,13 +543,13 @@ func (o *PersistOptions) GetSchedulerMaxWaitingOperator() uint64 {
 }
 
 // GetLeaderSchedulePolicy is to get leader schedule policy.
-func (o *PersistOptions) GetLeaderSchedulePolicy() core.SchedulePolicy {
-	return core.StringToSchedulePolicy(o.GetScheduleConfig().LeaderSchedulePolicy)
+func (o *PersistOptions) GetLeaderSchedulePolicy() constant.SchedulePolicy {
+	return constant.StringToSchedulePolicy(o.GetScheduleConfig().LeaderSchedulePolicy)
 }
 
 // GetKeyType is to get key type.
-func (o *PersistOptions) GetKeyType() core.KeyType {
-	return core.StringToKeyType(o.GetPDServerConfig().KeyType)
+func (o *PersistOptions) GetKeyType() constant.KeyType {
+	return constant.StringToKeyType(o.GetPDServerConfig().KeyType)
 }
 
 // GetMaxResetTSGap gets the max gap to reset the tso.
@@ -488,6 +565,26 @@ func (o *PersistOptions) GetDashboardAddress() string {
 // IsUseRegionStorage returns if the independent region storage is enabled.
 func (o *PersistOptions) IsUseRegionStorage() bool {
 	return o.GetPDServerConfig().UseRegionStorage
+}
+
+// GetServerMemoryLimit gets ServerMemoryLimit config.
+func (o *PersistOptions) GetServerMemoryLimit() float64 {
+	return o.GetPDServerConfig().ServerMemoryLimit
+}
+
+// GetServerMemoryLimitGCTrigger gets the ServerMemoryLimitGCTrigger config.
+func (o *PersistOptions) GetServerMemoryLimitGCTrigger() float64 {
+	return o.GetPDServerConfig().ServerMemoryLimitGCTrigger
+}
+
+// GetEnableGOGCTuner gets the EnableGOGCTuner config.
+func (o *PersistOptions) GetEnableGOGCTuner() bool {
+	return o.GetPDServerConfig().EnableGOGCTuner
+}
+
+// GetGCTunerThreshold gets the GC tuner threshold.
+func (o *PersistOptions) GetGCTunerThreshold() float64 {
+	return o.GetPDServerConfig().GCTunerThreshold
 }
 
 // IsRemoveDownReplicaEnabled returns if remove down replica is enabled.
@@ -510,16 +607,14 @@ func (o *PersistOptions) IsRemoveExtraReplicaEnabled() bool {
 	return o.GetScheduleConfig().EnableRemoveExtraReplica
 }
 
+// IsTikvRegionSplitEnabled returns whether tikv split region is disabled.
+func (o *PersistOptions) IsTikvRegionSplitEnabled() bool {
+	return o.getTTLBoolOr(enableTiKVSplitRegion, o.GetScheduleConfig().EnableTiKVSplitRegion)
+}
+
 // IsLocationReplacementEnabled returns if location replace is enabled.
 func (o *PersistOptions) IsLocationReplacementEnabled() bool {
-	if v, ok := o.GetTTLData(enableLocationReplacement); ok {
-		result, err := strconv.ParseBool(v)
-		if err == nil {
-			return result
-		}
-		log.Warn("failed to parse " + enableLocationReplacement + " from PersistOptions's ttl storage")
-	}
-	return o.GetScheduleConfig().EnableLocationReplacement
+	return o.getTTLBoolOr(enableLocationReplacement, o.GetScheduleConfig().EnableLocationReplacement)
 }
 
 // GetMaxMovableHotPeerSize returns the max movable hot peer size.
@@ -539,6 +634,13 @@ func (o *PersistOptions) IsDebugMetricsEnabled() bool {
 // IsUseJointConsensus returns if using joint consensus as a operator step is enabled.
 func (o *PersistOptions) IsUseJointConsensus() bool {
 	return o.GetScheduleConfig().EnableJointConsensus
+}
+
+// SetEnableUseJointConsensus to set the option for using joint consensus. It's only used to test.
+func (o *PersistOptions) SetEnableUseJointConsensus(enable bool) {
+	v := o.GetScheduleConfig().Clone()
+	v.EnableJointConsensus = enable
+	o.SetScheduleConfig(v)
 }
 
 // IsTraceRegionFlow returns if the region flow is tracing.
@@ -722,7 +824,27 @@ func (o *PersistOptions) getTTLUintOr(key string, defaultValue uint64) uint64 {
 		if err == nil {
 			return v
 		}
-		log.Warn("failed to parse " + key + " from PersistOptions's ttl storage")
+		log.Warn("failed to parse "+key+" from PersistOptions's ttl storage", zap.Error(err))
+	}
+	return defaultValue
+}
+
+func (o *PersistOptions) getTTLBool(key string) (result bool, contains bool, err error) {
+	stringForm, ok := o.GetTTLData(key)
+	if !ok {
+		return
+	}
+	result, err = strconv.ParseBool(stringForm)
+	contains = true
+	return
+}
+
+func (o *PersistOptions) getTTLBoolOr(key string, defaultValue bool) bool {
+	if v, ok, err := o.getTTLBool(key); ok {
+		if err == nil {
+			return v
+		}
+		log.Warn("failed to parse "+key+" from PersistOptions's ttl storage", zap.Error(err))
 	}
 	return defaultValue
 }
@@ -741,7 +863,7 @@ func (o *PersistOptions) getTTLFloatOr(key string, defaultValue float64) float64
 		if err == nil {
 			return v
 		}
-		log.Warn("failed to parse " + key + " from PersistOptions's ttl storage")
+		log.Warn("failed to parse "+key+" from PersistOptions's ttl storage", zap.Error(err))
 	}
 	return defaultValue
 }
