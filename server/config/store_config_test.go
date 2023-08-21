@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"net/http"
@@ -63,15 +64,13 @@ func TestTiKVConfig(t *testing.T) {
 func TestUpdateConfig(t *testing.T) {
 	re := require.New(t)
 	manager := NewTestStoreConfigManager([]string{"tidb.com"})
-	manager.ObserveConfig("tikv.com")
+	manager.ObserveConfig(context.Background(), "tikv.com")
 	re.Equal(uint64(144), manager.GetStoreConfig().GetRegionMaxSize())
-	re.NotEqual(raftStoreV2, manager.GetStoreConfig().GetRegionMaxSize())
-	manager.ObserveConfig("tidb.com")
+	manager.ObserveConfig(context.Background(), "tidb.com")
 	re.Equal(uint64(10), manager.GetStoreConfig().GetRegionMaxSize())
-	re.Equal(raftStoreV2, manager.GetStoreConfig().Engine)
 
 	// case2: the config should not update if config is same expect some ignore field.
-	c, err := manager.source.GetConfig("tidb.com")
+	c, err := manager.source.GetConfig(context.Background(), "tidb.com")
 	re.NoError(err)
 	re.True(manager.GetStoreConfig().Equal(c))
 
@@ -102,9 +101,6 @@ func TestParseConfig(t *testing.T) {
 "region-bucket-size":"96MiB",
 "region-size-threshold-for-approximate":"384MiB",
 "region-bucket-merge-size-ratio":0.33
-},
-"storage":{
-	"engine":"raft-kv2"
 }
 }
 `
@@ -113,8 +109,6 @@ func TestParseConfig(t *testing.T) {
 	re.NoError(json.Unmarshal([]byte(body), &config))
 	m.update(&config)
 	re.Equal(uint64(96), config.GetRegionBucketSize())
-	re.True(config.IsRaftKV2())
-	re.Equal(raftStoreV2, config.Storage.Engine)
 }
 
 func TestMergeCheck(t *testing.T) {

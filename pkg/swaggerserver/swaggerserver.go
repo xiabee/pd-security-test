@@ -12,20 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build swagger_server
+// +build swagger_server
+
 package swaggerserver
 
 import (
 	"context"
 	"net/http"
 
-	"github.com/tikv/pd/pkg/utils/apiutil"
+	httpSwagger "github.com/swaggo/http-swagger"
+	_ "github.com/tikv/pd/docs/swagger"
 	"github.com/tikv/pd/server"
 )
 
 const swaggerPrefix = "/swagger/"
 
 var (
-	swaggerServiceGroup = apiutil.APIServiceGroup{
+	swaggerServiceGroup = server.ServiceGroup{
 		Name:       "swagger",
 		Version:    "v1",
 		IsCore:     false,
@@ -33,9 +37,14 @@ var (
 	}
 )
 
+// Enabled return true if swagger server is disabled.
+func Enabled() bool {
+	return true
+}
+
 // NewHandler creates a HTTP handler for Swagger.
-func NewHandler(context.Context, *server.Server) (http.Handler, apiutil.APIServiceGroup, error) {
+func NewHandler(context.Context, *server.Server) (http.Handler, server.ServiceGroup, error) {
 	swaggerHandler := http.NewServeMux()
-	swaggerHandler.Handle(swaggerPrefix, handler())
+	swaggerHandler.Handle(swaggerPrefix, httpSwagger.Handler())
 	return swaggerHandler, swaggerServiceGroup, nil
 }

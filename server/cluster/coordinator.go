@@ -27,19 +27,19 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/cache"
-	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/schedule"
-	"github.com/tikv/pd/pkg/schedule/checker"
-	"github.com/tikv/pd/pkg/schedule/hbstream"
-	"github.com/tikv/pd/pkg/schedule/operator"
-	"github.com/tikv/pd/pkg/schedule/plan"
-	"github.com/tikv/pd/pkg/schedule/schedulers"
-	"github.com/tikv/pd/pkg/statistics"
-	"github.com/tikv/pd/pkg/storage"
-	"github.com/tikv/pd/pkg/utils/logutil"
-	"github.com/tikv/pd/pkg/utils/syncutil"
+	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/checker"
+	"github.com/tikv/pd/server/schedule/hbstream"
+	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/plan"
+	"github.com/tikv/pd/server/schedulers"
+	"github.com/tikv/pd/server/statistics"
+	"github.com/tikv/pd/server/storage"
 	"go.uber.org/zap"
 )
 
@@ -56,12 +56,6 @@ const (
 	PluginLoad = "PluginLoad"
 	// PluginUnload means action for unload plugin
 	PluginUnload = "PluginUnload"
-)
-
-var (
-	// WithLabelValues is a heavy operation, define variable to avoid call it every time.
-	waitingListGauge  = regionListGauge.WithLabelValues("waiting_list")
-	priorityListGauge = regionListGauge.WithLabelValues("priority_list")
 )
 
 // coordinator is used to manage all schedulers and checkers to decide if the region needs to be scheduled.
@@ -93,7 +87,7 @@ func newCoordinator(ctx context.Context, cluster *RaftCluster, hbStreams *hbstre
 		cancel:            cancel,
 		cluster:           cluster,
 		prepareChecker:    newPrepareChecker(),
-		checkers:          checker.NewController(ctx, cluster, cluster.opt, cluster.ruleManager, cluster.regionLabeler, opController),
+		checkers:          checker.NewController(ctx, cluster, cluster.ruleManager, cluster.regionLabeler, opController),
 		regionScatterer:   schedule.NewRegionScatterer(ctx, cluster, opController),
 		regionSplitter:    schedule.NewRegionSplitter(cluster, schedule.NewSplitRegionsHandler(cluster, opController)),
 		schedulers:        schedulers,
@@ -135,8 +129,7 @@ func (c *coordinator) patrolRegions() {
 			log.Info("patrol regions has been stopped")
 			return
 		}
-		if c.cluster.GetUnsafeRecoveryController().IsRunning() {
-			// Skip patrolling regions during unsafe recovery.
+		if allowed, _ := c.cluster.CheckSchedulingAllowance(); !allowed {
 			continue
 		}
 
@@ -187,7 +180,7 @@ func (c *coordinator) checkSuspectRegions() {
 
 func (c *coordinator) checkWaitingRegions() {
 	items := c.checkers.GetWaitingRegions()
-	waitingListGauge.Set(float64(len(items)))
+	regionListGauge.WithLabelValues("waiting_list").Set(float64(len(items)))
 	for _, item := range items {
 		region := c.cluster.GetRegion(item.Key)
 		c.tryAddOperators(region)
@@ -198,7 +191,7 @@ func (c *coordinator) checkWaitingRegions() {
 func (c *coordinator) checkPriorityRegions() {
 	items := c.checkers.GetPriorityRegions()
 	removes := make([]uint64, 0)
-	priorityListGauge.Set(float64(len(items)))
+	regionListGauge.WithLabelValues("priority_list").Set(float64(len(items)))
 	for _, id := range items {
 		region := c.cluster.GetRegion(id)
 		if region == nil {
@@ -223,7 +216,6 @@ func (c *coordinator) checkPriorityRegions() {
 // The regions of new version key range and old version key range would be placed into
 // the suspect regions map
 func (c *coordinator) checkSuspectRanges() {
-	defer logutil.LogPanic()
 	defer c.wg.Done()
 	log.Info("coordinator begins to check suspect key ranges")
 	ticker := time.NewTicker(checkSuspectRangesInterval)
@@ -557,7 +549,7 @@ func (c *coordinator) collectSchedulerMetrics() {
 		var allowScheduler float64
 		// If the scheduler is not allowed to schedule, it will disappear in Grafana panel.
 		// See issue #1341.
-		if !s.IsPaused() && !s.cluster.GetUnsafeRecoveryController().IsRunning() {
+		if allowed, _ := s.cluster.CheckSchedulingAllowance(); !s.IsPaused() && allowed {
 			allowScheduler = 1
 		}
 		schedulerStatusGauge.WithLabelValues(s.GetName(), "allow").Set(allowScheduler)
@@ -593,7 +585,6 @@ func collectHotMetrics(cluster *RaftCluster, stores []*core.StoreInfo, typ stati
 	status := statistics.CollectHotPeerInfos(stores, regionStats) // only returns TotalBytesRate,TotalKeysRate,TotalQueryRate,Count
 
 	for _, s := range stores {
-		// TODO: pre-allocate gauge metrics
 		storeAddress := s.GetAddress()
 		storeID := s.GetID()
 		storeLabel := strconv.FormatUint(storeID, 10)
@@ -786,7 +777,7 @@ func (c *coordinator) isSchedulerDisabled(name string) (bool, error) {
 		return false, errs.ErrSchedulerNotFound.FastGenByArgs()
 	}
 	t := s.GetType()
-	scheduleConfig := c.cluster.GetScheduleConfig()
+	scheduleConfig := c.cluster.GetOpts().GetScheduleConfig()
 	for _, s := range scheduleConfig.Schedulers {
 		if t == s.Type {
 			return s.Disable, nil
@@ -964,7 +955,14 @@ func (s *scheduleController) AllowSchedule(diagnosable bool) bool {
 		}
 		return false
 	}
-	if s.IsPaused() || s.cluster.GetUnsafeRecoveryController().IsRunning() {
+	allowed, _ := s.cluster.CheckSchedulingAllowance()
+	if !allowed {
+		if diagnosable {
+			s.diagnosticRecorder.setResultFromStatus(halted)
+		}
+		return false
+	}
+	if s.IsPaused() {
 		if diagnosable {
 			s.diagnosticRecorder.setResultFromStatus(paused)
 		}

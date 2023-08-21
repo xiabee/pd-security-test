@@ -22,19 +22,19 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/schedule/schedulers"
-	"github.com/tikv/pd/pkg/utils/apiutil"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/apiutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedulers"
 )
 
 type diagnosticTestSuite struct {
 	suite.Suite
 	svr             *server.Server
-	cleanup         tu.CleanupFunc
+	cleanup         cleanUpFunc
 	urlPrefix       string
 	configPrefix    string
 	schedulerPrifex string
@@ -81,7 +81,7 @@ func (suite *diagnosticTestSuite) TestSchedulerDiagnosticAPI() {
 	suite.NoError(err)
 
 	suite.NoError(tu.ReadGetJSON(re, testDialClient, addr, cfg))
-	suite.True(cfg.Schedule.EnableDiagnostic)
+	suite.False(cfg.Schedule.EnableDiagnostic)
 
 	ms := map[string]interface{}{
 		"enable-diagnostic": "true",

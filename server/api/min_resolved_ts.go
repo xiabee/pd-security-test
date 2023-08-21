@@ -19,7 +19,7 @@ import (
 	"strconv"
 
 	"github.com/gorilla/mux"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 )
@@ -59,7 +59,7 @@ func (h *minResolvedTSHandler) GetStoreMinResolvedTS(w http.ResponseWriter, r *h
 		return
 	}
 	value := c.GetStoreMinResolvedTS(storeID)
-	persistInterval := c.GetPDServerConfig().MinResolvedTSPersistenceInterval
+	persistInterval := c.GetOpts().GetPDServerConfig().MinResolvedTSPersistenceInterval
 	h.rd.JSON(w, http.StatusOK, minResolvedTS{
 		MinResolvedTS:   value,
 		PersistInterval: persistInterval,
@@ -76,7 +76,7 @@ func (h *minResolvedTSHandler) GetStoreMinResolvedTS(w http.ResponseWriter, r *h
 func (h *minResolvedTSHandler) GetMinResolvedTS(w http.ResponseWriter, r *http.Request) {
 	c := h.svr.GetRaftCluster()
 	value := c.GetMinResolvedTS()
-	persistInterval := c.GetPDServerConfig().MinResolvedTSPersistenceInterval
+	persistInterval := c.GetOpts().GetPDServerConfig().MinResolvedTSPersistenceInterval
 	h.rd.JSON(w, http.StatusOK, minResolvedTS{
 		MinResolvedTS:   value,
 		PersistInterval: persistInterval,

@@ -22,14 +22,14 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 )
 
 type checkerTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 

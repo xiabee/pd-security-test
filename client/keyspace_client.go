@@ -16,6 +16,7 @@ package pd
 
 import (
 	"context"
+	"go.uber.org/zap"
 	"time"
 
 	"github.com/opentracing/opentracing-go"
@@ -23,7 +24,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/client/grpcutil"
-	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 // KeyspaceClient manages keyspace metadata.
@@ -32,14 +33,12 @@ type KeyspaceClient interface {
 	LoadKeyspace(ctx context.Context, name string) (*keyspacepb.KeyspaceMeta, error)
 	// WatchKeyspaces watches keyspace meta changes.
 	WatchKeyspaces(ctx context.Context) (chan []*keyspacepb.KeyspaceMeta, error)
-	// UpdateKeyspaceState updates target keyspace's state.
-	UpdateKeyspaceState(ctx context.Context, id uint32, state keyspacepb.KeyspaceState) (*keyspacepb.KeyspaceMeta, error)
 }
 
 // keyspaceClient returns the KeyspaceClient from current PD leader.
 func (c *client) keyspaceClient() keyspacepb.KeyspaceClient {
-	if client := c.pdSvcDiscovery.GetServingEndpointClientConn(); client != nil {
-		return keyspacepb.NewKeyspaceClient(client)
+	if cc, ok := c.clientConns.Load(c.GetLeaderAddr()); ok {
+		return keyspacepb.NewKeyspaceClient(cc.(*grpc.ClientConn))
 	}
 	return nil
 }
@@ -63,7 +62,7 @@ func (c *client) LoadKeyspace(ctx context.Context, name string) (*keyspacepb.Key
 
 	if err != nil {
 		cmdFailedDurationLoadKeyspace.Observe(time.Since(start).Seconds())
-		c.pdSvcDiscovery.ScheduleCheckMemberChanged()
+		c.ScheduleCheckLeader()
 		return nil, err
 	}
 
@@ -111,45 +110,4 @@ func (c *client) WatchKeyspaces(ctx context.Context) (chan []*keyspacepb.Keyspac
 		}
 	}()
 	return keyspaceWatcherChan, err
-}
-
-// UpdateKeyspaceState attempts to update the keyspace specified by ID to the target state,
-// it will also record StateChangedAt for the given keyspace if a state change took place.
-// Currently, legal operations includes:
-//
-//	ENABLED -> {ENABLED, DISABLED}
-//	DISABLED -> {ENABLED, DISABLED, ARCHIVED}
-//	ARCHIVED -> {ARCHIVED, TOMBSTONE}
-//	TOMBSTONE -> {TOMBSTONE}
-//
-// Updated keyspace meta will be returned.
-func (c *client) UpdateKeyspaceState(ctx context.Context, id uint32, state keyspacepb.KeyspaceState) (*keyspacepb.KeyspaceMeta, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("keyspaceClient.UpdateKeyspaceState", opentracing.ChildOf(span.Context()))
-		defer span.Finish()
-	}
-	start := time.Now()
-	defer func() { cmdDurationUpdateKeyspaceState.Observe(time.Since(start).Seconds()) }()
-	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
-	req := &keyspacepb.UpdateKeyspaceStateRequest{
-		Header: c.requestHeader(),
-		Id:     id,
-		State:  state,
-	}
-	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
-	resp, err := c.keyspaceClient().UpdateKeyspaceState(ctx, req)
-	cancel()
-
-	if err != nil {
-		cmdFailedDurationUpdateKeyspaceState.Observe(time.Since(start).Seconds())
-		c.pdSvcDiscovery.ScheduleCheckMemberChanged()
-		return nil, err
-	}
-
-	if resp.Header.GetError() != nil {
-		cmdFailedDurationUpdateKeyspaceState.Observe(time.Since(start).Seconds())
-		return nil, errors.Errorf("Update state for keyspace id %d failed: %s", id, resp.Header.GetError().String())
-	}
-
-	return resp.Keyspace, nil
 }

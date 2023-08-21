@@ -33,13 +33,13 @@ import (
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/utils/apiutil/serverapi"
-	"github.com/tikv/pd/pkg/utils/testutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/apiutil/serverapi"
+	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	"go.uber.org/goleak"
@@ -377,6 +377,15 @@ func (suite *middlewareTestSuite) TestRateLimitMiddleware() {
 	}
 }
 
+func (suite *middlewareTestSuite) TestSwaggerUrl() {
+	leader := suite.cluster.GetServer(suite.cluster.GetLeader())
+	req, _ := http.NewRequest(http.MethodGet, leader.GetAddr()+"/swagger/ui/index", nil)
+	resp, err := dialClient.Do(req)
+	suite.NoError(err)
+	suite.True(resp.StatusCode == http.StatusNotFound)
+	resp.Body.Close()
+}
+
 func (suite *middlewareTestSuite) TestAuditPrometheusBackend() {
 	leader := suite.cluster.GetServer(suite.cluster.GetLeader())
 	input := map[string]interface{}{
@@ -468,7 +477,7 @@ func (suite *middlewareTestSuite) TestAuditLocalLogBackend() {
 	_, err = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	b, _ := os.ReadFile(tempStdoutFile.Name())
-	suite.Contains(string(b), "audit log")
+	suite.Contains(string(b), "Audit Log")
 	suite.NoError(err)
 	suite.Equal(http.StatusOK, resp.StatusCode)
 
@@ -613,10 +622,10 @@ func (suite *redirectorTestSuite) TestAllowFollowerHandle() {
 	addr := follower.GetAddr() + "/pd/api/v1/version"
 	request, err := http.NewRequest(http.MethodGet, addr, nil)
 	suite.NoError(err)
-	request.Header.Add(serverapi.PDAllowFollowerHandle, "true")
+	request.Header.Add(serverapi.AllowFollowerHandle, "true")
 	resp, err := dialClient.Do(request)
 	suite.NoError(err)
-	suite.Equal("", resp.Header.Get(serverapi.PDRedirectorHeader))
+	suite.Equal("", resp.Header.Get(serverapi.RedirectorHeader))
 	defer resp.Body.Close()
 	suite.Equal(http.StatusOK, resp.StatusCode)
 	_, err = io.ReadAll(resp.Body)
@@ -647,7 +656,7 @@ func (suite *redirectorTestSuite) TestNotLeader() {
 
 	// Request to follower with redirectorHeader will fail.
 	request.RequestURI = ""
-	request.Header.Set(serverapi.PDRedirectorHeader, "pd")
+	request.Header.Set(serverapi.RedirectorHeader, "pd")
 	resp1, err := dialClient.Do(request)
 	suite.NoError(err)
 	defer resp1.Body.Close()
