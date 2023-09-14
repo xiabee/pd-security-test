@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/versioninfo"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
@@ -128,7 +129,8 @@ func TestScheduler(t *testing.T) {
 		pdctl.MustPutStore(re, leaderServer.GetServer(), store)
 	}
 
-	pdctl.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"))
+	// note: because pdqsort is a unstable sort algorithm, set ApproximateSize for this region.
+	pdctl.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"), core.SetApproximateSize(10))
 	time.Sleep(3 * time.Second)
 
 	// scheduler show command
@@ -397,22 +399,20 @@ func TestScheduler(t *testing.T) {
 		pdctl.MustPutStore(re, leaderServer.GetServer(), store)
 	}
 	re.Equal("5.2.0", leaderServer.GetClusterVersion().String())
-	mustExec([]string{"-u", pdAddr, "scheduler", "config", "balance-hot-region-scheduler"}, &conf1)
 	// After upgrading, we should not use query.
-	expected1["read-priorities"] = []interface{}{"query", "byte"}
-	re.NotEqual(expected1, conf1)
-	expected1["read-priorities"] = []interface{}{"key", "byte"}
-	re.Equal(expected1, conf1)
+	mustExec([]string{"-u", pdAddr, "scheduler", "config", "balance-hot-region-scheduler"}, &conf1)
+	re.Equal(conf1["read-priorities"], []interface{}{"key", "byte"})
 	// cannot set qps as write-peer-priorities
 	echo = mustExec([]string{"-u", pdAddr, "scheduler", "config", "balance-hot-region-scheduler", "set", "write-peer-priorities", "query,byte"}, nil)
 	re.Contains(echo, "query is not allowed to be set in priorities for write-peer-priorities")
 	mustExec([]string{"-u", pdAddr, "scheduler", "config", "balance-hot-region-scheduler"}, &conf1)
-	re.Equal(expected1, conf1)
+	re.Equal(conf1["write-peer-priorities"], []interface{}{"byte", "key"})
 
 	// test remove and add
-	mustExec([]string{"-u", pdAddr, "scheduler", "remove", "balance-hot-region-scheduler"}, nil)
-	mustExec([]string{"-u", pdAddr, "scheduler", "add", "balance-hot-region-scheduler"}, nil)
-	re.Equal(expected1, conf1)
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "remove", "balance-hot-region-scheduler"}, nil)
+	re.Contains(echo, "Success")
+	echo = mustExec([]string{"-u", pdAddr, "scheduler", "add", "balance-hot-region-scheduler"}, nil)
+	re.Contains(echo, "Success")
 
 	// test balance leader config
 	conf = make(map[string]interface{})

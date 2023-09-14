@@ -843,7 +843,9 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	if err != nil {
 		return err
 	}
-	region.Inherit(origin, c.storeConfigManager.GetStoreConfig().IsEnableRegionBucket())
+	if c.GetStoreConfig().IsEnableRegionBucket() {
+		region.InheritBuckets(origin)
+	}
 
 	c.hotStat.CheckWriteAsync(statistics.NewCheckExpiredItemTask(region))
 	c.hotStat.CheckReadAsync(statistics.NewCheckExpiredItemTask(region))
@@ -2320,7 +2322,11 @@ func (c *RaftCluster) GetMinResolvedTS() uint64 {
 func (c *RaftCluster) GetStoreMinResolvedTS(storeID uint64) uint64 {
 	c.RLock()
 	defer c.RUnlock()
-	if !c.isInitialized() || !core.IsAvailableForMinResolvedTS(c.GetStore(storeID)) {
+	store := c.GetStore(storeID)
+	if store == nil {
+		return math.MaxUint64
+	}
+	if !c.isInitialized() || !core.IsAvailableForMinResolvedTS(store) {
 		return math.MaxUint64
 	}
 	return c.GetStore(storeID).GetMinResolvedTS()
