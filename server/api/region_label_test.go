@@ -21,17 +21,17 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/pingcap/failpoint"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/apiutil"
-	tu "github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/schedule/labeler"
+	tu "github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/schedule/labeler"
 )
 
 type regionLabelTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   cleanUpFunc
+	cleanup   tu.CleanupFunc
 	urlPrefix string
 }
 
@@ -46,12 +46,13 @@ func (suite *regionLabelTestSuite) SetupSuite() {
 
 	addr := suite.svr.GetAddr()
 	suite.urlPrefix = fmt.Sprintf("%s%s/api/v1/config/region-label/", addr, apiPrefix)
-
+	suite.NoError(failpoint.Enable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion", "return(true)"))
 	mustBootstrapCluster(re, suite.svr)
 }
 
 func (suite *regionLabelTestSuite) TearDownSuite() {
 	suite.cleanup()
+	suite.NoError(failpoint.Disable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion"))
 }
 
 func (suite *regionLabelTestSuite) TestGetSet() {
@@ -84,7 +85,7 @@ func (suite *regionLabelTestSuite) TestGetSet() {
 	expects := []*labeler.LabelRule{rules[0], rules[2]}
 	suite.Equal(expects, resp)
 
-	_, err = apiutil.DoDelete(testDialClient, suite.urlPrefix+"rule/"+url.QueryEscape("rule2/a/b"))
+	err = tu.CheckDelete(testDialClient, suite.urlPrefix+"rule/"+url.QueryEscape("rule2/a/b"), tu.StatusOK(re))
 	suite.NoError(err)
 	err = tu.ReadGetJSON(re, testDialClient, suite.urlPrefix+"rules", &resp)
 	suite.NoError(err)

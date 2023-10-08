@@ -22,10 +22,10 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/require"
+	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/core/storelimit"
+	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/server/api"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/core/storelimit"
-	"github.com/tikv/pd/server/statistics"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	ctl "github.com/tikv/pd/tools/pd-ctl/pdctl"
@@ -79,11 +79,11 @@ func TestStore(t *testing.T) {
 		},
 	}
 
-	leaderServer := cluster.GetServer(cluster.GetLeader())
+	leaderServer := cluster.GetLeaderServer()
 	re.NoError(leaderServer.BootstrapCluster())
 
 	for _, store := range stores {
-		pdctl.MustPutStore(re, leaderServer.GetServer(), store.Store.Store)
+		tests.MustPutStore(re, cluster, store.Store.Store)
 	}
 	defer cluster.Destroy()
 
@@ -293,7 +293,7 @@ func TestStore(t *testing.T) {
 			NodeState:     metapb.NodeState_Serving,
 			LastHeartbeat: time.Now().UnixNano(),
 		}
-		pdctl.MustPutStore(re, leaderServer.GetServer(), store2)
+		tests.MustPutStore(re, cluster, store2)
 	}
 
 	// store delete <store_id> command
@@ -506,15 +506,15 @@ func TestTombstoneStore(t *testing.T) {
 		},
 	}
 
-	leaderServer := cluster.GetServer(cluster.GetLeader())
+	leaderServer := cluster.GetLeaderServer()
 	re.NoError(leaderServer.BootstrapCluster())
 
 	for _, store := range stores {
-		pdctl.MustPutStore(re, leaderServer.GetServer(), store.Store.Store)
+		tests.MustPutStore(re, cluster, store.Store.Store)
 	}
 	defer cluster.Destroy()
-	pdctl.MustPutRegion(re, cluster, 1, 2, []byte("a"), []byte("b"), core.SetWrittenBytes(3000000000), core.SetReportInterval(0, statistics.WriteReportInterval))
-	pdctl.MustPutRegion(re, cluster, 2, 3, []byte("b"), []byte("c"), core.SetWrittenBytes(3000000000), core.SetReportInterval(0, statistics.WriteReportInterval))
+	tests.MustPutRegion(re, cluster, 1, 2, []byte("a"), []byte("b"), core.SetWrittenBytes(3000000000), core.SetReportInterval(0, utils.RegionHeartBeatReportInterval))
+	tests.MustPutRegion(re, cluster, 2, 3, []byte("b"), []byte("c"), core.SetWrittenBytes(3000000000), core.SetReportInterval(0, utils.RegionHeartBeatReportInterval))
 	// store remove-tombstone
 	args := []string{"-u", pdAddr, "store", "remove-tombstone"}
 	output, err := pdctl.ExecuteCommand(cmd, args...)

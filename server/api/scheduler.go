@@ -15,21 +15,19 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
-	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/schedule/schedulers"
+	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/schedulers"
 	"github.com/unrolled/render"
 )
-
-const schedulerConfigPrefix = "pd/api/v1/scheduler-config"
 
 type schedulerHandler struct {
 	*server.Handler
@@ -155,8 +153,23 @@ func (h *schedulerHandler) CreateScheduler(w http.ResponseWriter, r *http.Reques
 			h.r.JSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+	case schedulers.BalanceWitnessName:
+		if err := h.AddBalanceWitnessScheduler(); err != nil {
+			h.r.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case schedulers.TransferWitnessLeaderName:
+		if err := h.AddTransferWitnessLeaderScheduler(); err != nil {
+			h.r.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	case schedulers.HotRegionName:
 		if err := h.AddBalanceHotRegionScheduler(); err != nil {
+			h.r.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case schedulers.EvictSlowTrendName:
+		if err := h.AddEvictSlowTrendScheduler(); err != nil {
 			h.r.JSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -306,13 +319,18 @@ func (h *schedulerHandler) handleErr(w http.ResponseWriter, err error) {
 func (h *schedulerHandler) redirectSchedulerDelete(w http.ResponseWriter, name, schedulerName string) {
 	args := strings.Split(name, "-")
 	args = args[len(args)-1:]
-	url := fmt.Sprintf("%s/%s/%s/delete/%s", h.GetAddr(), schedulerConfigPrefix, schedulerName, args[0])
-	statusCode, err := apiutil.DoDelete(h.svr.GetHTTPClient(), url)
+	deleteURL, err := url.JoinPath(h.GetAddr(), "pd", server.SchedulerConfigHandlerPath, schedulerName, "delete", args[0])
 	if err != nil {
-		h.r.JSON(w, statusCode, err.Error())
+		h.r.JSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.r.JSON(w, statusCode, nil)
+	resp, err := apiutil.DoDelete(h.svr.GetHTTPClient(), deleteURL)
+	if err != nil {
+		h.r.JSON(w, resp.StatusCode, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	h.r.JSON(w, resp.StatusCode, nil)
 }
 
 // FIXME: details of input json body params

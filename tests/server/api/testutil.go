@@ -20,11 +20,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 
 	"github.com/stretchr/testify/require"
 )
 
-const schedulersPrefix = "/pd/api/v1/schedulers"
+const (
+	schedulersPrefix      = "/pd/api/v1/schedulers"
+	schedulerConfigPrefix = "/pd/api/v1/scheduler-config"
+)
 
 // dialClient used to dial http request.
 var dialClient = &http.Client{
@@ -49,6 +53,37 @@ func MustAddScheduler(
 	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s%s", serverAddr, schedulersPrefix), bytes.NewBuffer(data))
 	re.NoError(err)
 	// Send request.
+	resp, err := dialClient.Do(httpReq)
+	re.NoError(err)
+	defer resp.Body.Close()
+	data, err = io.ReadAll(resp.Body)
+	re.NoError(err)
+	re.Equal(http.StatusOK, resp.StatusCode, string(data))
+}
+
+// MustDeleteScheduler deletes a scheduler with HTTP API.
+func MustDeleteScheduler(re *require.Assertions, serverAddr, schedulerName string) {
+	httpReq, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s%s/%s", serverAddr, schedulersPrefix, schedulerName), nil)
+	re.NoError(err)
+	resp, err := dialClient.Do(httpReq)
+	re.NoError(err)
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	re.NoError(err)
+	re.Equal(http.StatusOK, resp.StatusCode, string(data))
+}
+
+// MustCallSchedulerConfigAPI calls a scheduler config with HTTP API with the given args.
+func MustCallSchedulerConfigAPI(
+	re *require.Assertions,
+	method, serverAddr, schedulerName string, args []string,
+	input map[string]interface{},
+) {
+	data, err := json.Marshal(input)
+	re.NoError(err)
+	args = append([]string{schedulerConfigPrefix, schedulerName}, args...)
+	httpReq, err := http.NewRequest(method, fmt.Sprintf("%s%s", serverAddr, path.Join(args...)), bytes.NewBuffer(data))
+	re.NoError(err)
 	resp, err := dialClient.Do(httpReq)
 	re.NoError(err)
 	defer resp.Body.Close()

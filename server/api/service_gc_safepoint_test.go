@@ -16,21 +16,21 @@ package api
 
 import (
 	"fmt"
-	"net/http"
 	"testing"
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/pkg/storage/endpoint"
+	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/storage/endpoint"
 )
 
 type serviceGCSafepointTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   cleanUpFunc
+	cleanup   testutil.CleanupFunc
 	urlPrefix string
 }
 
@@ -92,9 +92,8 @@ func (suite *serviceGCSafepointTestSuite) TestServiceGCSafepoint() {
 	suite.NoError(err)
 	suite.Equal(list, listResp)
 
-	statusCode, err := apiutil.DoDelete(testDialClient, sspURL+"/a")
+	err = testutil.CheckDelete(testDialClient, sspURL+"/a", testutil.StatusOK(suite.Require()))
 	suite.NoError(err)
-	suite.Equal(http.StatusOK, statusCode)
 
 	left, err := storage.LoadAllServiceGCSafePoints()
 	suite.NoError(err)

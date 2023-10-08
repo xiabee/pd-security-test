@@ -26,14 +26,11 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/tikv/pd/pkg/dashboard"
-	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
-
-	// Register schedulers.
-	_ "github.com/tikv/pd/server/schedulers"
 )
 
 func TestMain(m *testing.M) {
@@ -137,7 +134,7 @@ func (suite *dashboardTestSuite) testDashboard(internalProxy bool) {
 
 	cluster.WaitLeader()
 	servers := cluster.GetServers()
-	leader := cluster.GetServer(cluster.GetLeader())
+	leader := cluster.GetLeaderServer()
 	leaderAddr := leader.GetAddr()
 
 	// auto select node

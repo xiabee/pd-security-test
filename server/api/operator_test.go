@@ -29,21 +29,20 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/mock/mockhbstream"
-	tu "github.com/tikv/pd/pkg/testutil"
+	pdoperator "github.com/tikv/pd/pkg/schedule/operator"
+	"github.com/tikv/pd/pkg/schedule/placement"
+	tu "github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/versioninfo"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/core"
-	pdoperator "github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/placement"
-	"github.com/tikv/pd/server/versioninfo"
 )
 
 type operatorTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   cleanUpFunc
+	cleanup   tu.CleanupFunc
 	urlPrefix string
 }
 
@@ -53,7 +52,7 @@ func TestOperatorTestSuite(t *testing.T) {
 
 func (suite *operatorTestSuite) SetupSuite() {
 	re := suite.Require()
-	suite.NoError(failpoint.Enable("github.com/tikv/pd/server/schedule/unexpectedOperator", "return(true)"))
+	suite.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/unexpectedOperator", "return(true)"))
 	suite.svr, suite.cleanup = mustNewServer(re, func(cfg *config.Config) { cfg.Replication.MaxReplicas = 1 })
 	server.MustWaitLeader(re, []*server.Server{suite.svr})
 
@@ -99,7 +98,7 @@ func (suite *operatorTestSuite) TestAddRemovePeer() {
 	suite.Contains(operator, "add learner peer 1 on store 3")
 	suite.Contains(operator, "RUNNING")
 
-	_, err = apiutil.DoDelete(testDialClient, regionURL)
+	err = tu.CheckDelete(testDialClient, regionURL, tu.StatusOK(re))
 	suite.NoError(err)
 	records = mustReadURL(re, recordURL)
 	suite.Contains(records, "admin-add-peer {add peer: store [3]}")
@@ -110,7 +109,7 @@ func (suite *operatorTestSuite) TestAddRemovePeer() {
 	suite.Contains(operator, "RUNNING")
 	suite.Contains(operator, "remove peer on store 2")
 
-	_, err = apiutil.DoDelete(testDialClient, regionURL)
+	err = tu.CheckDelete(testDialClient, regionURL, tu.StatusOK(re))
 	suite.NoError(err)
 	records = mustReadURL(re, recordURL)
 	suite.Contains(records, "admin-remove-peer {rm peer: store [2]}")
@@ -139,11 +138,11 @@ func (suite *operatorTestSuite) TestAddRemovePeer() {
 
 func (suite *operatorTestSuite) TestMergeRegionOperator() {
 	re := suite.Require()
-	r1 := newTestRegionInfo(10, 1, []byte(""), []byte("b"), core.SetWrittenBytes(1000), core.SetReadBytes(1000), core.SetRegionConfVer(1), core.SetRegionVersion(1))
+	r1 := core.NewTestRegionInfo(10, 1, []byte(""), []byte("b"), core.SetWrittenBytes(1000), core.SetReadBytes(1000), core.SetRegionConfVer(1), core.SetRegionVersion(1))
 	mustRegionHeartbeat(re, suite.svr, r1)
-	r2 := newTestRegionInfo(20, 1, []byte("b"), []byte("c"), core.SetWrittenBytes(2000), core.SetReadBytes(0), core.SetRegionConfVer(2), core.SetRegionVersion(3))
+	r2 := core.NewTestRegionInfo(20, 1, []byte("b"), []byte("c"), core.SetWrittenBytes(2000), core.SetReadBytes(0), core.SetRegionConfVer(2), core.SetRegionVersion(3))
 	mustRegionHeartbeat(re, suite.svr, r2)
-	r3 := newTestRegionInfo(30, 1, []byte("c"), []byte(""), core.SetWrittenBytes(500), core.SetReadBytes(800), core.SetRegionConfVer(3), core.SetRegionVersion(2))
+	r3 := core.NewTestRegionInfo(30, 1, []byte("c"), []byte(""), core.SetWrittenBytes(500), core.SetReadBytes(800), core.SetRegionConfVer(3), core.SetRegionVersion(2))
 	mustRegionHeartbeat(re, suite.svr, r3)
 
 	err := tu.CheckPostJSON(testDialClient, fmt.Sprintf("%s/operators", suite.urlPrefix), []byte(`{"name":"merge-region", "source_region_id": 10, "target_region_id": 20}`), tu.StatusOK(re))
@@ -166,7 +165,7 @@ func (suite *operatorTestSuite) TestMergeRegionOperator() {
 type transferRegionOperatorTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   cleanUpFunc
+	cleanup   tu.CleanupFunc
 	urlPrefix string
 }
 
@@ -176,7 +175,7 @@ func TestTransferRegionOperatorTestSuite(t *testing.T) {
 
 func (suite *transferRegionOperatorTestSuite) SetupSuite() {
 	re := suite.Require()
-	suite.NoError(failpoint.Enable("github.com/tikv/pd/server/schedule/unexpectedOperator", "return(true)"))
+	suite.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/unexpectedOperator", "return(true)"))
 	suite.svr, suite.cleanup = mustNewServer(re, func(cfg *config.Config) { cfg.Replication.MaxReplicas = 3 })
 	server.MustWaitLeader(re, []*server.Server{suite.svr})
 
@@ -383,7 +382,9 @@ func (suite *transferRegionOperatorTestSuite) TestTransferRegionWithPlacementRul
 		if testCase.placementRuleEnable {
 			err := suite.svr.GetRaftCluster().GetRuleManager().Initialize(
 				suite.svr.GetRaftCluster().GetOpts().GetMaxReplicas(),
-				suite.svr.GetRaftCluster().GetOpts().GetLocationLabels())
+				suite.svr.GetRaftCluster().GetOpts().GetLocationLabels(),
+				suite.svr.GetRaftCluster().GetOpts().GetIsolationLevel(),
+			)
 			suite.NoError(err)
 		}
 		if len(testCase.rules) > 0 {
@@ -404,8 +405,10 @@ func (suite *transferRegionOperatorTestSuite) TestTransferRegionWithPlacementRul
 		if len(testCase.expectSteps) > 0 {
 			operator = mustReadURL(re, regionURL)
 			suite.Contains(operator, testCase.expectSteps)
+			err = tu.CheckDelete(testDialClient, regionURL, tu.StatusOK(re))
+		} else {
+			err = tu.CheckDelete(testDialClient, regionURL, tu.StatusNotOK(re))
 		}
-		_, err = apiutil.DoDelete(testDialClient, regionURL)
 		suite.NoError(err)
 	}
 }
