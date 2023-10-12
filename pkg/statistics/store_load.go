@@ -20,7 +20,6 @@ import (
 
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
-	"github.com/tikv/pd/pkg/statistics/utils"
 )
 
 // StoreLoadDetail records store load information.
@@ -32,8 +31,8 @@ type StoreLoadDetail struct {
 
 // ToHotPeersStat abstracts load information to HotPeersStat.
 func (li *StoreLoadDetail) ToHotPeersStat() *HotPeersStat {
-	storeByteRate, storeKeyRate, storeQueryRate := li.LoadPred.Current.Loads[utils.ByteDim],
-		li.LoadPred.Current.Loads[utils.KeyDim], li.LoadPred.Current.Loads[utils.QueryDim]
+	storeByteRate, storeKeyRate, storeQueryRate := li.LoadPred.Current.Loads[ByteDim],
+		li.LoadPred.Current.Loads[KeyDim], li.LoadPred.Current.Loads[QueryDim]
 	if len(li.HotPeers) == 0 {
 		return &HotPeersStat{
 			StoreByteRate:  storeByteRate,
@@ -51,9 +50,9 @@ func (li *StoreLoadDetail) ToHotPeersStat() *HotPeersStat {
 	for _, peer := range li.HotPeers {
 		if peer.HotDegree > 0 {
 			peers = append(peers, toHotPeerStatShow(peer))
-			byteRate += peer.GetLoad(utils.ByteDim)
-			keyRate += peer.GetLoad(utils.KeyDim)
-			queryRate += peer.GetLoad(utils.QueryDim)
+			byteRate += peer.GetLoad(ByteDim)
+			keyRate += peer.GetLoad(KeyDim)
+			queryRate += peer.GetLoad(QueryDim)
 		}
 	}
 
@@ -75,9 +74,9 @@ func (li *StoreLoadDetail) IsUniform(dim int, threshold float64) bool {
 }
 
 func toHotPeerStatShow(p *HotPeerStat) HotPeerStatShow {
-	byteRate := p.GetLoad(utils.ByteDim)
-	keyRate := p.GetLoad(utils.KeyDim)
-	queryRate := p.GetLoad(utils.QueryDim)
+	byteRate := p.GetLoad(ByteDim)
+	keyRate := p.GetLoad(KeyDim)
+	queryRate := p.GetLoad(QueryDim)
 	return HotPeerStatShow{
 		StoreID:   p.StoreID,
 		Stores:    p.GetStores(),
@@ -153,21 +152,21 @@ type StoreLoad struct {
 }
 
 // ToLoadPred returns the current load and future predictive load.
-func (load StoreLoad) ToLoadPred(rwTy utils.RWType, infl *Influence) *StoreLoadPred {
+func (load StoreLoad) ToLoadPred(rwTy RWType, infl *Influence) *StoreLoadPred {
 	future := StoreLoad{
 		Loads: append(load.Loads[:0:0], load.Loads...),
 		Count: load.Count,
 	}
 	if infl != nil {
 		switch rwTy {
-		case utils.Read:
-			future.Loads[utils.ByteDim] += infl.Loads[utils.RegionReadBytes]
-			future.Loads[utils.KeyDim] += infl.Loads[utils.RegionReadKeys]
-			future.Loads[utils.QueryDim] += infl.Loads[utils.RegionReadQueryNum]
-		case utils.Write:
-			future.Loads[utils.ByteDim] += infl.Loads[utils.RegionWriteBytes]
-			future.Loads[utils.KeyDim] += infl.Loads[utils.RegionWriteKeys]
-			future.Loads[utils.QueryDim] += infl.Loads[utils.RegionWriteQueryNum]
+		case Read:
+			future.Loads[ByteDim] += infl.Loads[RegionReadBytes]
+			future.Loads[KeyDim] += infl.Loads[RegionReadKeys]
+			future.Loads[QueryDim] += infl.Loads[RegionReadQueryNum]
+		case Write:
+			future.Loads[ByteDim] += infl.Loads[RegionWriteBytes]
+			future.Loads[KeyDim] += infl.Loads[RegionWriteKeys]
+			future.Loads[QueryDim] += infl.Loads[RegionWriteQueryNum]
 		}
 		future.Count += infl.Count
 	}
@@ -256,14 +255,14 @@ var (
 // StoreHistoryLoads records the history load of a store.
 type StoreHistoryLoads struct {
 	// loads[read/write][leader/follower]-->[store id]-->history load
-	loads [utils.RWTypeLen][constant.ResourceKindLen]map[uint64]*storeHistoryLoad
+	loads [RWTypeLen][constant.ResourceKindLen]map[uint64]*storeHistoryLoad
 	dim   int
 }
 
 // NewStoreHistoryLoads creates a StoreHistoryLoads.
 func NewStoreHistoryLoads(dim int) *StoreHistoryLoads {
 	st := StoreHistoryLoads{dim: dim}
-	for i := utils.RWType(0); i < utils.RWTypeLen; i++ {
+	for i := RWType(0); i < RWTypeLen; i++ {
 		for j := constant.ResourceKind(0); j < constant.ResourceKindLen; j++ {
 			st.loads[i][j] = make(map[uint64]*storeHistoryLoad)
 		}
@@ -272,7 +271,7 @@ func NewStoreHistoryLoads(dim int) *StoreHistoryLoads {
 }
 
 // Add adds the store load to the history.
-func (s *StoreHistoryLoads) Add(storeID uint64, rwTp utils.RWType, kind constant.ResourceKind, loads []float64) {
+func (s *StoreHistoryLoads) Add(storeID uint64, rwTp RWType, kind constant.ResourceKind, loads []float64) {
 	load, ok := s.loads[rwTp][kind][storeID]
 	if !ok {
 		size := defaultSize
@@ -286,7 +285,7 @@ func (s *StoreHistoryLoads) Add(storeID uint64, rwTp utils.RWType, kind constant
 }
 
 // Get returns the store loads from the history, not one time point.
-func (s *StoreHistoryLoads) Get(storeID uint64, rwTp utils.RWType, kind constant.ResourceKind) [][]float64 {
+func (s *StoreHistoryLoads) Get(storeID uint64, rwTp RWType, kind constant.ResourceKind) [][]float64 {
 	load, ok := s.loads[rwTp][kind][storeID]
 	if !ok {
 		return [][]float64{}

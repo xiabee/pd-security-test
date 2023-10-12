@@ -82,14 +82,6 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 13),
 		})
 
-	tsoProxyForwardTimeoutCounter = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: "pd",
-			Subsystem: "server",
-			Name:      "tso_proxy_forward_timeout_total",
-			Help:      "Counter of timeouts when tso proxy forwarding tso requests to tso service.",
-		})
-
 	tsoHandleDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: "pd",
@@ -169,7 +161,6 @@ func init() {
 	prometheus.MustRegister(etcdStateGauge)
 	prometheus.MustRegister(tsoProxyHandleDuration)
 	prometheus.MustRegister(tsoProxyBatchSize)
-	prometheus.MustRegister(tsoProxyForwardTimeoutCounter)
 	prometheus.MustRegister(tsoHandleDuration)
 	prometheus.MustRegister(regionHeartbeatHandleDuration)
 	prometheus.MustRegister(storeHeartbeatHandleDuration)

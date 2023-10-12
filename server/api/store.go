@@ -30,10 +30,10 @@ import (
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/core/storelimit"
 	"github.com/tikv/pd/pkg/errs"
-	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/config"
 	"github.com/unrolled/render"
 )
 
@@ -98,7 +98,7 @@ const (
 	downStateName    = "Down"
 )
 
-func newStoreInfo(opt *sc.ScheduleConfig, store *core.StoreInfo) *StoreInfo {
+func newStoreInfo(opt *config.ScheduleConfig, store *core.StoreInfo) *StoreInfo {
 	var slowTrend *SlowTrend
 	coreSlowTrend := store.GetSlowTrend()
 	if coreSlowTrend != nil {
@@ -191,7 +191,7 @@ func (h *storeHandler) GetStore(w http.ResponseWriter, r *http.Request) {
 
 	store := rc.GetStore(storeID)
 	if store == nil {
-		h.rd.JSON(w, http.StatusNotFound, errs.ErrStoreNotFound.FastGenByArgs(storeID).Error())
+		h.rd.JSON(w, http.StatusNotFound, server.ErrStoreNotFound(storeID).Error())
 		return
 	}
 
@@ -314,7 +314,7 @@ func (h *storeHandler) SetStoreLabel(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if err := sc.ValidateLabels(labels); err != nil {
+	if err := config.ValidateLabels(labels); err != nil {
 		apiutil.ErrorResp(h.rd, w, errcode.NewInvalidInputErr(err))
 		return
 	}
@@ -350,7 +350,7 @@ func (h *storeHandler) DeleteStoreLabel(w http.ResponseWriter, r *http.Request) 
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &labelKey); err != nil {
 		return
 	}
-	if err := sc.ValidateLabelKey(labelKey); err != nil {
+	if err := config.ValidateLabelKey(labelKey); err != nil {
 		apiutil.ErrorResp(h.rd, w, errcode.NewInvalidInputErr(err))
 		return
 	}
@@ -437,7 +437,7 @@ func (h *storeHandler) SetStoreLimit(w http.ResponseWriter, r *http.Request) {
 
 	store := rc.GetStore(storeID)
 	if store == nil {
-		h.rd.JSON(w, http.StatusInternalServerError, errs.ErrStoreNotFound.FastGenByArgs(storeID).Error())
+		h.rd.JSON(w, http.StatusInternalServerError, server.ErrStoreNotFound(storeID).Error())
 		return
 	}
 
@@ -584,7 +584,7 @@ func (h *storesHandler) SetAllStoresLimit(w http.ResponseWriter, r *http.Request
 			})
 		}
 
-		if err := sc.ValidateLabels(labels); err != nil {
+		if err := config.ValidateLabels(labels); err != nil {
 			apiutil.ErrorResp(h.rd, w, errcode.NewInvalidInputErr(err))
 			return
 		}
@@ -619,7 +619,7 @@ func (h *storesHandler) GetAllStoresLimit(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if !includeTombstone {
-		returned := make(map[uint64]sc.StoreLimitConfig, len(limits))
+		returned := make(map[uint64]config.StoreLimitConfig, len(limits))
 		rc := getCluster(r)
 		for storeID, v := range limits {
 			store := rc.GetStore(storeID)
@@ -734,13 +734,13 @@ func (h *storesHandler) GetStoresProgress(w http.ResponseWriter, r *http.Request
 }
 
 // @Tags     store
-// @Summary  Get all stores in the cluster.
+// @Summary  Get stores in the cluster.
 // @Param    state  query  array  true  "Specify accepted store states."
 // @Produce  json
 // @Success  200  {object}  StoresInfo
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /stores [get]
-func (h *storesHandler) GetAllStores(w http.ResponseWriter, r *http.Request) {
+func (h *storesHandler) GetStores(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
 	stores := rc.GetMetaStores()
 	StoresInfo := &StoresInfo{
@@ -758,7 +758,7 @@ func (h *storesHandler) GetAllStores(w http.ResponseWriter, r *http.Request) {
 		storeID := s.GetId()
 		store := rc.GetStore(storeID)
 		if store == nil {
-			h.rd.JSON(w, http.StatusInternalServerError, errs.ErrStoreNotFound.FastGenByArgs(storeID).Error())
+			h.rd.JSON(w, http.StatusInternalServerError, server.ErrStoreNotFound(storeID).Error())
 			return
 		}
 

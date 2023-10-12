@@ -52,12 +52,12 @@ func TestBasic(t *testing.T) {
 	re.Equal(meta, newMeta)
 
 	store := &metapb.Store{Id: 123}
-	ok, err = storage.LoadStoreMeta(123, store)
+	ok, err = storage.LoadStore(123, store)
 	re.False(ok)
 	re.NoError(err)
-	re.NoError(storage.SaveStoreMeta(store))
+	re.NoError(storage.SaveStore(store))
 	newStore := &metapb.Store{}
-	ok, err = storage.LoadStoreMeta(123, newStore)
+	ok, err = storage.LoadStore(123, newStore)
 	re.True(ok)
 	re.NoError(err)
 	re.Equal(store, newStore)
@@ -87,7 +87,7 @@ func mustSaveStores(re *require.Assertions, s Storage, n int) []*metapb.Store {
 	}
 
 	for _, store := range stores {
-		re.NoError(s.SaveStoreMeta(store))
+		re.NoError(s.SaveStore(store))
 	}
 
 	return stores
@@ -218,7 +218,7 @@ func TestLoadRegions(t *testing.T) {
 	regions := mustSaveRegions(re, storage, n)
 	re.NoError(storage.LoadRegions(context.Background(), cache.CheckAndPutRegion))
 
-	re.Equal(n, cache.GetTotalRegionCount())
+	re.Equal(n, cache.GetRegionCount())
 	for _, region := range cache.GetMetaRegions() {
 		re.Equal(regions[region.GetId()], region)
 	}
@@ -255,7 +255,7 @@ func TestLoadRegionsToCache(t *testing.T) {
 	regions := mustSaveRegions(re, storage, n)
 	re.NoError(TryLoadRegionsOnce(context.Background(), storage, cache.CheckAndPutRegion))
 
-	re.Equal(n, cache.GetTotalRegionCount())
+	re.Equal(n, cache.GetRegionCount())
 	for _, region := range cache.GetMetaRegions() {
 		re.Equal(regions[region.GetId()], region)
 	}
@@ -263,7 +263,7 @@ func TestLoadRegionsToCache(t *testing.T) {
 	n = 20
 	mustSaveRegions(re, storage, n)
 	re.NoError(TryLoadRegionsOnce(context.Background(), storage, cache.CheckAndPutRegion))
-	re.Equal(n, cache.GetTotalRegionCount())
+	re.Equal(n, cache.GetRegionCount())
 }
 
 func TestLoadRegionsExceedRangeLimit(t *testing.T) {
@@ -275,7 +275,7 @@ func TestLoadRegionsExceedRangeLimit(t *testing.T) {
 	n := 1000
 	regions := mustSaveRegions(re, storage, n)
 	re.NoError(storage.LoadRegions(context.Background(), cache.CheckAndPutRegion))
-	re.Equal(n, cache.GetTotalRegionCount())
+	re.Equal(n, cache.GetRegionCount())
 	for _, region := range cache.GetMetaRegions() {
 		re.Equal(regions[region.GetId()], region)
 	}

@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	tsoRequestConcurrencyNumber = 3
+	tsoRequestConcurrencyNumber = 5
 	tsoRequestRound             = 30
 	tsoCount                    = 10
 )

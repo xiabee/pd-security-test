@@ -26,6 +26,7 @@ import (
 	"github.com/tikv/pd/pkg/core/storelimit"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/pkg/mock/mockconfig"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/schedule/hbstream"
 	"github.com/tikv/pd/pkg/schedule/labeler"
@@ -80,7 +81,7 @@ func (suite *mergeCheckerTestSuite) SetupTest() {
 	for _, region := range suite.regions {
 		suite.cluster.PutRegion(region)
 	}
-	suite.mc = NewMergeChecker(suite.ctx, suite.cluster, suite.cluster.GetCheckerConfig())
+	suite.mc = NewMergeChecker(suite.ctx, suite.cluster, suite.cluster.GetOpts())
 }
 
 func (suite *mergeCheckerTestSuite) TearDownTest() {
@@ -461,9 +462,9 @@ func (suite *mergeCheckerTestSuite) TestStoreLimitWithMerge() {
 		tc.PutRegion(region)
 	}
 
-	mc := NewMergeChecker(suite.ctx, tc, tc.GetCheckerConfig())
+	mc := NewMergeChecker(suite.ctx, tc, tc.GetOpts())
 	stream := hbstream.NewTestHeartbeatStreams(suite.ctx, tc.ID, tc, false /* no need to run */)
-	oc := operator.NewController(suite.ctx, tc.GetBasicCluster(), tc.GetSharedConfig(), stream)
+	oc := schedule.NewOperatorController(suite.ctx, tc, stream)
 
 	regions[2] = regions[2].Clone(
 		core.SetPeers([]*metapb.Peer{
@@ -484,7 +485,7 @@ func (suite *mergeCheckerTestSuite) TestStoreLimitWithMerge() {
 		suite.NotNil(ops)
 		suite.True(oc.AddOperator(ops...))
 		for _, op := range ops {
-			oc.RemoveOperator(op, operator.ExceedStoreLimit)
+			oc.RemoveOperator(op)
 		}
 	}
 	regions[2] = regions[2].Clone(
@@ -498,7 +499,7 @@ func (suite *mergeCheckerTestSuite) TestStoreLimitWithMerge() {
 		suite.NotNil(ops)
 		suite.True(oc.AddOperator(ops...))
 		for _, op := range ops {
-			oc.RemoveOperator(op, operator.ExceedStoreLimit)
+			oc.RemoveOperator(op)
 		}
 	}
 	{
@@ -530,7 +531,7 @@ func (suite *mergeCheckerTestSuite) TestCache() {
 		suite.cluster.PutRegion(region)
 	}
 
-	suite.mc = NewMergeChecker(suite.ctx, suite.cluster, suite.cluster.GetCheckerConfig())
+	suite.mc = NewMergeChecker(suite.ctx, suite.cluster, suite.cluster.GetOpts())
 
 	ops := suite.mc.Check(suite.regions[1])
 	suite.Nil(ops)

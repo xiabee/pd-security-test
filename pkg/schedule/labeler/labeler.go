@@ -16,6 +16,7 @@ package labeler
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -106,19 +107,18 @@ func (l *RegionLabeler) checkAndClearExpiredLabels() {
 func (l *RegionLabeler) loadRules() error {
 	var toDelete []string
 	err := l.storage.LoadRegionRules(func(k, v string) {
-		r, err := NewLabelRuleFromJSON([]byte(v))
-		if err != nil {
+		var r LabelRule
+		if err := json.Unmarshal([]byte(v), &r); err != nil {
 			log.Error("failed to unmarshal label rule value", zap.String("rule-key", k), zap.String("rule-value", v), errs.ZapError(errs.ErrLoadRule))
 			toDelete = append(toDelete, k)
 			return
 		}
-		err = r.checkAndAdjust()
-		if err != nil {
+		if err := r.checkAndAdjust(); err != nil {
 			log.Error("failed to adjust label rule", zap.String("rule-key", k), zap.String("rule-value", v), zap.Error(err))
 			toDelete = append(toDelete, k)
 			return
 		}
-		l.labelRules[r.ID] = r
+		l.labelRules[r.ID] = &r
 	})
 	if err != nil {
 		return err
@@ -298,7 +298,7 @@ func (l *RegionLabeler) GetRegionLabel(region *core.RegionInfo, key string) stri
 // ScheduleDisabled returns true if the region is lablelld with schedule-disabled.
 func (l *RegionLabeler) ScheduleDisabled(region *core.RegionInfo) bool {
 	v := l.GetRegionLabel(region, scheduleOptionLabel)
-	return strings.EqualFold(v, scheduleOptionValueDeny)
+	return strings.EqualFold(v, scheduleOptioonValueDeny)
 }
 
 // GetRegionLabels returns the labels of the region.
@@ -334,13 +334,4 @@ func (l *RegionLabeler) GetRegionLabels(region *core.RegionInfo) []*RegionLabel 
 		})
 	}
 	return result
-}
-
-// MakeKeyRanges is a helper function to make key ranges.
-func MakeKeyRanges(keys ...string) []interface{} {
-	var res []interface{}
-	for i := 0; i < len(keys); i += 2 {
-		res = append(res, map[string]interface{}{"start_key": keys[i], "end_key": keys[i+1]})
-	}
-	return res
 }

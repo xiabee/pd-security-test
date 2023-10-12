@@ -22,7 +22,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	sche "github.com/tikv/pd/pkg/schedule/core"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
 	"github.com/tikv/pd/pkg/storage/endpoint"
@@ -83,11 +83,11 @@ func (conf *scatterRangeSchedulerConfig) Persist() error {
 	name := conf.getSchedulerName()
 	conf.mu.RLock()
 	defer conf.mu.RUnlock()
-	data, err := EncodeConfig(conf)
+	data, err := schedule.EncodeConfig(conf)
 	if err != nil {
 		return err
 	}
-	return conf.storage.SaveSchedulerConfig(name, data)
+	return conf.storage.SaveScheduleConfig(name, data)
 }
 
 func (conf *scatterRangeSchedulerConfig) GetRangeName() string {
@@ -118,13 +118,13 @@ type scatterRangeScheduler struct {
 	*BaseScheduler
 	name          string
 	config        *scatterRangeSchedulerConfig
-	balanceLeader Scheduler
-	balanceRegion Scheduler
+	balanceLeader schedule.Scheduler
+	balanceRegion schedule.Scheduler
 	handler       http.Handler
 }
 
 // newScatterRangeScheduler creates a scheduler that balances the distribution of leaders and regions that in the specified key range.
-func newScatterRangeScheduler(opController *operator.Controller, config *scatterRangeSchedulerConfig) Scheduler {
+func newScatterRangeScheduler(opController *schedule.OperatorController, config *scatterRangeSchedulerConfig) schedule.Scheduler {
 	base := NewBaseScheduler(opController)
 
 	name := config.getSchedulerName()
@@ -138,11 +138,13 @@ func newScatterRangeScheduler(opController *operator.Controller, config *scatter
 			opController,
 			&balanceLeaderSchedulerConfig{Ranges: []core.KeyRange{core.NewKeyRange("", "")}},
 			WithBalanceLeaderName("scatter-range-leader"),
+			WithBalanceLeaderCounter(scatterRangeLeaderCounter),
 		),
 		balanceRegion: newBalanceRegionScheduler(
 			opController,
 			&balanceRegionSchedulerConfig{Ranges: []core.KeyRange{core.NewKeyRange("", "")}},
 			WithBalanceRegionName("scatter-range-region"),
+			WithBalanceRegionCounter(scatterRangeRegionCounter),
 		),
 	}
 	return scheduler
@@ -163,46 +165,33 @@ func (l *scatterRangeScheduler) GetType() string {
 func (l *scatterRangeScheduler) EncodeConfig() ([]byte, error) {
 	l.config.mu.RLock()
 	defer l.config.mu.RUnlock()
-	return EncodeConfig(l.config)
+	return schedule.EncodeConfig(l.config)
 }
 
-func (l *scatterRangeScheduler) ReloadConfig() error {
-	l.config.mu.Lock()
-	defer l.config.mu.Unlock()
-	cfgData, err := l.config.storage.LoadSchedulerConfig(l.GetName())
-	if err != nil {
-		return err
-	}
-	if len(cfgData) == 0 {
-		return nil
-	}
-	return DecodeConfig([]byte(cfgData), l.config)
-}
-
-func (l *scatterRangeScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
+func (l *scatterRangeScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
 	return l.allowBalanceLeader(cluster) || l.allowBalanceRegion(cluster)
 }
 
-func (l *scatterRangeScheduler) allowBalanceLeader(cluster sche.SchedulerCluster) bool {
-	allowed := l.OpController.OperatorCount(operator.OpRange) < cluster.GetSchedulerConfig().GetLeaderScheduleLimit()
+func (l *scatterRangeScheduler) allowBalanceLeader(cluster schedule.Cluster) bool {
+	allowed := l.OpController.OperatorCount(operator.OpRange) < cluster.GetOpts().GetLeaderScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(l.GetType(), operator.OpLeader.String()).Inc()
 	}
 	return allowed
 }
 
-func (l *scatterRangeScheduler) allowBalanceRegion(cluster sche.SchedulerCluster) bool {
-	allowed := l.OpController.OperatorCount(operator.OpRange) < cluster.GetSchedulerConfig().GetRegionScheduleLimit()
+func (l *scatterRangeScheduler) allowBalanceRegion(cluster schedule.Cluster) bool {
+	allowed := l.OpController.OperatorCount(operator.OpRange) < cluster.GetOpts().GetRegionScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(l.GetType(), operator.OpRegion.String()).Inc()
 	}
 	return allowed
 }
 
-func (l *scatterRangeScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (l *scatterRangeScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	scatterRangeCounter.Inc()
 	// isolate a new cluster according to the key range
-	c := genRangeCluster(cluster, l.config.GetStartKey(), l.config.GetEndKey())
+	c := schedule.GenRangeCluster(cluster, l.config.GetStartKey(), l.config.GetEndKey())
 	c.SetTolerantSizeRatio(2)
 	if l.allowBalanceLeader(cluster) {
 		ops, _ := l.balanceLeader.Schedule(c, false)

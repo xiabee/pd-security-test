@@ -72,8 +72,9 @@ func TestSaveLoadKeyspace(t *testing.T) {
 func TestLoadRangeKeyspaces(t *testing.T) {
 	re := require.New(t)
 	storage := NewStorageWithMemoryBackend()
-	keyspaces := makeTestKeyspaces()
+
 	// Store test keyspace meta.
+	keyspaces := makeTestKeyspaces()
 	err := storage.RunInTxn(context.TODO(), func(txn kv.Txn) error {
 		for _, keyspace := range keyspaces {
 			re.NoError(storage.SaveKeyspaceMeta(txn, keyspace))
@@ -81,26 +82,21 @@ func TestLoadRangeKeyspaces(t *testing.T) {
 		return nil
 	})
 	re.NoError(err)
-	// Test load range keyspaces.
-	err = storage.RunInTxn(context.TODO(), func(txn kv.Txn) error {
-		// Load all keyspaces.
-		loadedKeyspaces, err := storage.LoadRangeKeyspace(txn, keyspaces[0].GetId(), 0)
-		re.NoError(err)
-		re.ElementsMatch(keyspaces, loadedKeyspaces)
 
-		// Load keyspaces with id >= second test keyspace's id.
-		loadedKeyspaces2, err := storage.LoadRangeKeyspace(txn, keyspaces[1].GetId(), 0)
-		re.NoError(err)
-		re.ElementsMatch(keyspaces[1:], loadedKeyspaces2)
-
-		// Load keyspace with the smallest id.
-		loadedKeyspace3, err := storage.LoadRangeKeyspace(txn, 1, 1)
-		re.NoError(err)
-		re.ElementsMatch(keyspaces[:1], loadedKeyspace3)
-
-		return nil
-	})
+	// Load all keyspaces.
+	loadedKeyspaces, err := storage.LoadRangeKeyspace(keyspaces[0].GetId(), 0)
 	re.NoError(err)
+	re.ElementsMatch(keyspaces, loadedKeyspaces)
+
+	// Load keyspaces with id >= second test keyspace's id.
+	loadedKeyspaces2, err := storage.LoadRangeKeyspace(keyspaces[1].GetId(), 0)
+	re.NoError(err)
+	re.ElementsMatch(keyspaces[1:], loadedKeyspaces2)
+
+	// Load keyspace with the smallest id.
+	loadedKeyspace3, err := storage.LoadRangeKeyspace(1, 1)
+	re.NoError(err)
+	re.ElementsMatch(keyspaces[:1], loadedKeyspace3)
 }
 
 func makeTestKeyspaces() []*keyspacepb.KeyspaceMeta {

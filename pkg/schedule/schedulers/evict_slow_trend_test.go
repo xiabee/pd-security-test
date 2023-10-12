@@ -20,11 +20,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/storage"
 	"github.com/tikv/pd/pkg/utils/operatorutil"
@@ -34,9 +34,9 @@ type evictSlowTrendTestSuite struct {
 	suite.Suite
 	cancel context.CancelFunc
 	tc     *mockcluster.Cluster
-	es     Scheduler
-	bs     Scheduler
-	oc     *operator.Controller
+	es     schedule.Scheduler
+	bs     schedule.Scheduler
+	oc     *schedule.OperatorController
 }
 
 func TestEvictSlowTrendTestSuite(t *testing.T) {
@@ -69,9 +69,9 @@ func (suite *evictSlowTrendTestSuite) SetupTest() {
 
 	storage := storage.NewStorageWithMemoryBackend()
 	var err error
-	suite.es, err = CreateScheduler(EvictSlowTrendType, suite.oc, storage, ConfigSliceDecoder(EvictSlowTrendType, []string{}))
+	suite.es, err = schedule.CreateScheduler(EvictSlowTrendType, suite.oc, storage, schedule.ConfigSliceDecoder(EvictSlowTrendType, []string{}))
 	suite.NoError(err)
-	suite.bs, err = CreateScheduler(BalanceLeaderType, suite.oc, storage, ConfigSliceDecoder(BalanceLeaderType, []string{}))
+	suite.bs, err = schedule.CreateScheduler(BalanceLeaderType, suite.oc, storage, schedule.ConfigSliceDecoder(BalanceLeaderType, []string{}))
 	suite.NoError(err)
 }
 
@@ -79,48 +79,9 @@ func (suite *evictSlowTrendTestSuite) TearDownTest() {
 	suite.cancel()
 }
 
-func (suite *evictSlowTrendTestSuite) TestEvictSlowTrendBasicFuncs() {
-	es2, ok := suite.es.(*evictSlowTrendScheduler)
-	suite.True(ok)
-
-	suite.Equal(es2.conf.evictedStore(), uint64(0))
-	suite.Equal(es2.conf.candidate(), uint64(0))
-
-	// Test capture store 1
-	store := suite.tc.GetStore(1)
-	es2.conf.captureCandidate(store.GetID())
-	lastCapturedCandidate := es2.conf.lastCapturedCandidate()
-	suite.Equal(*lastCapturedCandidate, es2.conf.evictCandidate)
-	suite.Equal(es2.conf.candidateCapturedSecs(), uint64(0))
-	suite.Equal(es2.conf.lastCandidateCapturedSecs(), uint64(0))
-	suite.False(checkStoreReadyForRecover(store, es2.conf.lastCandidateCapturedSecs()))
-	recoverTS := lastCapturedCandidate.recoverTS
-	suite.True(recoverTS.After(lastCapturedCandidate.captureTS))
-	// Pop captured store 1 and mark it has recovered.
-	time.Sleep(50 * time.Millisecond)
-	suite.Equal(es2.conf.popCandidate(true), store.GetID())
-	suite.True(es2.conf.evictCandidate == (slowCandidate{}))
-	es2.conf.markCandidateRecovered()
-	lastCapturedCandidate = es2.conf.lastCapturedCandidate()
-	suite.True(lastCapturedCandidate.recoverTS.Compare(recoverTS) > 0)
-	suite.Equal(lastCapturedCandidate.storeID, store.GetID())
-
-	// Test capture another store 2
-	store = suite.tc.GetStore(2)
-	es2.conf.captureCandidate(store.GetID())
-	lastCapturedCandidate = es2.conf.lastCapturedCandidate()
-	suite.Equal(lastCapturedCandidate.storeID, uint64(1))
-	suite.Equal(es2.conf.candidate(), store.GetID())
-	suite.Equal(es2.conf.candidateCapturedSecs(), uint64(0))
-
-	suite.Equal(es2.conf.popCandidate(false), store.GetID())
-	suite.Equal(lastCapturedCandidate.storeID, uint64(1))
-}
-
 func (suite *evictSlowTrendTestSuite) TestEvictSlowTrend() {
 	es2, ok := suite.es.(*evictSlowTrendScheduler)
 	suite.True(ok)
-	suite.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/schedulers/transientRecoveryGap", "return(true)"))
 
 	// Set store-1 to slow status, generate evict candidate
 	suite.Equal(es2.conf.evictedStore(), uint64(0))
@@ -181,7 +142,7 @@ func (suite *evictSlowTrendTestSuite) TestEvictSlowTrend() {
 	suite.Zero(es2.conf.evictedStore())
 
 	// check the value from storage.
-	sches, vs, err := es2.conf.storage.LoadAllSchedulerConfigs()
+	sches, vs, err := es2.conf.storage.LoadAllScheduleConfig()
 	suite.NoError(err)
 	valueStr := ""
 	for id, sche := range sches {
@@ -195,59 +156,6 @@ func (suite *evictSlowTrendTestSuite) TestEvictSlowTrend() {
 	suite.NoError(err)
 	suite.Equal(es2.conf.EvictedStores, persistValue.EvictedStores)
 	suite.Zero(persistValue.evictedStore())
-	suite.NoError(failpoint.Disable("github.com/tikv/pd/pkg/schedule/schedulers/transientRecoveryGap"))
-}
-
-func (suite *evictSlowTrendTestSuite) TestEvictSlowTrendV2() {
-	es2, ok := suite.es.(*evictSlowTrendScheduler)
-	suite.True(ok)
-	suite.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/schedulers/transientRecoveryGap", "return(true)"))
-	suite.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/schedulers/mockRaftKV2", "return(true)"))
-
-	suite.Equal(es2.conf.evictedStore(), uint64(0))
-	suite.Equal(es2.conf.candidate(), uint64(0))
-	// Set store-1 to slow status, generate slow candidate but under faster limit
-	storeInfo := suite.tc.GetStore(1)
-	newStoreInfo := storeInfo.Clone(func(store *core.StoreInfo) {
-		store.GetStoreStats().SlowTrend = &pdpb.SlowTrend{
-			CauseValue:  5.0e6 + 100,
-			CauseRate:   1e7,
-			ResultValue: 3.0e3,
-			ResultRate:  -1e7,
-		}
-	})
-	suite.tc.PutStore(newStoreInfo)
-	suite.True(suite.es.IsScheduleAllowed(suite.tc))
-	ops, _ := suite.es.Schedule(suite.tc, false)
-	suite.Empty(ops)
-	suite.Equal(es2.conf.evictedStore(), uint64(0))
-	suite.Equal(es2.conf.candidate(), uint64(1))
-	suite.Equal(es2.conf.lastCandidateCapturedSecs(), uint64(0))
-	// Rescheduling to make it filtered by the related faster judgement.
-	ops, _ = suite.es.Schedule(suite.tc, false)
-	suite.Empty(ops)
-	suite.Equal(es2.conf.evictedStore(), uint64(0))
-	suite.Equal(es2.conf.candidate(), uint64(0))
-
-	// Set store-1 to slow status as network-io delays
-	storeInfo = suite.tc.GetStore(1)
-	newStoreInfo = storeInfo.Clone(func(store *core.StoreInfo) {
-		store.GetStoreStats().SlowTrend = &pdpb.SlowTrend{
-			CauseValue:  5.0e6,
-			CauseRate:   1e7,
-			ResultValue: 0,
-			ResultRate:  0,
-		}
-	})
-	suite.tc.PutStore(newStoreInfo)
-	suite.True(suite.es.IsScheduleAllowed(suite.tc))
-	ops, _ = suite.es.Schedule(suite.tc, false)
-	suite.Empty(ops)
-	suite.Equal(es2.conf.evictedStore(), uint64(0))
-	suite.Equal(es2.conf.lastCandidateCapturedSecs(), uint64(0))
-
-	suite.NoError(failpoint.Disable("github.com/tikv/pd/pkg/schedule/schedulers/mockRaftKV2"))
-	suite.NoError(failpoint.Disable("github.com/tikv/pd/pkg/schedule/schedulers/transientRecoveryGap"))
 }
 
 func (suite *evictSlowTrendTestSuite) TestEvictSlowTrendPrepare() {

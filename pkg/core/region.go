@@ -64,7 +64,6 @@ type RegionInfo struct {
 	readBytes         uint64
 	readKeys          uint64
 	approximateSize   int64
-	approximateKvSize int64
 	approximateKeys   int64
 	interval          *pdpb.TimeInterval
 	replicationStatus *replication_modepb.RegionReplicationStatus
@@ -143,31 +142,8 @@ const (
 	InitClusterRegionThreshold = 100
 )
 
-// RegionHeartbeatResponse is the interface for region heartbeat response.
-type RegionHeartbeatResponse interface {
-	GetTargetPeer() *metapb.Peer
-	GetRegionId() uint64
-}
-
-// RegionHeartbeatRequest is the interface for region heartbeat request.
-type RegionHeartbeatRequest interface {
-	GetTerm() uint64
-	GetRegion() *metapb.Region
-	GetLeader() *metapb.Peer
-	GetDownPeers() []*pdpb.PeerStats
-	GetPendingPeers() []*metapb.Peer
-	GetBytesWritten() uint64
-	GetKeysWritten() uint64
-	GetBytesRead() uint64
-	GetKeysRead() uint64
-	GetInterval() *pdpb.TimeInterval
-	GetQueryStats() *pdpb.QueryStats
-	GetApproximateSize() uint64
-	GetApproximateKeys() uint64
-}
-
 // RegionFromHeartbeat constructs a Region from region heartbeat.
-func RegionFromHeartbeat(heartbeat RegionHeartbeatRequest, opts ...RegionCreateOption) *RegionInfo {
+func RegionFromHeartbeat(heartbeat *pdpb.RegionHeartbeatRequest, opts ...RegionCreateOption) *RegionInfo {
 	// Convert unit to MB.
 	// If region isn't empty and less than 1MB, use 1MB instead.
 	// The size of empty region will be correct by the previous RegionInfo.
@@ -177,26 +153,21 @@ func RegionFromHeartbeat(heartbeat RegionHeartbeatRequest, opts ...RegionCreateO
 	}
 
 	region := &RegionInfo{
-		term:            heartbeat.GetTerm(),
-		meta:            heartbeat.GetRegion(),
-		leader:          heartbeat.GetLeader(),
-		downPeers:       heartbeat.GetDownPeers(),
-		pendingPeers:    heartbeat.GetPendingPeers(),
-		writtenBytes:    heartbeat.GetBytesWritten(),
-		writtenKeys:     heartbeat.GetKeysWritten(),
-		readBytes:       heartbeat.GetBytesRead(),
-		readKeys:        heartbeat.GetKeysRead(),
-		approximateSize: int64(regionSize),
-		approximateKeys: int64(heartbeat.GetApproximateKeys()),
-		interval:        heartbeat.GetInterval(),
-		queryStats:      heartbeat.GetQueryStats(),
-	}
-
-	// scheduling service doesn't need the following fields.
-	if h, ok := heartbeat.(*pdpb.RegionHeartbeatRequest); ok {
-		region.approximateKvSize = int64(h.GetApproximateKvSize() / units.MiB)
-		region.replicationStatus = h.GetReplicationStatus()
-		region.cpuUsage = h.GetCpuUsage()
+		term:              heartbeat.GetTerm(),
+		meta:              heartbeat.GetRegion(),
+		leader:            heartbeat.GetLeader(),
+		downPeers:         heartbeat.GetDownPeers(),
+		pendingPeers:      heartbeat.GetPendingPeers(),
+		cpuUsage:          heartbeat.GetCpuUsage(),
+		writtenBytes:      heartbeat.GetBytesWritten(),
+		writtenKeys:       heartbeat.GetKeysWritten(),
+		readBytes:         heartbeat.GetBytesRead(),
+		readKeys:          heartbeat.GetKeysRead(),
+		approximateSize:   int64(regionSize),
+		approximateKeys:   int64(heartbeat.GetApproximateKeys()),
+		interval:          heartbeat.GetInterval(),
+		replicationStatus: heartbeat.GetReplicationStatus(),
+		queryStats:        heartbeat.GetQueryStats(),
 	}
 
 	for _, opt := range opts {
@@ -259,7 +230,6 @@ func (r *RegionInfo) Clone(opts ...RegionCreateOption) *RegionInfo {
 		readBytes:         r.readBytes,
 		readKeys:          r.readKeys,
 		approximateSize:   r.approximateSize,
-		approximateKvSize: r.approximateKvSize,
 		approximateKeys:   r.approximateKeys,
 		interval:          typeutil.DeepClone(r.interval, TimeIntervalFactory),
 		replicationStatus: r.replicationStatus,
@@ -548,11 +518,6 @@ func (r *RegionInfo) GetStorePeerApproximateKeys(storeID uint64) int64 {
 		return 0
 	}
 	return r.approximateKeys
-}
-
-// GetApproximateKvSize returns the approximate kv size of the region.
-func (r *RegionInfo) GetApproximateKvSize() int64 {
-	return r.approximateKvSize
 }
 
 // GetApproximateKeys returns the approximate keys of the region.
@@ -1326,8 +1291,8 @@ func (r *RegionsInfo) GetStoreStats(storeID uint64) (leader, region, witness, le
 		r.learners[storeID].length(), r.pendingPeers[storeID].length(), r.leaders[storeID].TotalSize(), r.getStoreRegionSizeLocked(storeID)
 }
 
-// GetTotalRegionCount gets the total count of RegionInfo of regionMap
-func (r *RegionsInfo) GetTotalRegionCount() int {
+// GetRegionCount gets the total count of RegionInfo of regionMap
+func (r *RegionsInfo) GetRegionCount() int {
 	r.t.RLock()
 	defer r.t.RUnlock()
 	return len(r.regions)
@@ -1521,8 +1486,8 @@ func (r *RegionInfo) GetWriteLoads() []float64 {
 	}
 }
 
-// GetRegionCount returns the number of regions that overlap with the range [startKey, endKey).
-func (r *RegionsInfo) GetRegionCount(startKey, endKey []byte) int {
+// GetRangeCount returns the number of regions that overlap with the range [startKey, endKey).
+func (r *RegionsInfo) GetRangeCount(startKey, endKey []byte) int {
 	r.t.RLock()
 	defer r.t.RUnlock()
 	start := &regionItem{&RegionInfo{meta: &metapb.Region{StartKey: startKey}}}
@@ -1544,9 +1509,9 @@ func (r *RegionsInfo) GetRegionCount(startKey, endKey []byte) int {
 	return endIndex - startIndex + 1
 }
 
-// ScanRegions scans regions intersecting [start key, end key), returns at most
+// ScanRange scans regions intersecting [start key, end key), returns at most
 // `limit` regions. limit <= 0 means no limit.
-func (r *RegionsInfo) ScanRegions(startKey, endKey []byte, limit int) []*RegionInfo {
+func (r *RegionsInfo) ScanRange(startKey, endKey []byte, limit int) []*RegionInfo {
 	r.t.RLock()
 	defer r.t.RUnlock()
 	var res []*RegionInfo
@@ -1563,9 +1528,9 @@ func (r *RegionsInfo) ScanRegions(startKey, endKey []byte, limit int) []*RegionI
 	return res
 }
 
-// ScanRegionWithIterator scans from the first region containing or behind start key,
+// ScanRangeWithIterator scans from the first region containing or behind start key,
 // until iterator returns false.
-func (r *RegionsInfo) ScanRegionWithIterator(startKey []byte, iterator func(region *RegionInfo) bool) {
+func (r *RegionsInfo) ScanRangeWithIterator(startKey []byte, iterator func(region *RegionInfo) bool) {
 	r.t.RLock()
 	defer r.t.RUnlock()
 	r.tree.scanRange(startKey, iterator)
@@ -1686,11 +1651,15 @@ func DiffRegionKeyInfo(origin *RegionInfo, other *RegionInfo) string {
 }
 
 // String converts slice of bytes to string without copy.
-func String(b []byte) string {
+func String(b []byte) (s string) {
 	if len(b) == 0 {
 		return ""
 	}
-	return unsafe.String(unsafe.SliceData(b), len(b))
+	pbytes := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	pstring := (*reflect.StringHeader)(unsafe.Pointer(&s))
+	pstring.Data = pbytes.Data
+	pstring.Len = pbytes.Len
+	return
 }
 
 // ToUpperASCIIInplace bytes.ToUpper but zero-cost

@@ -17,7 +17,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"testing"
 	"time"
 
@@ -93,7 +92,7 @@ func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsTimeRange() {
 		StartTime: now.UnixNano() / int64(time.Millisecond),
 		EndTime:   now.Add(10*time.Second).UnixNano() / int64(time.Millisecond),
 	}
-	check := func(res []byte, statusCode int, _ http.Header) {
+	check := func(res []byte, statusCode int) {
 		suite.Equal(200, statusCode)
 		historyHotRegions := &storage.HistoryHotRegions{}
 		json.Unmarshal(res, historyHotRegions)
@@ -178,7 +177,7 @@ func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsIDAndTypes() {
 		IsLearners:     []bool{false},
 		EndTime:        now.Add(10*time.Minute).UnixNano() / int64(time.Millisecond),
 	}
-	check := func(res []byte, statusCode int, _ http.Header) {
+	check := func(res []byte, statusCode int) {
 		suite.Equal(200, statusCode)
 		historyHotRegions := &storage.HistoryHotRegions{}
 		json.Unmarshal(res, historyHotRegions)

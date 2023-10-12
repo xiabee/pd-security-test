@@ -19,15 +19,14 @@ import (
 
 	"github.com/smallnest/chanx"
 	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/utils/logutil"
 )
 
 const chanMaxLength = 6000000
 
 var (
-	readTaskMetrics  = hotCacheFlowQueueStatusGauge.WithLabelValues(utils.Read.String())
-	writeTaskMetrics = hotCacheFlowQueueStatusGauge.WithLabelValues(utils.Write.String())
+	readTaskMetrics  = hotCacheFlowQueueStatusGauge.WithLabelValues(Read.String())
+	writeTaskMetrics = hotCacheFlowQueueStatusGauge.WithLabelValues(Write.String())
 )
 
 // HotCache is a cache hold hot regions.
@@ -41,8 +40,8 @@ type HotCache struct {
 func NewHotCache(ctx context.Context) *HotCache {
 	w := &HotCache{
 		ctx:        ctx,
-		writeCache: NewHotPeerCache(ctx, utils.Write),
-		readCache:  NewHotPeerCache(ctx, utils.Read),
+		writeCache: NewHotPeerCache(ctx, Write),
+		readCache:  NewHotPeerCache(ctx, Read),
 	}
 	go w.updateItems(w.readCache.taskQueue, w.runReadTask)
 	go w.updateItems(w.writeCache.taskQueue, w.runWriteTask)
@@ -76,13 +75,13 @@ func (w *HotCache) CheckReadAsync(task FlowItemTask) bool {
 }
 
 // RegionStats returns hot items according to kind
-func (w *HotCache) RegionStats(kind utils.RWType, minHotDegree int) map[uint64][]*HotPeerStat {
+func (w *HotCache) RegionStats(kind RWType, minHotDegree int) map[uint64][]*HotPeerStat {
 	task := newCollectRegionStatsTask(minHotDegree)
 	var succ bool
 	switch kind {
-	case utils.Write:
+	case Write:
 		succ = w.CheckWriteAsync(task)
-	case utils.Read:
+	case Read:
 		succ = w.CheckReadAsync(task)
 	}
 	if !succ {
@@ -104,13 +103,13 @@ func (w *HotCache) IsRegionHot(region *core.RegionInfo, minHotDegree int) bool {
 }
 
 // GetHotPeerStat returns hot peer stat with specified regionID and storeID.
-func (w *HotCache) GetHotPeerStat(kind utils.RWType, regionID, storeID uint64) *HotPeerStat {
+func (w *HotCache) GetHotPeerStat(kind RWType, regionID, storeID uint64) *HotPeerStat {
 	task := newGetHotPeerStatTask(regionID, storeID)
 	var succ bool
 	switch kind {
-	case utils.Read:
+	case Read:
 		succ = w.CheckReadAsync(task)
-	case utils.Write:
+	case Write:
 		succ = w.CheckWriteAsync(task)
 	}
 	if !succ {
@@ -161,11 +160,11 @@ func (w *HotCache) runWriteTask(task FlowItemTask) {
 
 // Update updates the cache.
 // This is used for mockcluster, for test purpose.
-func (w *HotCache) Update(item *HotPeerStat, kind utils.RWType) {
+func (w *HotCache) Update(item *HotPeerStat, kind RWType) {
 	switch kind {
-	case utils.Write:
+	case Write:
 		w.writeCache.updateStat(item)
-	case utils.Read:
+	case Read:
 		w.readCache.updateStat(item)
 	}
 }
@@ -196,11 +195,11 @@ func (w *HotCache) ExpiredWriteItems(region *core.RegionInfo) []*HotPeerStat {
 
 // GetThresholds returns thresholds.
 // This is used for test purpose.
-func (w *HotCache) GetThresholds(kind utils.RWType, storeID uint64) []float64 {
+func (w *HotCache) GetThresholds(kind RWType, storeID uint64) []float64 {
 	switch kind {
-	case utils.Write:
+	case Write:
 		return w.writeCache.calcHotThresholds(storeID)
-	case utils.Read:
+	case Read:
 		return w.readCache.calcHotThresholds(storeID)
 	}
 	return nil

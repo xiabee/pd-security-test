@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/pingcap/errors"
+	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/utils/grpcutil"
@@ -101,15 +101,15 @@ func ConfigFromFile(c interface{}, path string) (*toml.MetaData, error) {
 	return &meta, errors.WithStack(err)
 }
 
-// AdjustCommandLineString adjusts the value of a string variable from command line flags.
-func AdjustCommandLineString(flagSet *pflag.FlagSet, v *string, name string) {
+// AdjustCommandlineString adjusts the value of a string variable from command line flags.
+func AdjustCommandlineString(flagSet *pflag.FlagSet, v *string, name string) {
 	if value, _ := flagSet.GetString(name); value != "" {
 		*v = value
 	}
 }
 
-// AdjustCommandLineBool adjusts the value of a bool variable from command line flags.
-func AdjustCommandLineBool(flagSet *pflag.FlagSet, v *bool, name string) {
+// AdjustCommandlineBool adjusts the value of a bool variable from command line flags.
+func AdjustCommandlineBool(flagSet *pflag.FlagSet, v *bool, name string) {
 	if value, _ := flagSet.GetBool(name); value {
 		*v = value
 	}

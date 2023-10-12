@@ -19,7 +19,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/core"
-	sche "github.com/tikv/pd/pkg/schedule/core"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
 	"github.com/tikv/pd/pkg/storage/endpoint"
@@ -46,14 +46,14 @@ type evictSlowStoreSchedulerConfig struct {
 
 func (conf *evictSlowStoreSchedulerConfig) Persist() error {
 	name := conf.getSchedulerName()
-	data, err := EncodeConfig(conf)
+	data, err := schedule.EncodeConfig(conf)
 	failpoint.Inject("persistFail", func() {
 		err = errors.New("fail to persist")
 	})
 	if err != nil {
 		return err
 	}
-	return conf.storage.SaveSchedulerConfig(name, data)
+	return conf.storage.SaveScheduleConfig(name, data)
 }
 
 func (conf *evictSlowStoreSchedulerConfig) getSchedulerName() string {
@@ -106,10 +106,10 @@ func (s *evictSlowStoreScheduler) GetType() string {
 }
 
 func (s *evictSlowStoreScheduler) EncodeConfig() ([]byte, error) {
-	return EncodeConfig(s.conf)
+	return schedule.EncodeConfig(s.conf)
 }
 
-func (s *evictSlowStoreScheduler) Prepare(cluster sche.SchedulerCluster) error {
+func (s *evictSlowStoreScheduler) Prepare(cluster schedule.Cluster) error {
 	evictStore := s.conf.evictStore()
 	if evictStore != 0 {
 		return cluster.SlowStoreEvicted(evictStore)
@@ -117,11 +117,11 @@ func (s *evictSlowStoreScheduler) Prepare(cluster sche.SchedulerCluster) error {
 	return nil
 }
 
-func (s *evictSlowStoreScheduler) Cleanup(cluster sche.SchedulerCluster) {
+func (s *evictSlowStoreScheduler) Cleanup(cluster schedule.Cluster) {
 	s.cleanupEvictLeader(cluster)
 }
 
-func (s *evictSlowStoreScheduler) prepareEvictLeader(cluster sche.SchedulerCluster, storeID uint64) error {
+func (s *evictSlowStoreScheduler) prepareEvictLeader(cluster schedule.Cluster, storeID uint64) error {
 	err := s.conf.setStoreAndPersist(storeID)
 	if err != nil {
 		log.Info("evict-slow-store-scheduler persist config failed", zap.Uint64("store-id", storeID))
@@ -131,7 +131,7 @@ func (s *evictSlowStoreScheduler) prepareEvictLeader(cluster sche.SchedulerClust
 	return cluster.SlowStoreEvicted(storeID)
 }
 
-func (s *evictSlowStoreScheduler) cleanupEvictLeader(cluster sche.SchedulerCluster) {
+func (s *evictSlowStoreScheduler) cleanupEvictLeader(cluster schedule.Cluster) {
 	evictSlowStore, err := s.conf.clearAndPersist()
 	if err != nil {
 		log.Info("evict-slow-store-scheduler persist config failed", zap.Uint64("store-id", evictSlowStore))
@@ -142,13 +142,13 @@ func (s *evictSlowStoreScheduler) cleanupEvictLeader(cluster sche.SchedulerClust
 	cluster.SlowStoreRecovered(evictSlowStore)
 }
 
-func (s *evictSlowStoreScheduler) schedulerEvictLeader(cluster sche.SchedulerCluster) []*operator.Operator {
+func (s *evictSlowStoreScheduler) schedulerEvictLeader(cluster schedule.Cluster) []*operator.Operator {
 	return scheduleEvictLeaderBatch(s.GetName(), s.GetType(), cluster, s.conf, EvictLeaderBatchSize)
 }
 
-func (s *evictSlowStoreScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
+func (s *evictSlowStoreScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
 	if s.conf.evictStore() != 0 {
-		allowed := s.OpController.OperatorCount(operator.OpLeader) < cluster.GetSchedulerConfig().GetLeaderScheduleLimit()
+		allowed := s.OpController.OperatorCount(operator.OpLeader) < cluster.GetOpts().GetLeaderScheduleLimit()
 		if !allowed {
 			operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpLeader.String()).Inc()
 		}
@@ -157,7 +157,7 @@ func (s *evictSlowStoreScheduler) IsScheduleAllowed(cluster sche.SchedulerCluste
 	return true
 }
 
-func (s *evictSlowStoreScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (s *evictSlowStoreScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	evictSlowStoreCounter.Inc()
 	var ops []*operator.Operator
 
@@ -210,7 +210,7 @@ func (s *evictSlowStoreScheduler) Schedule(cluster sche.SchedulerCluster, dryRun
 }
 
 // newEvictSlowStoreScheduler creates a scheduler that detects and evicts slow stores.
-func newEvictSlowStoreScheduler(opController *operator.Controller, conf *evictSlowStoreSchedulerConfig) Scheduler {
+func newEvictSlowStoreScheduler(opController *schedule.OperatorController, conf *evictSlowStoreSchedulerConfig) schedule.Scheduler {
 	base := NewBaseScheduler(opController)
 
 	s := &evictSlowStoreScheduler{

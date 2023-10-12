@@ -17,7 +17,6 @@ package labeler
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"time"
@@ -49,24 +48,14 @@ type LabelRule struct {
 	minExpire *time.Time
 }
 
-// NewLabelRuleFromJSON creates a label rule from the JSON data.
-func NewLabelRuleFromJSON(data []byte) (*LabelRule, error) {
-	lr := &LabelRule{}
-	err := json.Unmarshal(data, lr)
-	if err != nil {
-		return nil, err
-	}
-	return lr, nil
-}
-
 const (
 	// KeyRange is the rule type that specifies a list of key ranges.
 	KeyRange = "key-range"
 )
 
 const (
-	scheduleOptionLabel     = "schedule"
-	scheduleOptionValueDeny = "deny"
+	scheduleOptionLabel      = "schedule"
+	scheduleOptioonValueDeny = "deny"
 )
 
 // KeyRangeRule contains the start key and end key of the LabelRule.
@@ -182,7 +171,7 @@ func (rule *LabelRule) expireBefore(t time.Time) bool {
 	return rule.minExpire.Before(t)
 }
 
-// initKeyRangeRulesFromLabelRuleData init and adjust []KeyRangeRule from `LabelRule.Data`
+// initKeyRangeRulesFromLabelRuleData init and adjust []KeyRangeRule from `LabelRule.Data“
 func initKeyRangeRulesFromLabelRuleData(data interface{}) ([]*KeyRangeRule, error) {
 	rules, ok := data.([]interface{})
 	if !ok {

@@ -18,7 +18,6 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
@@ -26,13 +25,10 @@ import (
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/storage/kv"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/grpcutil"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/mvcc/mvccpb"
 	"go.uber.org/zap"
 )
-
-const watchLoopUnhealthyTimeout = 60 * time.Second
 
 // GetLeader gets the corresponding leader from etcd by given leaderPath (as the key).
 func GetLeader(c *clientv3.Client, leaderPath string) (*pdpb.Member, int64, error) {
@@ -123,7 +119,7 @@ func (ls *Leadership) Campaign(leaseTimeout int64, leaderData string, cmps ...cl
 	finalCmps = append(finalCmps, clientv3.Compare(clientv3.CreateRevision(ls.leaderKey), "=", 0))
 	resp, err := kv.NewSlowLogTxn(ls.client).
 		If(finalCmps...).
-		Then(clientv3.OpPut(ls.leaderKey, leaderData, clientv3.WithLease(newLease.ID.Load().(clientv3.LeaseID)))).
+		Then(clientv3.OpPut(ls.leaderKey, leaderData, clientv3.WithLease(newLease.ID))).
 		Commit()
 	log.Info("check campaign resp", zap.Any("resp", resp))
 	if err != nil {
@@ -134,7 +130,7 @@ func (ls *Leadership) Campaign(leaseTimeout int64, leaderData string, cmps ...cl
 		newLease.Close()
 		return errs.ErrEtcdTxnConflict.FastGenByArgs()
 	}
-	log.Info("write leaderData to leaderPath ok", zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
+	log.Info("write leaderData to leaderPath ok", zap.String("leaderPath", ls.leaderKey), zap.String("purpose", ls.purpose))
 	return nil
 }
 
@@ -176,7 +172,7 @@ func (ls *Leadership) DeleteLeaderKey() error {
 	}
 	// Reset the lease as soon as possible.
 	ls.Reset()
-	log.Info("delete the leader key ok", zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
+	log.Info("delete the leader key ok", zap.String("leaderPath", ls.leaderKey), zap.String("purpose", ls.purpose))
 	return nil
 }
 
@@ -186,145 +182,50 @@ func (ls *Leadership) Watch(serverCtx context.Context, revision int64) {
 	if ls == nil {
 		return
 	}
-
-	var (
-		watcher       clientv3.Watcher
-		watcherCancel context.CancelFunc
-	)
-	defer func() {
-		if watcherCancel != nil {
-			watcherCancel()
-		}
-		if watcher != nil {
-			watcher.Close()
-		}
-	}()
-
-	unhealthyTimeout := watchLoopUnhealthyTimeout
-	failpoint.Inject("fastTick", func() {
-		unhealthyTimeout = 5 * time.Second
-	})
-	ticker := time.NewTicker(etcdutil.RequestProgressInterval)
-	defer ticker.Stop()
-	lastReceivedResponseTime := time.Now()
-
+	watcher := clientv3.NewWatcher(ls.client)
+	defer watcher.Close()
+	ctx, cancel := context.WithCancel(serverCtx)
+	defer cancel()
+	// The revision is the revision of last modification on this key.
+	// If the revision is compacted, will meet required revision has been compacted error.
+	// In this case, use the compact revision to re-watch the key.
 	for {
 		failpoint.Inject("delayWatcher", nil)
-
-		// When etcd is not available, the watcher.Watch will block,
-		// so we check the etcd availability first.
-		if !etcdutil.IsHealthy(serverCtx, ls.client) {
-			if time.Since(lastReceivedResponseTime) > unhealthyTimeout {
-				log.Error("the connection is unhealthy for a while, exit leader watch loop",
-					zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-				return
-			}
-			log.Warn("the connection maybe unhealthy, retry to watch later",
-				zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-			select {
-			case <-serverCtx.Done():
-				log.Info("server is closed, exit leader watch loop",
-					zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-				return
-			case <-ticker.C:
-				continue // continue to check the etcd availability
-			}
-		}
-
-		if watcherCancel != nil {
-			watcherCancel()
-		}
-		if watcher != nil {
-			watcher.Close()
-		}
-		watcher = clientv3.NewWatcher(ls.client)
-		// In order to prevent a watch stream being stuck in a partitioned node,
-		// make sure to wrap context with "WithRequireLeader".
-		watcherCtx, cancel := context.WithCancel(clientv3.WithRequireLeader(serverCtx))
-		watcherCancel = cancel
-
-		done := make(chan struct{})
-		go grpcutil.CheckStream(watcherCtx, watcherCancel, done)
-		watchChan := watcher.Watch(watcherCtx, ls.leaderKey,
-			clientv3.WithRev(revision), clientv3.WithProgressNotify())
-		done <- struct{}{}
-		if err := watcherCtx.Err(); err != nil {
-			log.Warn("error occurred while creating watch channel and retry it later in watch loop", zap.Error(err),
-				zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-			select {
-			case <-serverCtx.Done():
-				log.Info("server is closed, exit leader watch loop",
-					zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-				return
-			case <-ticker.C:
-				continue
-			}
-		}
-		log.Info("watch channel is created", zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-
-	watchChanLoop:
-		select {
-		case <-serverCtx.Done():
-			log.Info("server is closed, exit leader watch loop",
-				zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-			return
-		case <-ticker.C:
-			// When etcd is not available, the watcher.RequestProgress will block,
-			// so we check the etcd availability first.
-			if !etcdutil.IsHealthy(serverCtx, ls.client) {
-				log.Warn("the connection maybe unhealthy, retry to watch later",
-					zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-				continue
-			}
-			// We need to request progress to etcd to prevent etcd hold the watchChan,
-			// note: the ctx must be from watcherCtx, otherwise, the RequestProgress request cannot be sent properly.
-			ctx, cancel := context.WithTimeout(watcherCtx, etcdutil.DefaultRequestTimeout)
-			if err := watcher.RequestProgress(ctx); err != nil {
-				log.Warn("failed to request progress in leader watch loop",
-					zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose), zap.Error(err))
-			}
-			cancel()
-			// If no message comes from an etcd watchChan for WatchChTimeoutDuration,
-			// create a new one and need not to reset lastReceivedResponseTime.
-			if time.Since(lastReceivedResponseTime) >= etcdutil.WatchChTimeoutDuration {
-				log.Warn("watch channel is blocked for a long time, recreating a new one",
-					zap.Duration("timeout", time.Since(lastReceivedResponseTime)),
-					zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-				continue
-			}
-		case wresp := <-watchChan:
-			failpoint.Inject("watchChanBlock", func() {
-				// watchChanBlock is used to simulate the case that the watchChan is blocked for a long time.
-				// So we discard these responses when the failpoint is injected.
-				failpoint.Goto("watchChanLoop")
-			})
-			lastReceivedResponseTime = time.Now()
+		rch := watcher.Watch(ctx, ls.leaderKey, clientv3.WithRev(revision))
+		for wresp := range rch {
+			// meet compacted error, use the compact revision.
 			if wresp.CompactRevision != 0 {
 				log.Warn("required revision has been compacted, use the compact revision",
-					zap.Int64("required-revision", revision), zap.Int64("compact-revision", wresp.CompactRevision),
-					zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
+					zap.Int64("required-revision", revision),
+					zap.Int64("compact-revision", wresp.CompactRevision))
 				revision = wresp.CompactRevision
-				continue
-			} else if err := wresp.Err(); err != nil { // wresp.Err() contains CompactRevision not equal to 0
-				log.Error("leadership watcher is canceled with", errs.ZapError(errs.ErrEtcdWatcherCancel, err),
-					zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
+				break
+			}
+			if wresp.Canceled {
+				log.Error("leadership watcher is canceled with",
+					zap.Int64("revision", revision),
+					zap.String("leader-key", ls.leaderKey),
+					zap.String("purpose", ls.purpose),
+					errs.ZapError(errs.ErrEtcdWatcherCancel, wresp.Err()))
 				return
-			} else if wresp.IsProgressNotify() {
-				log.Debug("watcher receives progress notify in watch loop",
-					zap.Int64("revision", revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
-				goto watchChanLoop
 			}
 
 			for _, ev := range wresp.Events {
 				if ev.Type == mvccpb.DELETE {
 					log.Info("current leadership is deleted",
-						zap.Int64("revision", wresp.Header.Revision), zap.String("leader-key", ls.leaderKey), zap.String("purpose", ls.purpose))
+						zap.String("leader-key", ls.leaderKey),
+						zap.String("purpose", ls.purpose))
 					return
 				}
 			}
-			revision = wresp.Header.Revision + 1
 		}
-		goto watchChanLoop // Use goto to avoid creating a new watchChan
+
+		select {
+		case <-ctx.Done():
+			// server closed, return
+			return
+		default:
+		}
 	}
 }
 

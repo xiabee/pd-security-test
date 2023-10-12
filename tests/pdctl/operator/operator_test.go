@@ -16,8 +16,6 @@ package operator_test
 
 import (
 	"context"
-	"encoding/hex"
-	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -79,17 +77,17 @@ func TestOperator(t *testing.T) {
 		},
 	}
 
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 	for _, store := range stores {
-		tests.MustPutStore(re, cluster, store)
+		pdctl.MustPutStore(re, leaderServer.GetServer(), store)
 	}
 
-	tests.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"), core.SetPeers([]*metapb.Peer{
+	pdctl.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"), core.SetPeers([]*metapb.Peer{
 		{Id: 1, StoreId: 1},
 		{Id: 2, StoreId: 2},
 	}))
-	tests.MustPutRegion(re, cluster, 3, 2, []byte("b"), []byte("d"), core.SetPeers([]*metapb.Peer{
+	pdctl.MustPutRegion(re, cluster, 3, 2, []byte("b"), []byte("c"), core.SetPeers([]*metapb.Peer{
 		{Id: 3, StoreId: 1},
 		{Id: 4, StoreId: 2},
 	}))
@@ -137,39 +135,31 @@ func TestOperator(t *testing.T) {
 			reset:  []string{"-u", pdAddr, "operator", "remove", "1"},
 		},
 		{
-			// operator add split-region <region_id> [--policy=scan|approximate|usekey] [--keys=xxx(xxx is hex encoded string)]
+			// operator add split-region <region_id> [--policy=scan|approximate]
 			cmd:    []string{"-u", pdAddr, "operator", "add", "split-region", "3", "--policy=scan"},
 			show:   []string{"-u", pdAddr, "operator", "show"},
 			expect: "split region with policy SCAN",
 			reset:  []string{"-u", pdAddr, "operator", "remove", "3"},
 		},
 		{
-			// operator add split-region <region_id> [--policy=scan|approximate|usekey] [--keys=xxx(xxx is hex encoded string)]
+			// operator add split-region <region_id> [--policy=scan|approximate]
 			cmd:    []string{"-u", pdAddr, "operator", "add", "split-region", "3", "--policy=approximate"},
 			show:   []string{"-u", pdAddr, "operator", "show"},
 			expect: "split region with policy APPROXIMATE",
 			reset:  []string{"-u", pdAddr, "operator", "remove", "3"},
 		},
 		{
-			// operator add split-region <region_id> [--policy=scan|approximate|usekey] [--keys=xxx(xxx is hex encoded string)]
+			// operator add split-region <region_id> [--policy=scan|approximate]
 			cmd:    []string{"-u", pdAddr, "operator", "add", "split-region", "3", "--policy=scan"},
 			show:   []string{"-u", pdAddr, "operator", "check", "3"},
 			expect: "split region with policy SCAN",
 			reset:  []string{"-u", pdAddr, "operator", "remove", "3"},
 		},
 		{
-			// operator add split-region <region_id> [--policy=scan|approximate|usekey] [--keys=xxx(xxx is hex encoded string)]
+			// operator add split-region <region_id> [--policy=scan|approximate]
 			cmd:    []string{"-u", pdAddr, "operator", "add", "split-region", "3", "--policy=approximate"},
 			show:   []string{"-u", pdAddr, "operator", "check", "3"},
 			expect: "status: RUNNING",
-			reset:  []string{"-u", pdAddr, "operator", "remove", "3"},
-		},
-		{
-			// operator add split-region <region_id> [--policy=scan|approximate|usekey] [--keys=xxx(xxx is hex encoded string)]
-			cmd: []string{"-u", pdAddr, "operator", "add", "split-region", "3", "--policy=usekey",
-				"--keys=" + hex.EncodeToString([]byte("c"))},
-			show:   []string{"-u", pdAddr, "operator", "show"},
-			expect: "split: region 3 use policy USEKEY and keys [" + hex.EncodeToString([]byte("c")) + "]",
 			reset:  []string{"-u", pdAddr, "operator", "remove", "3"},
 		},
 	}
@@ -251,33 +241,4 @@ func TestOperator(t *testing.T) {
 	re.Condition(func() bool {
 		return strings.Contains(string(output1), "Success!") || strings.Contains(string(output2), "Success!")
 	})
-}
-
-func TestForwardOperatorRequest(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cluster, err := tests.NewTestAPICluster(ctx, 1)
-	re.NoError(err)
-	re.NoError(cluster.RunInitialServers())
-	re.NotEmpty(cluster.WaitLeader())
-	server := cluster.GetLeaderServer()
-	re.NoError(server.BootstrapCluster())
-	backendEndpoints := server.GetAddr()
-	tc, err := tests.NewTestSchedulingCluster(ctx, 2, backendEndpoints)
-	re.NoError(err)
-	defer tc.Destroy()
-	tc.WaitForPrimaryServing(re)
-
-	cmd := pdctlCmd.GetRootCmd()
-	args := []string{"-u", backendEndpoints, "operator", "show"}
-	var slice []string
-	output, err := pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
-	re.NoError(json.Unmarshal(output, &slice))
-	re.Len(slice, 0)
-	args = []string{"-u", backendEndpoints, "operator", "check", "2"}
-	output, err = pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
-	re.Contains(string(output), "null")
 }

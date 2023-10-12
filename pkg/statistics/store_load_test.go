@@ -19,28 +19,27 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/core/constant"
-	"github.com/tikv/pd/pkg/statistics/utils"
 )
 
 func TestHistoryLoads(t *testing.T) {
 	re := require.New(t)
 	historySampleInterval = 0
-	historyLoads := NewStoreHistoryLoads(utils.DimLen)
+	historyLoads := NewStoreHistoryLoads(DimLen)
 	loads := []float64{1.0, 2.0, 3.0}
-	rwTp := utils.Read
+	rwTp := Read
 	kind := constant.LeaderKind
 	historyLoads.Add(1, rwTp, kind, loads)
 	re.Len(historyLoads.Get(1, rwTp, kind)[0], 10)
 
-	expectLoads := make([][]float64, utils.DimLen)
+	expectLoads := make([][]float64, DimLen)
 	for i := 0; i < len(loads); i++ {
 		expectLoads[i] = make([]float64, 10)
 	}
 	for i := 0; i < 10; i++ {
 		historyLoads.Add(1, rwTp, kind, loads)
-		expectLoads[utils.ByteDim][i] = 1.0
-		expectLoads[utils.KeyDim][i] = 2.0
-		expectLoads[utils.QueryDim][i] = 3.0
+		expectLoads[ByteDim][i] = 1.0
+		expectLoads[KeyDim][i] = 2.0
+		expectLoads[QueryDim][i] = 3.0
 	}
 	re.EqualValues(expectLoads, historyLoads.Get(1, rwTp, kind))
 }

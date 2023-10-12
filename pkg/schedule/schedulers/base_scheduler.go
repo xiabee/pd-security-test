@@ -21,8 +21,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	sche "github.com/tikv/pd/pkg/schedule/core"
-	"github.com/tikv/pd/pkg/schedule/operator"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 )
 
@@ -60,11 +59,11 @@ func intervalGrow(x time.Duration, maxInterval time.Duration, typ intervalGrowth
 
 // BaseScheduler is a basic scheduler for all other complex scheduler
 type BaseScheduler struct {
-	OpController *operator.Controller
+	OpController *schedule.OperatorController
 }
 
 // NewBaseScheduler returns a basic scheduler
-func NewBaseScheduler(opController *operator.Controller) *BaseScheduler {
+func NewBaseScheduler(opController *schedule.OperatorController) *BaseScheduler {
 	return &BaseScheduler{OpController: opController}
 }
 
@@ -79,13 +78,8 @@ func (s *BaseScheduler) GetMinInterval() time.Duration {
 
 // EncodeConfig encode config for the scheduler
 func (s *BaseScheduler) EncodeConfig() ([]byte, error) {
-	return EncodeConfig(nil)
+	return schedule.EncodeConfig(nil)
 }
-
-// ReloadConfig reloads the config from the storage.
-// By default, the scheduler does not need to reload the config
-// if it doesn't support the dynamic configuration.
-func (s *BaseScheduler) ReloadConfig() error { return nil }
 
 // GetNextInterval return the next interval for the scheduler
 func (s *BaseScheduler) GetNextInterval(interval time.Duration) time.Duration {
@@ -93,7 +87,7 @@ func (s *BaseScheduler) GetNextInterval(interval time.Duration) time.Duration {
 }
 
 // Prepare does some prepare work
-func (s *BaseScheduler) Prepare(cluster sche.SchedulerCluster) error { return nil }
+func (s *BaseScheduler) Prepare(cluster schedule.Cluster) error { return nil }
 
 // Cleanup does some cleanup work
-func (s *BaseScheduler) Cleanup(cluster sche.SchedulerCluster) {}
+func (s *BaseScheduler) Cleanup(cluster schedule.Cluster) {}

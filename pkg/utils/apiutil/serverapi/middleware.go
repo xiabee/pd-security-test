@@ -17,16 +17,19 @@ package serverapi
 import (
 	"net/http"
 	"net/url"
-	"strings"
 
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
 	"github.com/urfave/negroni"
 	"go.uber.org/zap"
+)
+
+// HTTP headers.
+const (
+	PDRedirectorHeader    = "PD-Redirector"
+	PDAllowFollowerHandle = "PD-Allow-follower-handle"
 )
 
 type runtimeServiceValidator struct {
@@ -78,7 +81,6 @@ type microserviceRedirectRule struct {
 	matchPath         string
 	targetPath        string
 	targetServiceName string
-	matchMethods      []string
 }
 
 // NewRedirector redirects request to the leader if needs to be handled in the leader.
@@ -94,13 +96,12 @@ func NewRedirector(s *server.Server, opts ...RedirectorOption) negroni.Handler {
 type RedirectorOption func(*redirector)
 
 // MicroserviceRedirectRule new a microservice redirect rule option
-func MicroserviceRedirectRule(matchPath, targetPath, targetServiceName string, methods []string) RedirectorOption {
+func MicroserviceRedirectRule(matchPath, targetPath, targetServiceName string) RedirectorOption {
 	return func(s *redirector) {
 		s.microserviceRedirectRules = append(s.microserviceRedirectRules, &microserviceRedirectRule{
 			matchPath,
 			targetPath,
 			targetServiceName,
-			methods,
 		})
 	}
 }
@@ -113,24 +114,13 @@ func (h *redirector) matchMicroServiceRedirectRules(r *http.Request) (bool, stri
 		return false, ""
 	}
 	for _, rule := range h.microserviceRedirectRules {
-		if strings.HasPrefix(r.URL.Path, rule.matchPath) && slice.Contains(rule.matchMethods, r.Method) {
+		if rule.matchPath == r.URL.Path {
 			addr, ok := h.s.GetServicePrimaryAddr(r.Context(), rule.targetServiceName)
 			if !ok || addr == "" {
-				log.Warn("failed to get the service primary addr when trying to match redirect rules",
+				log.Warn("failed to get the service primary addr when try match redirect rules",
 					zap.String("path", r.URL.Path))
 			}
-			// Extract parameters from the URL path
-			// e.g. r.URL.Path = /pd/api/v1/operators/1 (before redirect)
-			//      matchPath  = /pd/api/v1/operators
-			//      targetPath = /scheduling/api/v1/operators
-			//      r.URL.Path = /scheduling/api/v1/operator/1 (after redirect)
-			pathParams := strings.TrimPrefix(r.URL.Path, rule.matchPath)
-			pathParams = strings.Trim(pathParams, "/") // Remove leading and trailing '/'
-			if len(pathParams) > 0 {
-				r.URL.Path = rule.targetPath + "/" + pathParams
-			} else {
-				r.URL.Path = rule.targetPath
-			}
+			r.URL.Path = rule.targetPath
 			return true, addr
 		}
 	}
@@ -138,45 +128,30 @@ func (h *redirector) matchMicroServiceRedirectRules(r *http.Request) (bool, stri
 }
 
 func (h *redirector) ServeHTTP(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
-	redirectToMicroService, targetAddr := h.matchMicroServiceRedirectRules(r)
-	allowFollowerHandle := len(r.Header.Get(apiutil.PDAllowFollowerHandleHeader)) > 0
+	matchedFlag, targetAddr := h.matchMicroServiceRedirectRules(r)
+	allowFollowerHandle := len(r.Header.Get(PDAllowFollowerHandle)) > 0
 	isLeader := h.s.GetMember().IsLeader()
-	if !h.s.IsClosed() && (allowFollowerHandle || isLeader) && !redirectToMicroService {
+	if !h.s.IsClosed() && (allowFollowerHandle || isLeader) && !matchedFlag {
 		next(w, r)
 		return
 	}
 
 	// Prevent more than one redirection.
-	if name := r.Header.Get(apiutil.PDRedirectorHeader); len(name) != 0 {
+	if name := r.Header.Get(PDRedirectorHeader); len(name) != 0 {
 		log.Error("redirect but server is not leader", zap.String("from", name), zap.String("server", h.s.Name()), errs.ZapError(errs.ErrRedirect))
 		http.Error(w, apiutil.ErrRedirectToNotLeader, http.StatusInternalServerError)
 		return
 	}
 
-	r.Header.Set(apiutil.PDRedirectorHeader, h.s.Name())
-	forwardedIP, forwardedPort := apiutil.GetIPPortFromHTTPRequest(r)
-	if len(forwardedIP) > 0 {
-		r.Header.Add(apiutil.XForwardedForHeader, forwardedIP)
-	} else {
-		// Fallback if GetIPPortFromHTTPRequest failed to get the IP.
-		r.Header.Add(apiutil.XForwardedForHeader, r.RemoteAddr)
-	}
-	if len(forwardedPort) > 0 {
-		r.Header.Add(apiutil.XForwardedPortHeader, forwardedPort)
-	}
+	r.Header.Set(PDRedirectorHeader, h.s.Name())
 
 	var clientUrls []string
-	if redirectToMicroService {
+	if matchedFlag {
 		if len(targetAddr) == 0 {
 			http.Error(w, apiutil.ErrRedirectFailed, http.StatusInternalServerError)
 			return
 		}
 		clientUrls = append(clientUrls, targetAddr)
-		failpoint.Inject("checkHeader", func() {
-			// add a header to the response, this is not a failure injection
-			// it is used for testing, to check whether the request is forwarded to the micro service
-			w.Header().Set(apiutil.ForwardToMicroServiceHeader, "true")
-		})
 	} else {
 		leader := h.s.GetMember().GetLeader()
 		if leader == nil {

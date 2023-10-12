@@ -26,7 +26,6 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
-	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/storage"
 	"github.com/tikv/pd/pkg/utils/configutil"
 )
@@ -79,8 +78,8 @@ func TestReloadUpgrade(t *testing.T) {
 
 	// Simulate an old configuration that only contains 2 fields.
 	type OldConfig struct {
-		Schedule    sc.ScheduleConfig    `toml:"schedule" json:"schedule"`
-		Replication sc.ReplicationConfig `toml:"replication" json:"replication"`
+		Schedule    ScheduleConfig    `toml:"schedule" json:"schedule"`
+		Replication ReplicationConfig `toml:"replication" json:"replication"`
 	}
 	old := &OldConfig{
 		Schedule:    *opt.GetScheduleConfig(),
@@ -102,7 +101,7 @@ func TestReloadUpgrade2(t *testing.T) {
 
 	// Simulate an old configuration that does not contain ScheduleConfig.
 	type OldConfig struct {
-		Replication sc.ReplicationConfig `toml:"replication" json:"replication"`
+		Replication ReplicationConfig `toml:"replication" json:"replication"`
 	}
 	old := &OldConfig{
 		Replication: *opt.GetReplicationConfig(),
@@ -454,12 +453,12 @@ func TestConfigClone(t *testing.T) {
 
 	emptyConfigMetaData := configutil.NewConfigMetadata(nil)
 
-	schedule := &sc.ScheduleConfig{}
-	schedule.Adjust(emptyConfigMetaData, false)
+	schedule := &ScheduleConfig{}
+	schedule.adjust(emptyConfigMetaData, false)
 	re.Equal(schedule, schedule.Clone())
 
-	replication := &sc.ReplicationConfig{}
-	replication.Adjust(emptyConfigMetaData)
+	replication := &ReplicationConfig{}
+	replication.adjust(emptyConfigMetaData)
 	re.Equal(replication, replication.Clone())
 
 	pdServer := &PDServerConfig{}

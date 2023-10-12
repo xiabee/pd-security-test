@@ -185,7 +185,7 @@ func (r *Reservation) CancelAt(now time.Time) {
 
 // Reserve returns a Reservation that indicates how long the caller must wait before n events happen.
 // The Limiter takes this Reservation into account when allowing future events.
-// The returned Reservation's OK() method returns false if wait duration exceeds deadline.
+// The returned Reservation’s OK() method returns false if wait duration exceeds deadline.
 // Usage example:
 //
 //	r := lim.Reserve(time.Now(), 1)
@@ -285,7 +285,7 @@ type tokenBucketReconfigureArgs struct {
 	NotifyThreshold float64
 }
 
-// LimiterOption configures Limiter.
+// LimiterOption is used to modify the Limiter during construction.
 type LimiterOption func(*Limiter)
 
 func resetLowProcess() func(*Limiter) {
@@ -387,7 +387,7 @@ func (lim *Limiter) reserveN(now time.Time, n float64, maxFutureReserve time.Dur
 	return r
 }
 
-// ResetRemainingNotifyTimes resets the remaining notify times to 3.
+// ResetRemainingNotifyTimes resets remainingNotifyTimes.
 func (lim *Limiter) ResetRemainingNotifyTimes() {
 	lim.mu.Lock()
 	defer lim.mu.Unlock()

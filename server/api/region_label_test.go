@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/schedule/labeler"
+	"github.com/tikv/pd/pkg/utils/apiutil"
 	tu "github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
 )
@@ -85,7 +86,7 @@ func (suite *regionLabelTestSuite) TestGetSet() {
 	expects := []*labeler.LabelRule{rules[0], rules[2]}
 	suite.Equal(expects, resp)
 
-	err = tu.CheckDelete(testDialClient, suite.urlPrefix+"rule/"+url.QueryEscape("rule2/a/b"), tu.StatusOK(re))
+	_, err = apiutil.DoDelete(testDialClient, suite.urlPrefix+"rule/"+url.QueryEscape("rule2/a/b"))
 	suite.NoError(err)
 	err = tu.ReadGetJSON(re, testDialClient, suite.urlPrefix+"rules", &resp)
 	suite.NoError(err)
