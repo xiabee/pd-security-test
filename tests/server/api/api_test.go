@@ -33,13 +33,13 @@ import (
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/utils/apiutil/serverapi"
-	"github.com/tikv/pd/pkg/utils/testutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/apiutil/serverapi"
+	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	"go.uber.org/goleak"
@@ -477,7 +477,7 @@ func (suite *middlewareTestSuite) TestAuditLocalLogBackend() {
 	_, err = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	b, _ := os.ReadFile(tempStdoutFile.Name())
-	suite.Contains(string(b), "audit log")
+	suite.Contains(string(b), "Audit Log")
 	suite.NoError(err)
 	suite.Equal(http.StatusOK, resp.StatusCode)
 
@@ -622,10 +622,10 @@ func (suite *redirectorTestSuite) TestAllowFollowerHandle() {
 	addr := follower.GetAddr() + "/pd/api/v1/version"
 	request, err := http.NewRequest(http.MethodGet, addr, nil)
 	suite.NoError(err)
-	request.Header.Add(serverapi.PDAllowFollowerHandle, "true")
+	request.Header.Add(serverapi.AllowFollowerHandle, "true")
 	resp, err := dialClient.Do(request)
 	suite.NoError(err)
-	suite.Equal("", resp.Header.Get(serverapi.PDRedirectorHeader))
+	suite.Equal("", resp.Header.Get(serverapi.RedirectorHeader))
 	defer resp.Body.Close()
 	suite.Equal(http.StatusOK, resp.StatusCode)
 	_, err = io.ReadAll(resp.Body)
@@ -656,7 +656,7 @@ func (suite *redirectorTestSuite) TestNotLeader() {
 
 	// Request to follower with redirectorHeader will fail.
 	request.RequestURI = ""
-	request.Header.Set(serverapi.PDRedirectorHeader, "pd")
+	request.Header.Set(serverapi.RedirectorHeader, "pd")
 	resp1, err := dialClient.Do(request)
 	suite.NoError(err)
 	defer resp1.Body.Close()
@@ -901,7 +901,7 @@ func TestPreparingProgress(t *testing.T) {
 		pdctl.MustPutStore(re, leader.GetServer(), store)
 	}
 	for i := 0; i < 100; i++ {
-		pdctl.MustPutRegion(re, cluster, uint64(i+1), uint64(i)%3+1, []byte(fmt.Sprintf("p%d", i)), []byte(fmt.Sprintf("%d", i+1)), core.SetApproximateSize(10))
+		pdctl.MustPutRegion(re, cluster, uint64(i+1), uint64(i)%3+1, []byte(fmt.Sprintf("%20d", i)), []byte(fmt.Sprintf("%20d", i+1)), core.SetApproximateSize(10))
 	}
 	// no store preparing
 	output := sendRequest(re, leader.GetAddr()+"/pd/api/v1/stores/progress?action=preparing", http.MethodGet, http.StatusNotFound)
@@ -928,8 +928,8 @@ func TestPreparingProgress(t *testing.T) {
 	re.Equal(math.MaxFloat64, p.LeftSeconds)
 
 	// update size
-	pdctl.MustPutRegion(re, cluster, 1000, 4, []byte(fmt.Sprintf("%d", 1000)), []byte(fmt.Sprintf("%d", 1001)), core.SetApproximateSize(10))
-	pdctl.MustPutRegion(re, cluster, 1001, 5, []byte(fmt.Sprintf("%d", 1001)), []byte(fmt.Sprintf("%d", 1002)), core.SetApproximateSize(40))
+	pdctl.MustPutRegion(re, cluster, 1000, 4, []byte(fmt.Sprintf("%20d", 1000)), []byte(fmt.Sprintf("%20d", 1001)), core.SetApproximateSize(10))
+	pdctl.MustPutRegion(re, cluster, 1001, 5, []byte(fmt.Sprintf("%20d", 1001)), []byte(fmt.Sprintf("%20d", 1002)), core.SetApproximateSize(40))
 	time.Sleep(2 * time.Second)
 	output = sendRequest(re, leader.GetAddr()+"/pd/api/v1/stores/progress?action=preparing", http.MethodGet, http.StatusOK)
 	re.NoError(json.Unmarshal(output, &p))

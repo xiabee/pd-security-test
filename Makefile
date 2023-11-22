@@ -42,11 +42,11 @@ ifeq ($(PLUGIN), 1)
 	BUILD_TAGS += with_plugin
 endif
 
-LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDReleaseVersion=$(shell git describe --tags --dirty --always)"
-LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDBuildTS=$(shell date -u '+%Y-%m-%d %I:%M:%S')"
-LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDGitHash=$(shell git rev-parse HEAD)"
-LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDGitBranch=$(shell git rev-parse --abbrev-ref HEAD)"
-LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDEdition=$(PD_EDITION)"
+LDFLAGS += -X "$(PD_PKG)/server/versioninfo.PDReleaseVersion=$(shell git describe --tags --dirty --always)"
+LDFLAGS += -X "$(PD_PKG)/server/versioninfo.PDBuildTS=$(shell date -u '+%Y-%m-%d %I:%M:%S')"
+LDFLAGS += -X "$(PD_PKG)/server/versioninfo.PDGitHash=$(shell git rev-parse HEAD)"
+LDFLAGS += -X "$(PD_PKG)/server/versioninfo.PDGitBranch=$(shell git rev-parse --abbrev-ref HEAD)"
+LDFLAGS += -X "$(PD_PKG)/server/versioninfo.PDEdition=$(PD_EDITION)"
 
 ifneq ($(DASHBOARD), 0)
 	# Note: LDFLAGS must be evaluated lazily for these scripts to work correctly
@@ -57,8 +57,7 @@ ifneq ($(DASHBOARD), 0)
 	LDFLAGS += -X "github.com/pingcap/tidb-dashboard/pkg/utils/version.BuildGitHash=$(shell scripts/describe-dashboard.sh git-hash)"
 endif
 
-ROOT_PATH := $(shell pwd)
-BUILD_BIN_PATH := $(ROOT_PATH)/bin
+BUILD_BIN_PATH := $(shell pwd)/bin
 
 build: pd-server pd-ctl pd-recover
 
@@ -134,20 +133,20 @@ dashboard-replace-distro-info:
 PD_PKG := github.com/tikv/pd
 PACKAGES := $(shell go list ./...)
 
-GO_TOOLS_BIN_PATH := $(ROOT_PATH)/.tools/bin
+GO_TOOLS_BIN_PATH := $(shell pwd)/.tools/bin
 PATH := $(GO_TOOLS_BIN_PATH):$(PATH)
 SHELL := env PATH='$(PATH)' GOBIN='$(GO_TOOLS_BIN_PATH)' $(shell which bash)
 
 install-tools:
 	@mkdir -p $(GO_TOOLS_BIN_PATH)
-	@which golangci-lint >/dev/null 2>&1 || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GO_TOOLS_BIN_PATH) v1.51.2
+	@which golangci-lint >/dev/null 2>&1 || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GO_TOOLS_BIN_PATH) v1.48.0
 	@grep '_' tools.go | sed 's/"//g' | awk '{print $$2}' | xargs go install
 
 .PHONY: install-tools
 
 #### Static checks ####
 
-check: install-tools tidy static generate-errdoc check-plugin check-test
+check: install-tools static tidy generate-errdoc check-plugin check-test
 
 static: install-tools
 	@ echo "gofmt ..."
@@ -157,14 +156,14 @@ static: install-tools
 	@ echo "revive ..."
 	@ revive -formatter friendly -config revive.toml $(PACKAGES)
 
-	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) static && cd $(ROOT_PATH) > /dev/null; done
+	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) static && cd - > /dev/null; done
 
 tidy:
 	@ go mod tidy
 	git diff go.mod go.sum | cat
 	git diff --quiet go.mod go.sum
 
-	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) tidy && cd $(ROOT_PATH) > /dev/null; done
+	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) tidy && cd - > /dev/null; done
 
 generate-errdoc: install-tools
 	@echo "generating errors.toml..."
@@ -220,7 +219,12 @@ basic-test: install-tools
 ci-test-job: install-tools dashboard-ui
 	@$(FAILPOINT_ENABLE)
 	CGO_ENABLED=1 go test -timeout=15m -tags deadlock -race -covermode=atomic -coverprofile=covprofile -coverpkg=./... $(shell ./scripts/ci-subtask.sh $(JOB_COUNT) $(JOB_INDEX))
-	@ for mod in $(shell ./scripts/ci-subtask.sh $(JOB_COUNT) $(JOB_INDEX) 1); do cd $$mod && $(MAKE) ci-test-job && cd $(ROOT_PATH) > /dev/null && cat $$mod/covprofile >> covprofile; done	
+	@$(FAILPOINT_DISABLE)
+
+ci-test-job-submod: install-tools dashboard-ui
+	@$(FAILPOINT_ENABLE)
+	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) ci-test-job && cd - > /dev/null && cat $$mod/covprofile >> covprofile; done
+	@$(FAILPOINT_DISABLE)
 
 TSO_INTEGRATION_TEST_PKGS := $(PD_PKG)/tests/server/tso
 

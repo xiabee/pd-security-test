@@ -23,14 +23,13 @@ import (
 
 	httpSwagger "github.com/swaggo/http-swagger"
 	_ "github.com/tikv/pd/docs/swagger"
-	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
 )
 
 const swaggerPrefix = "/swagger/"
 
 var (
-	swaggerServiceGroup = apiutil.APIServiceGroup{
+	swaggerServiceGroup = server.ServiceGroup{
 		Name:       "swagger",
 		Version:    "v1",
 		IsCore:     false,
@@ -44,7 +43,7 @@ func Enabled() bool {
 }
 
 // NewHandler creates a HTTP handler for Swagger.
-func NewHandler(context.Context, *server.Server) (http.Handler, apiutil.APIServiceGroup, error) {
+func NewHandler(context.Context, *server.Server) (http.Handler, server.ServiceGroup, error) {
 	swaggerHandler := http.NewServeMux()
 	swaggerHandler.Handle(swaggerPrefix, httpSwagger.Handler())
 	return swaggerHandler, swaggerServiceGroup, nil
