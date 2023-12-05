@@ -8,71 +8,70 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package operator
 
 import (
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestCreate(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testOpStatusTrackerSuite{})
+
+type testOpStatusTrackerSuite struct{}
+
+func (s *testOpStatusTrackerSuite) TestCreate(c *C) {
 	before := time.Now()
 	trk := NewOpStatusTracker()
-	re.Equal(CREATED, trk.Status())
-	re.Equal(trk.ReachTimeOf(CREATED), trk.ReachTime())
-	checkTimeOrder(re, before, trk.ReachTime(), time.Now())
-	checkReachTime(re, &trk, CREATED)
+	c.Assert(trk.Status(), Equals, CREATED)
+	c.Assert(trk.ReachTime(), DeepEquals, trk.ReachTimeOf(CREATED))
+	checkTimeOrder(c, before, trk.ReachTime(), time.Now())
+	checkReachTime(c, &trk, CREATED)
 }
 
-func TestNonEndTrans(t *testing.T) {
-	re := require.New(t)
+func (s *testOpStatusTrackerSuite) TestNonEndTrans(c *C) {
 	{
 		trk := NewOpStatusTracker()
-		checkInvalidTrans(re, &trk, SUCCESS, REPLACED, TIMEOUT)
-		checkValidTrans(re, &trk, STARTED)
-		checkInvalidTrans(re, &trk, EXPIRED)
-		checkValidTrans(re, &trk, SUCCESS)
-		checkReachTime(re, &trk, CREATED, STARTED, SUCCESS)
+		checkInvalidTrans(c, &trk, SUCCESS, REPLACED, TIMEOUT)
+		checkValidTrans(c, &trk, STARTED)
+		checkInvalidTrans(c, &trk, EXPIRED)
+		checkValidTrans(c, &trk, SUCCESS)
+		checkReachTime(c, &trk, CREATED, STARTED, SUCCESS)
 	}
 	{
 		trk := NewOpStatusTracker()
-		checkValidTrans(re, &trk, CANCELED)
-		checkReachTime(re, &trk, CREATED, CANCELED)
+		checkValidTrans(c, &trk, CANCELED)
+		checkReachTime(c, &trk, CREATED, CANCELED)
 	}
 	{
 		trk := NewOpStatusTracker()
-		checkValidTrans(re, &trk, STARTED)
-		checkValidTrans(re, &trk, CANCELED)
-		checkReachTime(re, &trk, CREATED, STARTED, CANCELED)
+		checkValidTrans(c, &trk, STARTED)
+		checkValidTrans(c, &trk, CANCELED)
+		checkReachTime(c, &trk, CREATED, STARTED, CANCELED)
 	}
 	{
 		trk := NewOpStatusTracker()
-		checkValidTrans(re, &trk, STARTED)
-		checkValidTrans(re, &trk, REPLACED)
-		checkReachTime(re, &trk, CREATED, STARTED, REPLACED)
+		checkValidTrans(c, &trk, STARTED)
+		checkValidTrans(c, &trk, REPLACED)
+		checkReachTime(c, &trk, CREATED, STARTED, REPLACED)
 	}
 	{
 		trk := NewOpStatusTracker()
-		checkValidTrans(re, &trk, EXPIRED)
-		checkReachTime(re, &trk, CREATED, EXPIRED)
+		checkValidTrans(c, &trk, EXPIRED)
+		checkReachTime(c, &trk, CREATED, EXPIRED)
 	}
 	{
 		trk := NewOpStatusTracker()
-		checkValidTrans(re, &trk, STARTED)
-		checkValidTrans(re, &trk, TIMEOUT)
-		checkReachTime(re, &trk, CREATED, STARTED, TIMEOUT)
+		checkValidTrans(c, &trk, STARTED)
+		checkValidTrans(c, &trk, TIMEOUT)
+		checkReachTime(c, &trk, CREATED, STARTED, TIMEOUT)
 	}
 }
 
-func TestEndStatusTrans(t *testing.T) {
-	re := require.New(t)
+func (s *testOpStatusTrackerSuite) TestEndStatusTrans(c *C) {
 	allStatus := make([]OpStatus, 0, statusCount)
 	for st := OpStatus(0); st < statusCount; st++ {
 		allStatus = append(allStatus, st)
@@ -80,101 +79,106 @@ func TestEndStatusTrans(t *testing.T) {
 	for from := firstEndStatus; from < statusCount; from++ {
 		trk := NewOpStatusTracker()
 		trk.current = from
-		re.True(trk.IsEnd())
-		checkInvalidTrans(re, &trk, allStatus...)
+		c.Assert(trk.IsEnd(), IsTrue)
+		checkInvalidTrans(c, &trk, allStatus...)
 	}
 }
 
-func TestCheckExpired(t *testing.T) {
-	re := require.New(t)
+func (s *testOpStatusTrackerSuite) TestCheckExpired(c *C) {
 	{
 		// Not expired
 		before := time.Now()
 		trk := NewOpStatusTracker()
 		after := time.Now()
-		re.False(trk.CheckExpired(10 * time.Second))
-		re.Equal(CREATED, trk.Status())
-		checkTimeOrder(re, before, trk.ReachTime(), after)
+		c.Assert(trk.CheckExpired(10*time.Second), IsFalse)
+		c.Assert(trk.Status(), Equals, CREATED)
+		checkTimeOrder(c, before, trk.ReachTime(), after)
 	}
 	{
 		// Expired but status not changed
 		trk := NewOpStatusTracker()
 		trk.setTime(CREATED, time.Now().Add(-10*time.Second))
-		re.True(trk.CheckExpired(5 * time.Second))
-		re.Equal(EXPIRED, trk.Status())
+		c.Assert(trk.CheckExpired(5*time.Second), IsTrue)
+		c.Assert(trk.Status(), Equals, EXPIRED)
 	}
 	{
 		// Expired and status changed
 		trk := NewOpStatusTracker()
 		before := time.Now()
-		re.True(trk.To(EXPIRED))
+		c.Assert(trk.To(EXPIRED), IsTrue)
 		after := time.Now()
-		re.True(trk.CheckExpired(0))
-		re.Equal(EXPIRED, trk.Status())
-		checkTimeOrder(re, before, trk.ReachTime(), after)
+		c.Assert(trk.CheckExpired(0), IsTrue)
+		c.Assert(trk.Status(), Equals, EXPIRED)
+		checkTimeOrder(c, before, trk.ReachTime(), after)
 	}
 }
 
-func TestCheckStepTimeout(t *testing.T) {
-	re := require.New(t)
-	testdata := []struct {
-		step   OpStep
-		start  time.Time
-		status OpStatus
-	}{{
-		step:   AddLearner{},
-		start:  time.Now().Add(-(SlowStepWaitTime - time.Second)),
-		status: STARTED,
-	}, {
-		step:   AddLearner{},
-		start:  time.Now().Add(-(SlowStepWaitTime + time.Second)),
-		status: TIMEOUT,
-	}}
-
-	for _, v := range testdata {
+func (s *testOpStatusTrackerSuite) TestCheckTimeout(c *C) {
+	{
+		// Not timeout
+		trk := NewOpStatusTracker()
+		before := time.Now()
+		c.Assert(trk.To(STARTED), IsTrue)
+		after := time.Now()
+		c.Assert(trk.CheckTimeout(10*time.Second), IsFalse)
+		c.Assert(trk.Status(), Equals, STARTED)
+		checkTimeOrder(c, before, trk.ReachTime(), after)
+	}
+	{
+		// Timeout but status not changed
+		trk := NewOpStatusTracker()
+		c.Assert(trk.To(STARTED), IsTrue)
+		trk.setTime(STARTED, time.Now().Add(-10*time.Second))
+		c.Assert(trk.CheckTimeout(5*time.Second), IsTrue)
+		c.Assert(trk.Status(), Equals, TIMEOUT)
+	}
+	{
 		// Timeout and status changed
 		trk := NewOpStatusTracker()
-		trk.To(STARTED)
-		trk.reachTimes[STARTED] = v.start
-		re.Equal(v.status == TIMEOUT, trk.CheckTimeout(SlowStepWaitTime))
-		re.Equal(v.status, trk.Status())
+		c.Assert(trk.To(STARTED), IsTrue)
+		before := time.Now()
+		c.Assert(trk.To(TIMEOUT), IsTrue)
+		after := time.Now()
+		c.Assert(trk.CheckTimeout(0), IsTrue)
+		c.Assert(trk.Status(), Equals, TIMEOUT)
+		checkTimeOrder(c, before, trk.ReachTime(), after)
 	}
 }
 
-func checkTimeOrder(re *require.Assertions, t1, t2, t3 time.Time) {
-	re.True(t1.Before(t2))
-	re.True(t3.After(t2))
+func checkTimeOrder(c *C, t1, t2, t3 time.Time) {
+	c.Assert(t1.Before(t2), IsTrue)
+	c.Assert(t3.After(t2), IsTrue)
 }
 
-func checkValidTrans(re *require.Assertions, trk *OpStatusTracker, st OpStatus) {
+func checkValidTrans(c *C, trk *OpStatusTracker, st OpStatus) {
 	before := time.Now()
-	re.True(trk.To(st))
-	re.Equal(st, trk.Status())
-	re.Equal(trk.ReachTimeOf(st), trk.ReachTime())
-	checkTimeOrder(re, before, trk.ReachTime(), time.Now())
+	c.Assert(trk.To(st), IsTrue)
+	c.Assert(trk.Status(), Equals, st)
+	c.Assert(trk.ReachTime(), DeepEquals, trk.ReachTimeOf(st))
+	checkTimeOrder(c, before, trk.ReachTime(), time.Now())
 }
 
-func checkInvalidTrans(re *require.Assertions, trk *OpStatusTracker, sts ...OpStatus) {
+func checkInvalidTrans(c *C, trk *OpStatusTracker, sts ...OpStatus) {
 	origin := trk.Status()
 	originTime := trk.ReachTime()
 	sts = append(sts, statusCount, statusCount+1, statusCount+10)
 	for _, st := range sts {
-		re.False(trk.To(st))
-		re.Equal(origin, trk.Status())
-		re.Equal(originTime, trk.ReachTime())
+		c.Assert(trk.To(st), IsFalse)
+		c.Assert(trk.Status(), Equals, origin)
+		c.Assert(trk.ReachTime(), DeepEquals, originTime)
 	}
 }
 
-func checkReachTime(re *require.Assertions, trk *OpStatusTracker, reached ...OpStatus) {
+func checkReachTime(c *C, trk *OpStatusTracker, reached ...OpStatus) {
 	reachedMap := make(map[OpStatus]struct{}, len(reached))
 	for _, st := range reached {
-		re.False(trk.ReachTimeOf(st).IsZero())
+		c.Assert(trk.ReachTimeOf(st).IsZero(), IsFalse)
 		reachedMap[st] = struct{}{}
 	}
 	for st := OpStatus(0); st <= statusCount+10; st++ {
 		if _, ok := reachedMap[st]; ok {
 			continue
 		}
-		re.True(trk.ReachTimeOf(st).IsZero())
+		c.Assert(trk.ReachTimeOf(st).IsZero(), IsTrue)
 	}
 }

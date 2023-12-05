@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -51,8 +50,6 @@ func (s PeerRoleType) MetaPeerRole() metapb.PeerRole {
 // Rule is the placement rule that can be checked against a region. When
 // applying rules (apply means schedule regions to match selected rules), the
 // apply order is defined by the tuple [GroupIndex, GroupID, Index, ID].
-//
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type Rule struct {
 	GroupID          string            `json:"group_id"`                    // mark the source that add the rule
 	ID               string            `json:"id"`                          // unique ID within a group
@@ -63,14 +60,12 @@ type Rule struct {
 	EndKey           []byte            `json:"-"`                           // range end key
 	EndKeyHex        string            `json:"end_key"`                     // hex format end key, for marshal/unmarshal
 	Role             PeerRoleType      `json:"role"`                        // expected role of the peers
-	IsWitness        bool              `json:"is_witness"`                  // when it is true, it means the role is also a witness
 	Count            int               `json:"count"`                       // expected count of the peers
 	LabelConstraints []LabelConstraint `json:"label_constraints,omitempty"` // used to select stores to place peers
 	LocationLabels   []string          `json:"location_labels,omitempty"`   // used to make peers isolated physically
 	IsolationLevel   string            `json:"isolation_level,omitempty"`   // used to isolate replicas explicitly and forcibly
-	Version          uint64            `json:"version,omitempty"`           // only set at runtime, add 1 each time rules updated, begin from 0.
-	CreateTimestamp  uint64            `json:"create_timestamp,omitempty"`  // only set at runtime, recorded rule create timestamp
-	group            *RuleGroup        // only set at runtime, no need to {,un}marshal or persist.
+
+	group *RuleGroup // only set at runtime, no need to {,un}marshal or persist.
 }
 
 func (r *Rule) String() string {
@@ -105,7 +100,6 @@ func (r *Rule) groupIndex() int {
 }
 
 // RuleGroup defines properties of a rule group.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type RuleGroup struct {
 	ID       string `json:"id,omitempty"`
 	Index    int    `json:"index,omitempty"`
@@ -181,7 +175,6 @@ func prepareRulesForApply(rules []*Rule) []*Rule {
 }
 
 // GroupBundle represents a rule group and all rules belong to the group.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type GroupBundle struct {
 	ID       string  `json:"group_id"`
 	Index    int     `json:"group_index"`

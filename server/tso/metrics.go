@@ -8,18 +8,12 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package tso
 
 import "github.com/prometheus/client_golang/prometheus"
-
-const (
-	dcLabel   = "dc"
-	typeLabel = "type"
-)
 
 var (
 	tsoCounter = prometheus.NewCounterVec(
@@ -28,7 +22,7 @@ var (
 			Subsystem: "tso",
 			Name:      "events",
 			Help:      "Counter of tso events",
-		}, []string{typeLabel, dcLabel})
+		}, []string{"type", "dc"})
 
 	tsoGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -36,15 +30,7 @@ var (
 			Subsystem: "cluster",
 			Name:      "tso",
 			Help:      "Record of tso metadata.",
-		}, []string{typeLabel, dcLabel})
-
-	tsoGap = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "cluster",
-			Name:      "tso_gap_millionseconds",
-			Help:      "The minimal (non-zero) TSO gap for each DC.",
-		}, []string{dcLabel})
+		}, []string{"type", "dc"})
 
 	tsoAllocatorRole = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -52,12 +38,11 @@ var (
 			Subsystem: "tso",
 			Name:      "role",
 			Help:      "Indicate the PD server role info, whether it's a TSO allocator.",
-		}, []string{dcLabel})
+		}, []string{"dc"})
 )
 
 func init() {
 	prometheus.MustRegister(tsoCounter)
 	prometheus.MustRegister(tsoGauge)
-	prometheus.MustRegister(tsoGap)
 	prometheus.MustRegister(tsoAllocatorRole)
 }

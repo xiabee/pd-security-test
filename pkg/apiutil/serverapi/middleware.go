@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -18,11 +17,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/config"
 	"github.com/urfave/negroni"
 	"go.uber.org/zap"
 )
@@ -31,6 +31,7 @@ import (
 const (
 	RedirectorHeader    = "PD-Redirector"
 	AllowFollowerHandle = "PD-Allow-follower-handle"
+	FollowerHandle      = "PD-Follower-handle"
 )
 
 const (
@@ -59,6 +60,7 @@ func (h *runtimeServiceValidator) ServeHTTP(w http.ResponseWriter, r *http.Reque
 
 // IsServiceAllowed checks the service through the path.
 func IsServiceAllowed(s *server.Server, group server.ServiceGroup) bool {
+
 	// for core path
 	if group.IsCore {
 		return true
@@ -90,6 +92,9 @@ func (h *redirector) ServeHTTP(w http.ResponseWriter, r *http.Request, next http
 	allowFollowerHandle := len(r.Header.Get(AllowFollowerHandle)) > 0
 	isLeader := h.s.GetMember().IsLeader()
 	if !h.s.IsClosed() && (allowFollowerHandle || isLeader) {
+		if !isLeader {
+			w.Header().Add(FollowerHandle, "true")
+		}
 		next(w, r)
 		return
 	}
@@ -108,16 +113,11 @@ func (h *redirector) ServeHTTP(w http.ResponseWriter, r *http.Request, next http
 		http.Error(w, "no leader", http.StatusServiceUnavailable)
 		return
 	}
-	clientUrls := leader.GetClientUrls()
-	urls := make([]url.URL, 0, len(clientUrls))
-	for _, item := range clientUrls {
-		u, err := url.Parse(item)
-		if err != nil {
-			http.Error(w, errs.ErrURLParse.Wrap(err).GenWithStackByCause().Error(), http.StatusInternalServerError)
-			return
-		}
 
-		urls = append(urls, *u)
+	urls, err := config.ParseUrls(strings.Join(leader.GetClientUrls(), ","))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	client := h.s.GetHTTPClient()
 	NewCustomReverseProxies(client, urls).ServeHTTP(w, r)
@@ -167,6 +167,7 @@ func (p *customReverseProxies) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 		return
 	}
+
 	http.Error(w, errRedirectFailed, http.StatusInternalServerError)
 }
 
@@ -174,9 +175,18 @@ func copyHeader(dst, src http.Header) {
 	for k, vv := range src {
 		values := dst[k]
 		for _, v := range vv {
-			if !slice.Contains(values, v) {
+			if !contains(values, v) {
 				dst.Add(k, v)
 			}
 		}
 	}
+}
+
+func contains(s []string, x string) bool {
+	for _, n := range s {
+		if x == n {
+			return true
+		}
+	}
+	return false
 }

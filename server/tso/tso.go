@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -18,6 +17,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/pkg/tsoutil"
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/election"
@@ -44,16 +43,11 @@ const (
 	maxLogical = int64(1 << 18)
 	// MaxSuffixBits indicates the max number of suffix bits.
 	MaxSuffixBits = 4
-	// jetLagWarningThreshold is the warning threshold of jetLag in `timestampOracle.UpdateTimestamp`.
-	// In case of small `updatePhysicalInterval`, the `3 * updatePhysicalInterval` would also is small,
-	// and trigger unnecessary warnings about clock offset.
-	// It's an empirical value.
-	jetLagWarningThreshold = 150 * time.Millisecond
 )
 
 // tsoObject is used to store the current TSO in memory with a RWMutex lock.
 type tsoObject struct {
-	syncutil.RWMutex
+	sync.RWMutex
 	physical   time.Time
 	logical    int64
 	updateTime time.Time
@@ -86,12 +80,8 @@ func (t *timestampOracle) setTSOPhysical(next time.Time, force bool) {
 	if typeutil.SubTSOPhysicalByWallClock(next, t.tsoMux.physical) > 0 {
 		t.tsoMux.physical = next
 		t.tsoMux.logical = 0
-		t.setTSOUpdateTimeLocked(time.Now())
+		t.tsoMux.updateTime = time.Now()
 	}
-}
-
-func (t *timestampOracle) setTSOUpdateTimeLocked(updateTime time.Time) {
-	t.tsoMux.updateTime = updateTime
 }
 
 func (t *timestampOracle) getTSO() (time.Time, int64) {
@@ -118,7 +108,7 @@ func (t *timestampOracle) generateTSO(count int64, suffixBits int) (physical int
 	}
 	// Return the last update time
 	lastUpdateTime = t.tsoMux.updateTime
-	t.setTSOUpdateTimeLocked(time.Now())
+	t.tsoMux.updateTime = time.Now()
 	return physical, logical, lastUpdateTime
 }
 
@@ -128,13 +118,12 @@ func (t *timestampOracle) generateTSO(count int64, suffixBits int) (physical int
 // For example, we have three DCs: dc-1, dc-2 and dc-3. The bits of suffix is defined by
 // the const suffixBits. Then, for dc-2, the suffix may be 1 because it's persisted
 // in etcd with the value of 1.
-// Once we get a normal TSO like this (18 bits): xxxxxxxxxxxxxxxxxx. We will make the TSO's
+// Once we get a noramal TSO like this (18 bits): xxxxxxxxxxxxxxxxxx. We will make the TSO's
 // low bits of logical part from each DC looks like:
-//
-//	global: xxxxxxxxxx00000000
-//	  dc-1: xxxxxxxxxx00000001
-//	  dc-2: xxxxxxxxxx00000010
-//	  dc-3: xxxxxxxxxx00000011
+//   global: xxxxxxxxxx00000000
+//     dc-1: xxxxxxxxxx00000001
+//     dc-2: xxxxxxxxxx00000010
+//     dc-3: xxxxxxxxxx00000011
 func (t *timestampOracle) differentiateLogical(rawLogical int64, suffixBits int) int64 {
 	return rawLogical<<suffixBits + int64(t.suffix)
 }
@@ -243,12 +232,7 @@ func (t *timestampOracle) isInitialized() bool {
 // resetUserTimestamp update the TSO in memory with specified TSO by an atomically way.
 // When ignoreSmaller is true, resetUserTimestamp will ignore the smaller tso resetting error and do nothing.
 // It's used to write MaxTS during the Global TSO synchronization whitout failing the writing as much as possible.
-// cannot set timestamp to one which >= current + maxResetTSGap
 func (t *timestampOracle) resetUserTimestamp(leadership *election.Leadership, tso uint64, ignoreSmaller bool) error {
-	return t.resetUserTimestampInner(leadership, tso, ignoreSmaller, false)
-}
-
-func (t *timestampOracle) resetUserTimestampInner(leadership *election.Leadership, tso uint64, ignoreSmaller, skipUpperBoundCheck bool) error {
 	t.tsoMux.Lock()
 	defer t.tsoMux.Unlock()
 	if !leadership.Check() {
@@ -277,7 +261,7 @@ func (t *timestampOracle) resetUserTimestampInner(leadership *election.Leadershi
 		return errs.ErrResetUserTimestamp.FastGenByArgs("the specified counter is smaller than now")
 	}
 	// do not update if physical time is too greater than prev
-	if !skipUpperBoundCheck && physicalDifference >= t.maxResetTSGap().Milliseconds() {
+	if physicalDifference >= t.maxResetTSGap().Milliseconds() {
 		tsoCounter.WithLabelValues("err_reset_large_ts", t.dcLocation).Inc()
 		return errs.ErrResetUserTimestamp.FastGenByArgs("the specified ts is too larger than now")
 	}
@@ -292,17 +276,17 @@ func (t *timestampOracle) resetUserTimestampInner(leadership *election.Leadershi
 	// save into memory only if nextPhysical or nextLogical is greater.
 	t.tsoMux.physical = nextPhysical
 	t.tsoMux.logical = int64(nextLogical)
-	t.setTSOUpdateTimeLocked(time.Now())
+	t.tsoMux.updateTime = time.Now()
 	tsoCounter.WithLabelValues("reset_tso_ok", t.dcLocation).Inc()
 	return nil
 }
 
 // UpdateTimestamp is used to update the timestamp.
 // This function will do two things:
-//  1. When the logical time is going to be used up, increase the current physical time.
-//  2. When the time window is not big enough, which means the saved etcd time minus the next physical time
-//     will be less than or equal to `UpdateTimestampGuard`, then the time window needs to be updated and
-//     we also need to save the next physical time plus `TSOSaveInterval` into etcd.
+// 1. When the logical time is going to be used up, increase the current physical time.
+// 2. When the time window is not big enough, which means the saved etcd time minus the next physical time
+//    will be less than or equal to `UpdateTimestampGuard`, then the time window needs to be updated and
+//    we also need to save the next physical time plus `TSOSaveInterval` into etcd.
 //
 // Here is some constraints that this function must satisfy:
 // 1. The saved time is monotonically increasing.
@@ -313,8 +297,7 @@ func (t *timestampOracle) resetUserTimestampInner(leadership *election.Leadershi
 // and should not be called when the TSO in memory has been reset anymore.
 func (t *timestampOracle) UpdateTimestamp(leadership *election.Leadership) error {
 	prevPhysical, prevLogical := t.getTSO()
-	tsoGauge.WithLabelValues("tso", t.dcLocation).Set(float64(prevPhysical.UnixNano() / int64(time.Millisecond)))
-	tsoGap.WithLabelValues(t.dcLocation).Set(float64(time.Since(prevPhysical).Milliseconds()))
+	tsoGauge.WithLabelValues("tso", t.dcLocation).Set(float64(prevPhysical.Unix()))
 
 	now := time.Now()
 	failpoint.Inject("fallBackUpdate", func() {
@@ -327,7 +310,7 @@ func (t *timestampOracle) UpdateTimestamp(leadership *election.Leadership) error
 	tsoCounter.WithLabelValues("save", t.dcLocation).Inc()
 
 	jetLag := typeutil.SubRealTimeByWallClock(now, prevPhysical)
-	if jetLag > 3*t.updatePhysicalInterval && jetLag > jetLagWarningThreshold {
+	if jetLag > 3*t.updatePhysicalInterval {
 		log.Warn("clock offset", zap.Duration("jet-lag", jetLag), zap.Time("prev-physical", prevPhysical), zap.Time("now", now), zap.Duration("update-physical-interval", t.updatePhysicalInterval))
 		tsoCounter.WithLabelValues("slow_save", t.dcLocation).Inc()
 	}
@@ -374,15 +357,22 @@ func (t *timestampOracle) getTS(leadership *election.Leadership, count uint32, s
 	if count == 0 {
 		return resp, errs.ErrGenerateTimestamp.FastGenByArgs("tso count should be positive")
 	}
+	failpoint.Inject("skipRetryGetTS", func() {
+		maxRetryCount = 1
+	})
 	for i := 0; i < maxRetryCount; i++ {
-		currentPhysical, _ := t.getTSO()
+		currentPhysical, currentLogical := t.getTSO()
 		if currentPhysical == typeutil.ZeroTime {
 			// If it's leader, maybe SyncTimestamp hasn't completed yet
 			if leadership.Check() {
+				log.Info("this PD is a new leader, but sync hasn't been completed yet, wait for a while")
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
-			tsoCounter.WithLabelValues("not_leader_anymore", t.dcLocation).Inc()
+			log.Error("invalid timestamp",
+				zap.Any("timestamp-physical", currentPhysical),
+				zap.Any("timestamp-logical", currentLogical),
+				errs.ZapError(errs.ErrInvalidTimestamp))
 			return pdpb.Timestamp{}, errs.ErrGenerateTimestamp.FastGenByArgs("timestamp in memory isn't initialized")
 		}
 		// Get a new TSO result with the given count
@@ -391,7 +381,7 @@ func (t *timestampOracle) getTS(leadership *election.Leadership, count uint32, s
 			return pdpb.Timestamp{}, errs.ErrGenerateTimestamp.FastGenByArgs("timestamp in memory has been reset")
 		}
 		if resp.GetLogical() >= maxLogical {
-			log.Warn("logical part outside of max logical interval, please check ntp time, or adjust config item `tso-update-physical-interval`",
+			log.Error("logical part outside of max logical interval, please check ntp time",
 				zap.Reflect("response", resp),
 				zap.Int("retry-count", i), errs.ZapError(errs.ErrLogicOverflow))
 			tsoCounter.WithLabelValues("logical_overflow", t.dcLocation).Inc()
@@ -405,7 +395,6 @@ func (t *timestampOracle) getTS(leadership *election.Leadership, count uint32, s
 		resp.SuffixBits = uint32(suffixBits)
 		return resp, nil
 	}
-	tsoCounter.WithLabelValues("exceeded_max_retry", t.dcLocation).Inc()
 	return resp, errs.ErrGenerateTimestamp.FastGenByArgs(fmt.Sprintf("generate %s tso maximum number of retries exceeded", t.dcLocation))
 }
 
@@ -416,5 +405,5 @@ func (t *timestampOracle) ResetTimestamp() {
 	log.Info("reset the timestamp in memory")
 	t.tsoMux.physical = typeutil.ZeroTime
 	t.tsoMux.logical = 0
-	t.setTSOUpdateTimeLocked(typeutil.ZeroTime)
+	t.tsoMux.updateTime = typeutil.ZeroTime
 }

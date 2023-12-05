@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -24,9 +23,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/grpcutil"
-	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -92,7 +89,7 @@ func (s *RegionSyncer) syncRegion(ctx context.Context, conn *grpc.ClientConn) (C
 	cli := pdpb.NewPDClient(conn)
 	syncStream, err := cli.SyncRegions(ctx)
 	if err != nil {
-		return nil, err
+		return nil, errs.ErrGRPCCreateStream.Wrap(err).FastGenWithCause()
 	}
 	err = syncStream.Send(&pdpb.SyncRegionRequest{
 		Header:     &pdpb.RequestHeader{ClusterId: s.server.ClusterID()},
@@ -100,7 +97,7 @@ func (s *RegionSyncer) syncRegion(ctx context.Context, conn *grpc.ClientConn) (C
 		StartIndex: s.history.GetNextIndex(),
 	})
 	if err != nil {
-		return nil, err
+		return nil, errs.ErrGRPCSend.Wrap(err).FastGenWithCause()
 	}
 
 	return syncStream, nil
@@ -118,15 +115,14 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 	ctx := s.mu.clientCtx
 
 	go func() {
-		defer logutil.LogPanic()
 		defer s.wg.Done()
 		// used to load region from kv storage to cache storage.
 		bc := s.server.GetBasicCluster()
-		regionStorage := s.server.GetStorage()
+		storage := s.server.GetStorage()
 		log.Info("region syncer start load region")
 		start := time.Now()
-		err := storage.TryLoadRegionsOnce(ctx, regionStorage, bc.CheckAndPutRegion)
-		log.Info("region syncer finished load regions", zap.Duration("time-cost", time.Since(start)))
+		err := storage.LoadRegionsOnce(ctx, bc.CheckAndPutRegion)
+		log.Info("region syncer finished load region", zap.Duration("time-cost", time.Since(start)))
 		if err != nil {
 			log.Warn("failed to load regions.", errs.ZapError(err))
 		}
@@ -189,10 +185,8 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 				}
 				stats := resp.GetRegionStats()
 				regions := resp.GetRegions()
-				buckets := resp.GetBuckets()
 				regionLeaders := resp.GetRegionLeaders()
 				hasStats := len(stats) == len(regions)
-				hasBuckets := len(buckets) == len(regions)
 				for i, r := range regions {
 					var (
 						region       *core.RegionInfo
@@ -207,10 +201,10 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 							core.SetWrittenKeys(stats[i].KeysWritten),
 							core.SetReadBytes(stats[i].BytesRead),
 							core.SetReadKeys(stats[i].KeysRead),
-							core.SetSource(core.Sync),
+							core.SetFromHeartbeat(false),
 						)
 					} else {
-						region = core.NewRegionInfo(r, regionLeader, core.SetSource(core.Sync))
+						region = core.NewRegionInfo(r, regionLeader, core.SetFromHeartbeat(false))
 					}
 
 					origin, err := bc.PreCheckPutRegion(region)
@@ -221,19 +215,14 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 					_, saveKV, _, _ := regionGuide(region, origin)
 					overlaps := bc.PutRegion(region)
 
-					if hasBuckets {
-						if old := region.GetBuckets(); buckets[i].GetVersion() > old.GetVersion() {
-							region.UpdateBuckets(buckets[i], old)
-						}
-					}
 					if saveKV {
-						err = regionStorage.SaveRegion(r)
+						err = storage.SaveRegion(r)
 					}
 					if err == nil {
 						s.history.Record(region)
 					}
 					for _, old := range overlaps {
-						_ = regionStorage.DeleteRegion(old.GetMeta())
+						_ = storage.DeleteRegion(old.GetMeta())
 					}
 				}
 			}

@@ -4,53 +4,47 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	   http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package encryption
 
 import (
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 	"github.com/tikv/pd/pkg/typeutil"
 )
 
-func TestAdjustDefaultValue(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+type testConfigSuite struct{}
+
+var _ = Suite(&testConfigSuite{})
+
+func (s *testConfigSuite) TestAdjustDefaultValue(c *C) {
 	config := &Config{}
 	err := config.Adjust()
-	re.NoError(err)
-	re.Equal(methodPlaintext, config.DataEncryptionMethod)
+	c.Assert(err, IsNil)
+	c.Assert(config.DataEncryptionMethod, Equals, methodPlaintext)
 	defaultRotationPeriod, _ := time.ParseDuration(defaultDataKeyRotationPeriod)
-	re.Equal(defaultRotationPeriod, config.DataKeyRotationPeriod.Duration)
-	re.Equal(masterKeyTypePlaintext, config.MasterKey.Type)
+	c.Assert(config.DataKeyRotationPeriod.Duration, Equals, defaultRotationPeriod)
+	c.Assert(config.MasterKey.Type, Equals, masterKeyTypePlaintext)
 }
 
-func TestAdjustInvalidDataEncryptionMethod(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testConfigSuite) TestAdjustInvalidDataEncryptionMethod(c *C) {
 	config := &Config{DataEncryptionMethod: "unknown"}
-	re.NotNil(config.Adjust())
+	c.Assert(config.Adjust(), NotNil)
 }
 
-func TestAdjustNegativeRotationDuration(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testConfigSuite) TestAdjustNegativeRotationDuration(c *C) {
 	config := &Config{DataKeyRotationPeriod: typeutil.NewDuration(time.Duration(int64(-1)))}
-	re.NotNil(config.Adjust())
+	c.Assert(config.Adjust(), NotNil)
 }
 
-func TestAdjustInvalidMasterKeyType(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (s *testConfigSuite) TestAdjustInvalidMasterKeyType(c *C) {
 	config := &Config{MasterKey: MasterKeyConfig{Type: "unknown"}}
-	re.NotNil(config.Adjust())
+	c.Assert(config.Adjust(), NotNil)
 }

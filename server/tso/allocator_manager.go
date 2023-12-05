@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -24,20 +23,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/pkg/grpcutil"
-	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/election"
+	"github.com/tikv/pd/server/kv"
 	"github.com/tikv/pd/server/member"
-	"github.com/tikv/pd/server/storage/kv"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -46,17 +42,16 @@ import (
 const (
 	// GlobalDCLocation is the Global TSO Allocator's DC location label.
 	GlobalDCLocation            = "global"
-	checkStep                   = time.Minute
-	patrolStep                  = time.Second
+	checkStep                   = 1 * time.Minute
+	patrolStep                  = 1 * time.Second
 	defaultAllocatorLeaderLease = 3
 	leaderTickInterval          = 50 * time.Millisecond
-	localTSOAllocatorEtcdPrefix = "lta"
-	localTSOSuffixEtcdPrefix    = "lts"
+	localTSOSuffixEtcdPrefix    = "local-tso-suffix"
 )
 
 var (
 	// PriorityCheck exported is only for test.
-	PriorityCheck = time.Minute
+	PriorityCheck = 1 * time.Minute
 )
 
 // AllocatorGroupFilter is used to select AllocatorGroup.
@@ -102,7 +97,7 @@ func (info *DCLocationInfo) clone() DCLocationInfo {
 type AllocatorManager struct {
 	enableLocalTSO bool
 	mu             struct {
-		syncutil.RWMutex
+		sync.RWMutex
 		// There are two kinds of TSO Allocators:
 		//   1. Global TSO Allocator, as a global single point to allocate
 		//      TSO for global transactions, such as cross-region cases.
@@ -125,7 +120,7 @@ type AllocatorManager struct {
 	securityConfig         *grpcutil.TLSConfig
 	// for gRPC use
 	localAllocatorConn struct {
-		syncutil.RWMutex
+		sync.RWMutex
 		clientConns map[string]*grpc.ClientConn
 	}
 }
@@ -246,25 +241,6 @@ func (am *AllocatorManager) GetDCLocationInfo(dcLocation string) (DCLocationInfo
 	return infoPtr.clone(), true
 }
 
-// CleanUpDCLocation cleans up certain server's DCLocationInfo
-func (am *AllocatorManager) CleanUpDCLocation() error {
-	serverID := am.member.ID()
-	dcLocationKey := am.member.GetDCLocationPath(serverID)
-	// remove dcLocationKey from etcd
-	if resp, err := kv.
-		NewSlowLogTxn(am.member.Client()).
-		Then(clientv3.OpDelete(dcLocationKey)).
-		Commit(); err != nil {
-		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
-	} else if !resp.Succeeded {
-		return errs.ErrEtcdTxnConflict.FastGenByArgs()
-	}
-	log.Info("delete the dc-location key previously written in etcd",
-		zap.Uint64("server-id", serverID))
-	go am.ClusterDCLocationChecker()
-	return nil
-}
-
 // GetClusterDCLocations returns all dc-locations of a cluster with a copy of map,
 // which satisfies dcLocation -> DCLocationInfo.
 func (am *AllocatorManager) GetClusterDCLocations() map[string]DCLocationInfo {
@@ -351,18 +327,11 @@ func (am *AllocatorManager) getAllocatorPath(dcLocation string) string {
 	if dcLocation == GlobalDCLocation {
 		return am.rootPath
 	}
-	return path.Join(am.getLocalTSOAllocatorPath(), dcLocation)
-}
-
-// Add a prefix to the root path to prevent being conflicted
-// with other system key paths such as leader, member, alloc_id, raft, etc.
-func (am *AllocatorManager) getLocalTSOAllocatorPath() string {
-	return path.Join(am.rootPath, localTSOAllocatorEtcdPrefix)
+	return path.Join(am.rootPath, dcLocation)
 }
 
 // similar logic with leaderLoop in server/server.go
 func (am *AllocatorManager) allocatorLeaderLoop(ctx context.Context, allocator *LocalTSOAllocator) {
-	defer logutil.LogPanic()
 	defer log.Info("server is closed, return local tso allocator leader loop",
 		zap.String("dc-location", allocator.GetDCLocation()),
 		zap.String("local-tso-allocator-name", am.member.Member().Name))
@@ -614,7 +583,6 @@ func (am *AllocatorManager) allocatorUpdater() {
 
 // updateAllocator is used to update the allocator in the group.
 func (am *AllocatorManager) updateAllocator(ag *allocatorGroup) {
-	defer logutil.LogPanic()
 	defer am.wg.Done()
 	select {
 	case <-ag.ctx.Done():
@@ -665,7 +633,6 @@ func (am *AllocatorManager) allocatorPatroller(serverCtx context.Context) {
 // ClusterDCLocationChecker collects all dc-locations of a cluster, computes some related info
 // and stores them into the DCLocationInfo, then finally writes them into am.mu.clusterDCLocations.
 func (am *AllocatorManager) ClusterDCLocationChecker() {
-	defer logutil.LogPanic()
 	// Wait for the PD leader to be elected out.
 	if am.member.GetLeader() == nil {
 		return
@@ -765,7 +732,7 @@ func (am *AllocatorManager) getOrCreateLocalTSOSuffix(dcLocation string) (int32,
 			zap.Uint64("server-id", am.member.ID()))
 		return -1, errs.ErrEtcdTxnConflict.FastGenByArgs()
 	}
-	return maxSuffix, nil
+	return int32(maxSuffix), nil
 }
 
 func (am *AllocatorManager) getDCLocationSuffixMapFromEtcd() (map[string]int32, error) {
@@ -965,10 +932,7 @@ func (am *AllocatorManager) ResetAllocatorGroup(dcLocation string) {
 	defer am.mu.Unlock()
 	if allocatorGroup, exist := am.mu.allocatorGroups[dcLocation]; exist {
 		allocatorGroup.allocator.Reset()
-		// Reset if it still has the leadership. Otherwise the data race may occur because of the re-campaigning.
-		if allocatorGroup.leadership.Check() {
-			allocatorGroup.leadership.Reset()
-		}
+		allocatorGroup.leadership.Reset()
 	}
 }
 
@@ -1098,9 +1062,6 @@ func (am *AllocatorManager) getDCLocationInfoFromLeader(ctx context.Context, dcL
 	if err != nil {
 		return false, &pdpb.GetDCLocationInfoResponse{}, err
 	}
-	if resp.GetHeader().GetError() != nil {
-		return false, &pdpb.GetDCLocationInfoResponse{}, errors.Errorf("get the dc-location info from leader failed: %s", resp.GetHeader().GetError().String())
-	}
 	return resp.GetSuffix() != 0, resp, nil
 }
 
@@ -1127,15 +1088,6 @@ func (am *AllocatorManager) GetMaxLocalTSO(ctx context.Context) (*pdpb.Timestamp
 		return nil, err
 	}
 	return maxTSO, nil
-}
-
-// GetGlobalTSO returns global tso.
-func (am *AllocatorManager) GetGlobalTSO() (*pdpb.Timestamp, error) {
-	globalAllocator, err := am.GetAllocator(GlobalDCLocation)
-	if err != nil {
-		return nil, err
-	}
-	return globalAllocator.(*GlobalTSOAllocator).getCurrentTSO()
 }
 
 func (am *AllocatorManager) getGRPCConn(addr string) (*grpc.ClientConn, bool) {
@@ -1189,7 +1141,7 @@ func (am *AllocatorManager) transferLocalAllocator(dcLocation string, serverID u
 }
 
 func (am *AllocatorManager) nextLeaderKey(dcLocation string) string {
-	return path.Join(am.getAllocatorPath(dcLocation), "next-leader")
+	return path.Join(am.rootPath, dcLocation, "next-leader")
 }
 
 // EnableLocalTSO returns the value of AllocatorManager.enableLocalTSO.

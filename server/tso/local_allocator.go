@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -93,15 +92,14 @@ func (lta *LocalTSOAllocator) UpdateTSO() error {
 }
 
 // SetTSO sets the physical part with given TSO.
-func (lta *LocalTSOAllocator) SetTSO(tso uint64, ignoreSmaller, skipUpperBoundCheck bool) error {
-	return lta.timestampOracle.resetUserTimestampInner(lta.leadership, tso, ignoreSmaller, skipUpperBoundCheck)
+func (lta *LocalTSOAllocator) SetTSO(tso uint64) error {
+	return lta.timestampOracle.resetUserTimestamp(lta.leadership, tso, false)
 }
 
 // GenerateTSO is used to generate a given number of TSOs.
 // Make sure you have initialized the TSO allocator before calling.
 func (lta *LocalTSOAllocator) GenerateTSO(count uint32) (pdpb.Timestamp, error) {
 	if !lta.leadership.Check() {
-		tsoCounter.WithLabelValues("not_leader", lta.timestampOracle.dcLocation).Inc()
 		return pdpb.Timestamp{}, errs.ErrGenerateTimestamp.FastGenByArgs(fmt.Sprintf("requested pd %s of %s allocator", errs.NotLeaderErr, lta.timestampOracle.dcLocation))
 	}
 	return lta.timestampOracle.getTS(lta.leadership, count, lta.allocatorManager.GetSuffixBits())
@@ -212,14 +210,11 @@ func (lta *LocalTSOAllocator) CheckAllocatorLeader() (*pdpb.Member, int64, bool)
 			// re-campaign by deleting the current allocator leader.
 			log.Warn("the local tso allocator leader has not changed, delete and campaign again",
 				zap.String("dc-location", lta.timestampOracle.dcLocation), zap.Stringer("old-pd-leader", allocatorLeader))
-			// Delete the leader itself and let others start a new election again.
-			if err = lta.leadership.DeleteLeaderKey(); err != nil {
+			if err = lta.leadership.DeleteLeader(); err != nil {
 				log.Error("deleting local tso allocator leader key meets error", errs.ZapError(err))
 				time.Sleep(200 * time.Millisecond)
 				return nil, 0, true
 			}
-			// Return nil and false to make sure the campaign will start immediately.
-			return nil, 0, false
 		}
 	}
 	return allocatorLeader, rev, false

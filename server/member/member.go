@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -33,7 +32,7 @@ import (
 	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/election"
-	"github.com/tikv/pd/server/storage/kv"
+	"github.com/tikv/pd/server/kv"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
 	"go.uber.org/zap"
@@ -59,8 +58,6 @@ type Member struct {
 	// etcd leader key when the PD node is successfully elected as the PD leader
 	// of the cluster. Every write will use it to check PD leadership.
 	memberValue string
-	// lastLeaderUpdatedTime is the last time when the leader is updated.
-	lastLeaderUpdatedTime atomic.Value
 }
 
 // NewMember create a new Member.
@@ -123,13 +120,11 @@ func (m *Member) GetLeader() *pdpb.Member {
 // setLeader sets the member's PD leader.
 func (m *Member) setLeader(member *pdpb.Member) {
 	m.leader.Store(member)
-	m.lastLeaderUpdatedTime.Store(time.Now())
 }
 
 // unsetLeader unsets the member's PD leader.
 func (m *Member) unsetLeader() {
 	m.leader.Store(&pdpb.Member{})
-	m.lastLeaderUpdatedTime.Store(time.Now())
 }
 
 // EnableLeader sets the member itself to a PD leader.
@@ -145,15 +140,6 @@ func (m *Member) GetLeaderPath() string {
 // GetLeadership returns the leadership of the PD member.
 func (m *Member) GetLeadership() *election.Leadership {
 	return m.leadership
-}
-
-// GetLastLeaderUpdatedTime returns the last time when the leader is updated.
-func (m *Member) GetLastLeaderUpdatedTime() time.Time {
-	lastLeaderUpdatedTime := m.lastLeaderUpdatedTime.Load()
-	if lastLeaderUpdatedTime == nil {
-		return time.Time{}
-	}
-	return lastLeaderUpdatedTime.(time.Time)
 }
 
 // CampaignLeader is used to campaign a PD member's leadership
@@ -186,14 +172,11 @@ func (m *Member) CheckLeader() (*pdpb.Member, int64, bool) {
 			// oh, we are already a PD leader, which indicates we may meet something wrong
 			// in previous CampaignLeader. We should delete the leadership and campaign again.
 			log.Warn("the pd leader has not changed, delete and campaign again", zap.Stringer("old-pd-leader", leader))
-			// Delete the leader itself and let others start a new election again.
-			if err = m.leadership.DeleteLeaderKey(); err != nil {
+			if err = m.leadership.DeleteLeader(); err != nil {
 				log.Error("deleting pd leader key meets error", errs.ZapError(err))
 				time.Sleep(200 * time.Millisecond)
 				return nil, 0, true
 			}
-			// Return nil and false to make sure the campaign will start immediately.
-			return nil, 0, false
 		}
 	}
 	return leader, rev, false
@@ -329,11 +312,10 @@ func (m *Member) SetMemberLeaderPriority(id uint64, priority int) error {
 	key := m.getMemberLeaderPriorityPath(id)
 	res, err := m.leadership.LeaderTxn().Then(clientv3.OpPut(key, strconv.Itoa(priority))).Commit()
 	if err != nil {
-		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
+		return errors.WithStack(err)
 	}
 	if !res.Succeeded {
-		log.Error("save etcd leader priority failed, maybe not pd leader")
-		return errs.ErrEtcdTxnConflict.FastGenByArgs()
+		return errors.New("save etcd leader priority failed, maybe not pd leader")
 	}
 	return nil
 }
@@ -343,11 +325,10 @@ func (m *Member) DeleteMemberLeaderPriority(id uint64) error {
 	key := m.getMemberLeaderPriorityPath(id)
 	res, err := m.leadership.LeaderTxn().Then(clientv3.OpDelete(key)).Commit()
 	if err != nil {
-		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
+		return errors.WithStack(err)
 	}
 	if !res.Succeeded {
-		log.Error("delete etcd leader priority failed, maybe not pd leader")
-		return errs.ErrEtcdTxnConflict.FastGenByArgs()
+		return errors.New("delete etcd leader priority failed, maybe not pd leader")
 	}
 	return nil
 }
@@ -357,11 +338,10 @@ func (m *Member) DeleteMemberDCLocationInfo(id uint64) error {
 	key := m.GetDCLocationPath(id)
 	res, err := m.leadership.LeaderTxn().Then(clientv3.OpDelete(key)).Commit()
 	if err != nil {
-		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
+		return errors.WithStack(err)
 	}
 	if !res.Succeeded {
-		log.Error("delete dc-location info failed, maybe not pd leader")
-		return errs.ErrEtcdTxnConflict.FastGenByArgs()
+		return errors.New("delete dc-location info failed, maybe not pd leader")
 	}
 	return nil
 }

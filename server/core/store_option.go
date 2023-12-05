@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -17,9 +16,9 @@ package core
 import (
 	"time"
 
+	"github.com/gogo/protobuf/proto"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core/storelimit"
 )
 
@@ -29,7 +28,7 @@ type StoreCreateOption func(region *StoreInfo)
 // SetStoreAddress sets the address for the store.
 func SetStoreAddress(address, statusAddress, peerAddress string) StoreCreateOption {
 	return func(store *StoreInfo) {
-		meta := typeutil.DeepClone(store.meta, StoreFactory)
+		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.Address = address
 		meta.StatusAddress = statusAddress
 		meta.PeerAddress = peerAddress
@@ -40,7 +39,7 @@ func SetStoreAddress(address, statusAddress, peerAddress string) StoreCreateOpti
 // SetStoreLabels sets the labels for the store.
 func SetStoreLabels(labels []*metapb.StoreLabel) StoreCreateOption {
 	return func(store *StoreInfo) {
-		meta := typeutil.DeepClone(store.meta, StoreFactory)
+		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.Labels = labels
 		store.meta = meta
 	}
@@ -49,7 +48,7 @@ func SetStoreLabels(labels []*metapb.StoreLabel) StoreCreateOption {
 // SetStoreStartTime sets the start timestamp for the store.
 func SetStoreStartTime(startTS int64) StoreCreateOption {
 	return func(store *StoreInfo) {
-		meta := typeutil.DeepClone(store.meta, StoreFactory)
+		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.StartTimestamp = startTS
 		store.meta = meta
 	}
@@ -58,7 +57,7 @@ func SetStoreStartTime(startTS int64) StoreCreateOption {
 // SetStoreVersion sets the version for the store.
 func SetStoreVersion(githash, version string) StoreCreateOption {
 	return func(store *StoreInfo) {
-		meta := typeutil.DeepClone(store.meta, StoreFactory)
+		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.Version = version
 		meta.GitHash = githash
 		store.meta = meta
@@ -68,7 +67,7 @@ func SetStoreVersion(githash, version string) StoreCreateOption {
 // SetStoreDeployPath sets the deploy path for the store.
 func SetStoreDeployPath(deployPath string) StoreCreateOption {
 	return func(store *StoreInfo) {
-		meta := typeutil.DeepClone(store.meta, StoreFactory)
+		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.DeployPath = deployPath
 		store.meta = meta
 	}
@@ -77,9 +76,8 @@ func SetStoreDeployPath(deployPath string) StoreCreateOption {
 // OfflineStore offline a store
 func OfflineStore(physicallyDestroyed bool) StoreCreateOption {
 	return func(store *StoreInfo) {
-		meta := typeutil.DeepClone(store.meta, StoreFactory)
+		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.State = metapb.StoreState_Offline
-		meta.NodeState = metapb.NodeState_Removing
 		meta.PhysicallyDestroyed = physicallyDestroyed
 		store.meta = meta
 	}
@@ -88,9 +86,8 @@ func OfflineStore(physicallyDestroyed bool) StoreCreateOption {
 // UpStore up a store
 func UpStore() StoreCreateOption {
 	return func(store *StoreInfo) {
-		meta := typeutil.DeepClone(store.meta, StoreFactory)
+		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.State = metapb.StoreState_Up
-		meta.NodeState = metapb.NodeState_Serving
 		store.meta = meta
 	}
 }
@@ -98,9 +95,8 @@ func UpStore() StoreCreateOption {
 // TombstoneStore set a store to tombstone.
 func TombstoneStore() StoreCreateOption {
 	return func(store *StoreInfo) {
-		meta := typeutil.DeepClone(store.meta, StoreFactory)
+		meta := proto.Clone(store.meta).(*metapb.Store)
 		meta.State = metapb.StoreState_Tombstone
-		meta.NodeState = metapb.NodeState_Removed
 		store.meta = meta
 	}
 }
@@ -121,21 +117,6 @@ func ResumeLeaderTransfer() StoreCreateOption {
 	}
 }
 
-// SlowStoreEvicted marks a store as a slow store and prevents transferring
-// leader to the store
-func SlowStoreEvicted() StoreCreateOption {
-	return func(store *StoreInfo) {
-		store.slowStoreEvicted = true
-	}
-}
-
-// SlowStoreRecovered cleans the evicted state of a store.
-func SlowStoreRecovered() StoreCreateOption {
-	return func(store *StoreInfo) {
-		store.slowStoreEvicted = false
-	}
-}
-
 // SetLeaderCount sets the leader count for the store.
 func SetLeaderCount(leaderCount int) StoreCreateOption {
 	return func(store *StoreInfo) {
@@ -147,20 +128,6 @@ func SetLeaderCount(leaderCount int) StoreCreateOption {
 func SetRegionCount(regionCount int) StoreCreateOption {
 	return func(store *StoreInfo) {
 		store.regionCount = regionCount
-	}
-}
-
-// SetLearnerCount sets the learner count for the store.
-func SetLearnerCount(learnerCount int) StoreCreateOption {
-	return func(store *StoreInfo) {
-		store.learnerCount = learnerCount
-	}
-}
-
-// SetWitnessCount sets the witness count for the store.
-func SetWitnessCount(witnessCount int) StoreCreateOption {
-	return func(store *StoreInfo) {
-		store.witnessCount = witnessCount
 	}
 }
 
@@ -231,29 +198,12 @@ func SetNewStoreStats(stats *pdpb.StoreStats) StoreCreateOption {
 	}
 }
 
-// SetMinResolvedTS sets min resolved ts for the store.
-func SetMinResolvedTS(minResolvedTS uint64) StoreCreateOption {
+// AttachAvailableFunc attaches a customize function for the store. The function f returns true if the store limit is not exceeded.
+func AttachAvailableFunc(limitType storelimit.Type, f func() bool) StoreCreateOption {
 	return func(store *StoreInfo) {
-		store.minResolvedTS = minResolvedTS
-	}
-}
-
-// ResetStoreLimit resets the store limit for a store.
-func ResetStoreLimit(limitType storelimit.Type, ratePerSec ...float64) StoreCreateOption {
-	return func(store *StoreInfo) {
-		store.mu.Lock()
-		defer store.mu.Unlock()
-		rate := float64(0)
-		if len(ratePerSec) > 0 {
-			rate = ratePerSec[0]
+		if store.available == nil {
+			store.available = make(map[storelimit.Type]func() bool)
 		}
-		store.limiter.Reset(rate, limitType)
-	}
-}
-
-// SetLastAwakenTime sets last awaken time for the store.
-func SetLastAwakenTime(lastAwaken time.Time) StoreCreateOption {
-	return func(store *StoreInfo) {
-		store.lastAwakenTime = lastAwaken
+		store.available[limitType] = f
 	}
 }

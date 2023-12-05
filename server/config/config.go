@@ -8,13 +8,13 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package config
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
@@ -24,15 +24,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/docker/go-units"
 	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/grpcutil"
 	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/pkg/metricutil"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core/storelimit"
 	"github.com/tikv/pd/server/versioninfo"
@@ -49,7 +48,6 @@ import (
 )
 
 // Config is the pd server configuration.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type Config struct {
 	flagSet *flag.FlagSet
 
@@ -91,9 +89,8 @@ type Config struct {
 	TSOSaveInterval typeutil.Duration `toml:"tso-save-interval" json:"tso-save-interval"`
 
 	// The interval to update physical part of timestamp. Usually, this config should not be set.
-	// At most 1<<18 (262144) TSOs can be generated in the interval. The smaller the value, the
-	// more TSOs provided, and at the same time consuming more CPU time.
-	// This config is only valid in 1ms to 10s. If it's configured too long or too short, it will
+	// It's only useful for test purposes.
+	// This config is only valid in 50ms to 10s. If it's configured too long or too short, it will
 	// be automatically clamped to the range.
 	TSOUpdatePhysicalInterval typeutil.Duration `toml:"tso-update-physical-interval" json:"tso-update-physical-interval"`
 
@@ -143,8 +140,6 @@ type Config struct {
 	// an election, thus minimizing disruptions.
 	PreVote bool `toml:"enable-prevote"`
 
-	MaxRequestBytes uint `toml:"max-request-bytes" json:"max-request-bytes"`
-
 	Security SecurityConfig `toml:"security" json:"security"`
 
 	LabelProperty LabelPropertyConfig `toml:"label-property" json:"label-property"`
@@ -154,9 +149,12 @@ type Config struct {
 	// For all warnings during parsing.
 	WarningMsgs []string
 
+	// Only test can change them.
+	nextRetryDelay             time.Duration
 	DisableStrictReconfigCheck bool
 
 	HeartbeatStreamBindInterval typeutil.Duration
+
 	LeaderPriorityCheckInterval typeutil.Duration
 
 	logger   *zap.Logger
@@ -190,7 +188,7 @@ func NewConfig() *Config {
 
 	fs.StringVar(&cfg.Metric.PushAddress, "metrics-addr", "", "prometheus pushgateway address, leaves it empty will disable prometheus push")
 
-	fs.StringVar(&cfg.Log.Level, "L", "info", "log level: debug, info, warn, error, fatal (default 'info')")
+	fs.StringVar(&cfg.Log.Level, "L", "", "log level: debug, info, warn, error, fatal (default 'info')")
 	fs.StringVar(&cfg.Log.File.Filename, "log-file", "", "log file path")
 
 	fs.StringVar(&cfg.Security.CAPath, "cacert", "", "path of file that contains list of trusted TLS CAs")
@@ -203,14 +201,10 @@ func NewConfig() *Config {
 
 const (
 	defaultLeaderLease             = int64(3)
+	defaultNextRetryDelay          = time.Second
 	defaultCompactionMode          = "periodic"
 	defaultAutoCompactionRetention = "1h"
-	defaultQuotaBackendBytes       = typeutil.ByteSize(8 * units.GiB) // 8GB
-
-	// The default max bytes for grpc message
-	// Unsafe recovery report is included in store heartbeat, and assume that each peer report occupies about 500B at most,
-	// then 150MB can fit for store reports that have about 300k regions which is something of a huge amount of region on one TiKV.
-	defaultMaxRequestBytes = uint(150 * units.MiB) // 150MB
+	defaultQuotaBackendBytes       = typeutil.ByteSize(8 * 1024 * 1024 * 1024) // 8GB
 
 	defaultName                = "pd"
 	defaultClientUrls          = "http://127.0.0.1:2379"
@@ -232,36 +226,28 @@ const (
 
 	defaultLeaderPriorityCheckInterval = time.Minute
 
-	defaultUseRegionStorage  = true
-	defaultTraceRegionFlow   = true
-	defaultFlowRoundByDigit  = 3 // KB
-	maxTraceFlowRoundByDigit = 5 // 0.1 MB
-	defaultMaxResetTSGap     = 24 * time.Hour
-	defaultKeyType           = "table"
-
-	// DefaultMinResolvedTSPersistenceInterval is the default value of min resolved ts persistent interval.
-	DefaultMinResolvedTSPersistenceInterval = time.Second
+	defaultUseRegionStorage = true
+	defaultTraceRegionFlow  = true
+	defaultFlowRoundByDigit = 3
+	defaultMaxResetTSGap    = 24 * time.Hour
+	defaultKeyType          = "table"
 
 	defaultStrictlyMatchLabel   = false
 	defaultEnablePlacementRules = true
 	defaultEnableGRPCGateway    = true
 	defaultDisableErrorVerbose  = true
-	defaultEnableWitness        = false
-	defaultHaltScheduling       = false
 
 	defaultDashboardAddress = "auto"
 
 	defaultDRWaitStoreTimeout = time.Minute
+	defaultDRWaitSyncTimeout  = time.Minute
+	defaultDRWaitAsyncTimeout = 2 * time.Minute
 
 	defaultTSOSaveInterval = time.Duration(defaultLeaderLease) * time.Second
 	// DefaultTSOUpdatePhysicalInterval is the default value of the config `TSOUpdatePhysicalInterval`.
 	DefaultTSOUpdatePhysicalInterval = 50 * time.Millisecond
 	maxTSOUpdatePhysicalInterval     = 10 * time.Second
-	minTSOUpdatePhysicalInterval     = 1 * time.Millisecond
-
-	defaultLogFormat = "text"
-
-	defaultMaxMovableHotPeerSize = int64(512)
+	minTSOUpdatePhysicalInterval     = 50 * time.Millisecond
 )
 
 // Special keys for Labels
@@ -271,7 +257,7 @@ const (
 )
 
 var (
-	defaultEnableTelemetry = false
+	defaultEnableTelemetry = true
 	defaultRuntimeServices = []string{}
 	defaultLocationLabels  = []string{}
 	// DefaultStoreLimit is the default store limit of add peer and remove peer.
@@ -292,7 +278,7 @@ func initByLDFlags(edition string) {
 
 // StoreLimit is the default limit of adding peer and removing peer when putting stores.
 type StoreLimit struct {
-	mu syncutil.RWMutex
+	mu sync.RWMutex
 	// AddPeer is the default rate of adding peers for store limit (per minute).
 	AddPeer float64
 	// RemovePeer is the default rate of removing peers for store limit (per minute).
@@ -410,6 +396,10 @@ func (c *Config) Parse(arguments []string) error {
 		}
 		if meta.IsDefined("schedule", "disable-raft-learner") {
 			msg := fmt.Sprintf("disable-raft-learner in %s is deprecated", c.configFile)
+			c.WarningMsgs = append(c.WarningMsgs, msg)
+		}
+		if meta.IsDefined("dashboard", "disable-telemetry") {
+			msg := fmt.Sprintf("disable-telemetry in %s is deprecated, use enable-telemetry instead", c.configFile)
 			c.WarningMsgs = append(c.WarningMsgs, msg)
 		}
 	}
@@ -559,13 +549,14 @@ func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
 		c.Labels = make(map[string]string)
 	}
 
+	if c.nextRetryDelay == 0 {
+		c.nextRetryDelay = defaultNextRetryDelay
+	}
+
 	adjustString(&c.AutoCompactionMode, defaultCompactionMode)
 	adjustString(&c.AutoCompactionRetention, defaultAutoCompactionRetention)
 	if !configMetaData.IsDefined("quota-backend-bytes") {
 		c.QuotaBackendBytes = defaultQuotaBackendBytes
-	}
-	if !configMetaData.IsDefined("max-request-bytes") {
-		c.MaxRequestBytes = defaultMaxRequestBytes
 	}
 	adjustDuration(&c.TickInterval, defaultTickInterval)
 	adjustDuration(&c.ElectionInterval, defaultElectionInterval)
@@ -601,10 +592,6 @@ func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
 
 	c.Security.Encryption.Adjust()
 
-	if len(c.Log.Format) == 0 {
-		c.Log.Format = defaultLogFormat
-	}
-
 	return nil
 }
 
@@ -635,7 +622,6 @@ func (c *Config) configFromFile(path string) (*toml.MetaData, error) {
 }
 
 // ScheduleConfig is the schedule configuration.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type ScheduleConfig struct {
 	// If the snapshot count of one store is greater than this value,
 	// it will never be used as a source or target store.
@@ -648,8 +634,6 @@ type ScheduleConfig struct {
 	MaxMergeRegionKeys uint64 `toml:"max-merge-region-keys" json:"max-merge-region-keys"`
 	// SplitMergeInterval is the minimum interval time to permit merge after split.
 	SplitMergeInterval typeutil.Duration `toml:"split-merge-interval" json:"split-merge-interval"`
-	// SwitchWitnessInterval is the minimum interval that allows a peer to become a witness again after it is promoted to non-witness.
-	SwitchWitnessInterval typeutil.Duration `toml:"switch-witness-interval" json:"swtich-witness-interval"`
 	// EnableOneWayMerge is the option to enable one way merge. This means a Region can only be merged into the next region of it.
 	EnableOneWayMerge bool `toml:"enable-one-way-merge" json:"enable-one-way-merge,string"`
 	// EnableCrossTableMerge is the option to enable cross table merge. This means two Regions can be merged with different table IDs.
@@ -660,9 +644,6 @@ type ScheduleConfig struct {
 	// MaxStoreDownTime is the max duration after which
 	// a store will be considered to be down if it hasn't reported heartbeats.
 	MaxStoreDownTime typeutil.Duration `toml:"max-store-down-time" json:"max-store-down-time"`
-	// MaxStorePreparingTime is the max duration after which
-	// a store will be considered to be preparing.
-	MaxStorePreparingTime typeutil.Duration `toml:"max-store-preparing-time" json:"max-store-preparing-time"`
 	// LeaderScheduleLimit is the max coexist leader schedules.
 	LeaderScheduleLimit uint64 `toml:"leader-schedule-limit" json:"leader-schedule-limit"`
 	// LeaderSchedulePolicy is the option to balance leader, there are some policies supported: ["count", "size"], default: "count"
@@ -740,9 +721,6 @@ type ScheduleConfig struct {
 	EnableDebugMetrics bool `toml:"enable-debug-metrics" json:"enable-debug-metrics,string"`
 	// EnableJointConsensus is the option to enable using joint consensus as a operator step.
 	EnableJointConsensus bool `toml:"enable-joint-consensus" json:"enable-joint-consensus,string"`
-	// EnableTiKVSplitRegion is the option to enable tikv split region.
-	// on ebs-based BR we need to disable it with TTL
-	EnableTiKVSplitRegion bool `toml:"enable-tikv-split-region" json:"enable-tikv-split-region,string"`
 
 	// Schedulers support for loading customized schedulers
 	Schedulers SchedulerConfigs `toml:"schedulers" json:"schedulers-v2"` // json v2 is for the sake of compatible upgrade
@@ -757,26 +735,6 @@ type ScheduleConfig struct {
 	// is overwritten, the value is fixed until it is deleted.
 	// Default: manual
 	StoreLimitMode string `toml:"store-limit-mode" json:"store-limit-mode"`
-
-	// Controls the time interval between write hot regions info into leveldb.
-	HotRegionsWriteInterval typeutil.Duration `toml:"hot-regions-write-interval" json:"hot-regions-write-interval"`
-
-	// The day of hot regions data to be reserved. 0 means close.
-	HotRegionsReservedDays uint64 `toml:"hot-regions-reserved-days" json:"hot-regions-reserved-days"`
-
-	// MaxMovableHotPeerSize is the threshold of region size for balance hot region and split bucket scheduler.
-	// Hot region must be split before moved if it's region size is greater than MaxMovableHotPeerSize.
-	MaxMovableHotPeerSize int64 `toml:"max-movable-hot-peer-size" json:"max-movable-hot-peer-size,omitempty"`
-
-	// EnableDiagnostic is the the option to enable using diagnostic
-	EnableDiagnostic bool `toml:"enable-diagnostic" json:"enable-diagnostic,string"`
-
-	// EnableWitness is the option to enable using witness
-	EnableWitness bool `toml:"enable-witness" json:"enable-witness,string"`
-
-	// HaltScheduling is the option to halt the scheduling. Once it's on, PD will halt the scheduling,
-	// and any other scheduling configs will be ignored.
-	HaltScheduling bool `toml:"halt-scheduling" json:"halt-scheduling,string,omitempty"`
 }
 
 // Clone returns a cloned scheduling configuration.
@@ -798,13 +756,12 @@ func (c *ScheduleConfig) Clone() *ScheduleConfig {
 
 const (
 	defaultMaxReplicas               = 3
-	defaultMaxSnapshotCount          = 64
-	defaultMaxPendingPeerCount       = 64
+	defaultMaxSnapshotCount          = 3
+	defaultMaxPendingPeerCount       = 16
 	defaultMaxMergeRegionSize        = 20
-	defaultSplitMergeInterval        = time.Hour
-	defaultSwitchWitnessInterval     = time.Hour
-	defaultEnableDiagnostic          = false
-	defaultPatrolRegionInterval      = 10 * time.Millisecond
+	defaultMaxMergeRegionKeys        = 200000
+	defaultSplitMergeInterval        = 1 * time.Hour
+	defaultPatrolRegionInterval      = 100 * time.Millisecond
 	defaultMaxStoreDownTime          = 30 * time.Minute
 	defaultLeaderScheduleLimit       = 4
 	defaultRegionScheduleLimit       = 2048
@@ -822,12 +779,7 @@ const (
 	defaultLeaderSchedulePolicy        = "count"
 	defaultStoreLimitMode              = "manual"
 	defaultEnableJointConsensus        = true
-	defaultEnableTiKVSplitRegion       = true
 	defaultEnableCrossTableMerge       = true
-	defaultHotRegionsWriteInterval     = 10 * time.Minute
-	defaultHotRegionsReservedDays      = 7
-	// It means we skip the preparing stage after the 48 hours no matter if the store has finished preparing stage.
-	defaultMaxStorePreparingTime = 48 * time.Hour
 )
 
 func (c *ScheduleConfig) adjust(meta *configMetaData, reloading bool) error {
@@ -840,12 +792,12 @@ func (c *ScheduleConfig) adjust(meta *configMetaData, reloading bool) error {
 	if !meta.IsDefined("max-merge-region-size") {
 		adjustUint64(&c.MaxMergeRegionSize, defaultMaxMergeRegionSize)
 	}
+	if !meta.IsDefined("max-merge-region-keys") {
+		adjustUint64(&c.MaxMergeRegionKeys, defaultMaxMergeRegionKeys)
+	}
 	adjustDuration(&c.SplitMergeInterval, defaultSplitMergeInterval)
-	adjustDuration(&c.SwitchWitnessInterval, defaultSwitchWitnessInterval)
 	adjustDuration(&c.PatrolRegionInterval, defaultPatrolRegionInterval)
 	adjustDuration(&c.MaxStoreDownTime, defaultMaxStoreDownTime)
-	adjustDuration(&c.HotRegionsWriteInterval, defaultHotRegionsWriteInterval)
-	adjustDuration(&c.MaxStorePreparingTime, defaultMaxStorePreparingTime)
 	if !meta.IsDefined("leader-schedule-limit") {
 		adjustUint64(&c.LeaderScheduleLimit, defaultLeaderScheduleLimit)
 	}
@@ -879,29 +831,15 @@ func (c *ScheduleConfig) adjust(meta *configMetaData, reloading bool) error {
 	if !meta.IsDefined("enable-joint-consensus") {
 		c.EnableJointConsensus = defaultEnableJointConsensus
 	}
-	if !meta.IsDefined("enable-tikv-split-region") {
-		c.EnableTiKVSplitRegion = defaultEnableTiKVSplitRegion
-	}
 	if !meta.IsDefined("enable-cross-table-merge") {
 		c.EnableCrossTableMerge = defaultEnableCrossTableMerge
 	}
 	adjustFloat64(&c.LowSpaceRatio, defaultLowSpaceRatio)
 	adjustFloat64(&c.HighSpaceRatio, defaultHighSpaceRatio)
-	if !meta.IsDefined("enable-diagnostic") {
-		c.EnableDiagnostic = defaultEnableDiagnostic
-	}
-
-	if !meta.IsDefined("enable-witness") {
-		c.EnableWitness = defaultEnableWitness
-	}
 
 	// new cluster:v2, old cluster:v1
 	if !meta.IsDefined("region-score-formula-version") && !reloading {
 		adjustString(&c.RegionScoreFormulaVersion, defaultRegionScoreFormulaVersion)
-	}
-
-	if !meta.IsDefined("halt-scheduling") {
-		c.HaltScheduling = defaultHaltScheduling
 	}
 
 	adjustSchedulers(&c.Schedulers, DefaultSchedulers)
@@ -923,10 +861,6 @@ func (c *ScheduleConfig) adjust(meta *configMetaData, reloading bool) error {
 		c.StoreLimit = make(map[uint64]StoreLimitConfig)
 	}
 
-	if !meta.IsDefined("hot-regions-reserved-days") {
-		adjustUint64(&c.HotRegionsReservedDays, defaultHotRegionsReservedDays)
-	}
-
 	return c.Validate()
 }
 
@@ -938,15 +872,6 @@ func (c *ScheduleConfig) migrateConfigurationMap() map[string][2]*bool {
 		"remove-extra-replica":    {&c.DisableRemoveExtraReplica, &c.EnableRemoveExtraReplica},
 		"location-replacement":    {&c.DisableLocationReplacement, &c.EnableLocationReplacement},
 	}
-}
-
-// GetMaxMergeRegionKeys returns the max merge keys.
-// it should keep consistent with tikv: https://github.com/tikv/tikv/pull/12484
-func (c *ScheduleConfig) GetMaxMergeRegionKeys() uint64 {
-	if keys := c.MaxMergeRegionKeys; keys != 0 {
-		return keys
-	}
-	return c.MaxMergeRegionSize * 10000
 }
 
 func (c *ScheduleConfig) parseDeprecatedFlag(meta *configMetaData, name string, old, new bool) (bool, error) {
@@ -986,7 +911,7 @@ func (c *ScheduleConfig) MigrateDeprecatedFlags() {
 // Validate is used to validate if some scheduling configurations are right.
 func (c *ScheduleConfig) Validate() error {
 	if c.TolerantSizeRatio < 0 {
-		return errors.New("tolerant-size-ratio should be non-negative")
+		return errors.New("tolerant-size-ratio should be nonnegative")
 	}
 	if c.LowSpaceRatio < 0 || c.LowSpaceRatio > 1 {
 		return errors.New("low-space-ratio should between 0 and 1")
@@ -996,9 +921,6 @@ func (c *ScheduleConfig) Validate() error {
 	}
 	if c.LowSpaceRatio <= c.HighSpaceRatio {
 		return errors.New("low-space-ratio should be larger than high-space-ratio")
-	}
-	if c.LeaderSchedulePolicy != "count" && c.LeaderSchedulePolicy != "size" {
-		return errors.Errorf("leader-schedule-policy %v is invalid", c.LeaderSchedulePolicy)
 	}
 	for _, scheduleConfig := range c.Schedulers {
 		if !IsSchedulerRegistered(scheduleConfig.Type) {
@@ -1058,7 +980,7 @@ var DefaultSchedulers = SchedulerConfigs{
 	{Type: "balance-region"},
 	{Type: "balance-leader"},
 	{Type: "hot-region"},
-	{Type: "split-bucket"},
+	{Type: "label"},
 }
 
 // IsDefaultScheduler checks whether the scheduler is enable by default.
@@ -1072,7 +994,6 @@ func IsDefaultScheduler(typ string) bool {
 }
 
 // ReplicationConfig is the replication configuration.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type ReplicationConfig struct {
 	// MaxReplicas is the number of replicas for each region.
 	MaxReplicas uint64 `toml:"max-replicas" json:"max-replicas"`
@@ -1087,9 +1008,6 @@ type ReplicationConfig struct {
 
 	// When PlacementRules feature is enabled. MaxReplicas, LocationLabels and IsolationLabels are not used any more.
 	EnablePlacementRules bool `toml:"enable-placement-rules" json:"enable-placement-rules,string"`
-
-	// EnablePlacementRuleCache controls whether use cache during rule checker
-	EnablePlacementRulesCache bool `toml:"enable-placement-rules-cache" json:"enable-placement-rules-cache,string"`
 
 	// IsolationLevel is used to isolate replicas explicitly and forcibly if it's not empty.
 	// Its value must be empty or one of LocationLabels.
@@ -1144,7 +1062,6 @@ func (c *ReplicationConfig) adjust(meta *configMetaData) error {
 }
 
 // PDServerConfig is the configuration for pd server.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type PDServerConfig struct {
 	// UseRegionStorage enables the independent region storage.
 	UseRegionStorage bool `toml:"use-region-storage" json:"use-region-storage,string"`
@@ -1165,8 +1082,6 @@ type PDServerConfig struct {
 	TraceRegionFlow bool `toml:"trace-region-flow" json:"trace-region-flow,string,omitempty"`
 	// FlowRoundByDigit used to discretization processing flow information.
 	FlowRoundByDigit int `toml:"flow-round-by-digit" json:"flow-round-by-digit"`
-	// MinResolvedTSPersistenceInterval is the interval to save the min resolved ts.
-	MinResolvedTSPersistenceInterval typeutil.Duration `toml:"min-resolved-ts-persistence-interval" json:"min-resolved-ts-persistence-interval"`
 }
 
 func (c *PDServerConfig) adjust(meta *configMetaData) error {
@@ -1188,9 +1103,6 @@ func (c *PDServerConfig) adjust(meta *configMetaData) error {
 	}
 	if !meta.IsDefined("flow-round-by-digit") {
 		adjustInt(&c.FlowRoundByDigit, defaultFlowRoundByDigit)
-	}
-	if !meta.IsDefined("min-resolved-ts-persistence-interval") {
-		adjustDuration(&c.MinResolvedTSPersistenceInterval, DefaultMinResolvedTSPersistenceInterval)
 	}
 	c.migrateConfigurationFromFile(meta)
 	return c.Validate()
@@ -1239,9 +1151,6 @@ func (c *PDServerConfig) Validate() error {
 			return err
 		}
 	}
-	if c.KeyType != "table" && c.KeyType != "raw" && c.KeyType != "txn" {
-		return errors.Errorf("key-type %v is invalid", c.KeyType)
-	}
 	if c.FlowRoundByDigit < 0 {
 		return errs.ErrConfigItem.GenWithStack("flow round by digit cannot be negative number")
 	}
@@ -1255,12 +1164,7 @@ type StoreLabel struct {
 	Value string `toml:"value" json:"value"`
 }
 
-// RejectLeader is the label property type that suggests a store should not
-// have any region leaders.
-const RejectLeader = "reject-leader"
-
 // LabelPropertyConfig is the config section to set properties to store labels.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type LabelPropertyConfig map[string][]StoreLabel
 
 // Clone returns a cloned label property configuration.
@@ -1272,6 +1176,23 @@ func (c LabelPropertyConfig) Clone() LabelPropertyConfig {
 		m[k] = sl2
 	}
 	return m
+}
+
+// ParseUrls parse a string into multiple urls.
+// Export for api.
+func ParseUrls(s string) ([]url.URL, error) {
+	items := strings.Split(s, ",")
+	urls := make([]url.URL, 0, len(items))
+	for _, item := range items {
+		u, err := url.Parse(item)
+		if err != nil {
+			return nil, errs.ErrURLParse.Wrap(err).GenWithStackByCause()
+		}
+
+		urls = append(urls, *u)
+	}
+
+	return urls, nil
 }
 
 // SetupLogger setup the logger.
@@ -1301,6 +1222,33 @@ func (c *Config) GetConfigFile() string {
 	return c.configFile
 }
 
+// RewriteFile rewrites the config file after updating the config.
+func (c *Config) RewriteFile(new *Config) error {
+	filePath := c.GetConfigFile()
+	if filePath == "" {
+		return nil
+	}
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(*new); err != nil {
+		return err
+	}
+	dir := filepath.Dir(filePath)
+	tmpfile := filepath.Join(dir, "tmp_pd.toml")
+
+	f, err := os.Create(tmpfile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return os.Rename(tmpfile, filePath)
+}
+
 // GenEmbedEtcdConfig generates a configuration for embedded etcd.
 func (c *Config) GenEmbedEtcdConfig() (*embed.Config, error) {
 	cfg := embed.NewConfig()
@@ -1318,7 +1266,6 @@ func (c *Config) GenEmbedEtcdConfig() (*embed.Config, error) {
 	cfg.AutoCompactionMode = c.AutoCompactionMode
 	cfg.AutoCompactionRetention = c.AutoCompactionRetention
 	cfg.QuotaBackendBytes = int64(c.QuotaBackendBytes)
-	cfg.MaxRequestBytes = c.MaxRequestBytes
 
 	allowedCN, serr := c.Security.GetOneAllowedCN()
 	if serr != nil {
@@ -1341,22 +1288,22 @@ func (c *Config) GenEmbedEtcdConfig() (*embed.Config, error) {
 	cfg.Logger = "zap"
 	var err error
 
-	cfg.LPUrls, err = parseUrls(c.PeerUrls)
+	cfg.LPUrls, err = ParseUrls(c.PeerUrls)
 	if err != nil {
 		return nil, err
 	}
 
-	cfg.APUrls, err = parseUrls(c.AdvertisePeerUrls)
+	cfg.APUrls, err = ParseUrls(c.AdvertisePeerUrls)
 	if err != nil {
 		return nil, err
 	}
 
-	cfg.LCUrls, err = parseUrls(c.ClientUrls)
+	cfg.LCUrls, err = ParseUrls(c.ClientUrls)
 	if err != nil {
 		return nil, err
 	}
 
-	cfg.ACUrls, err = parseUrls(c.AdvertiseClientUrls)
+	cfg.ACUrls, err = ParseUrls(c.AdvertiseClientUrls)
 	if err != nil {
 		return nil, err
 	}
@@ -1373,6 +1320,8 @@ type DashboardConfig struct {
 	InternalProxy      bool   `toml:"internal-proxy" json:"internal-proxy"`
 	EnableTelemetry    bool   `toml:"enable-telemetry" json:"enable-telemetry"`
 	EnableExperimental bool   `toml:"enable-experimental" json:"enable-experimental"`
+	// WARN: DisableTelemetry is deprecated.
+	DisableTelemetry bool `toml:"disable-telemetry" json:"disable-telemetry,omitempty"`
 }
 
 // ToTiDBTLSConfig generates tls config for connecting to TiDB, used by tidb-dashboard.
@@ -1396,10 +1345,10 @@ func (c *DashboardConfig) adjust(meta *configMetaData) {
 	if !meta.IsDefined("enable-telemetry") {
 		c.EnableTelemetry = defaultEnableTelemetry
 	}
+	c.EnableTelemetry = c.EnableTelemetry && !c.DisableTelemetry
 }
 
 // ReplicationModeConfig is the configuration for the replication policy.
-// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type ReplicationModeConfig struct {
 	ReplicationMode string                      `toml:"replication-mode" json:"replication-mode"` // can be 'dr-auto-sync' or 'majority', default value is 'majority'
 	DRAutoSync      DRAutoSyncReplicationConfig `toml:"dr-auto-sync" json:"dr-auto-sync"`         // used when ReplicationMode is 'dr-auto-sync'
@@ -1436,12 +1385,19 @@ type DRAutoSyncReplicationConfig struct {
 	PrimaryReplicas  int               `toml:"primary-replicas" json:"primary-replicas"`
 	DRReplicas       int               `toml:"dr-replicas" json:"dr-replicas"`
 	WaitStoreTimeout typeutil.Duration `toml:"wait-store-timeout" json:"wait-store-timeout"`
-	PauseRegionSplit bool              `toml:"pause-region-split" json:"pause-region-split,string"`
+	WaitSyncTimeout  typeutil.Duration `toml:"wait-sync-timeout" json:"wait-sync-timeout"`
+	WaitAsyncTimeout typeutil.Duration `toml:"wait-async-timeout" json:"wait-async-timeout"`
 }
 
 func (c *DRAutoSyncReplicationConfig) adjust(meta *configMetaData) {
 	if !meta.IsDefined("wait-store-timeout") {
 		c.WaitStoreTimeout = typeutil.NewDuration(defaultDRWaitStoreTimeout)
+	}
+	if !meta.IsDefined("wait-sync-timeout") {
+		c.WaitSyncTimeout = typeutil.NewDuration(defaultDRWaitSyncTimeout)
+	}
+	if !meta.IsDefined("wait-async-timeout") {
+		c.WaitAsyncTimeout = typeutil.NewDuration(defaultDRWaitAsyncTimeout)
 	}
 }
 

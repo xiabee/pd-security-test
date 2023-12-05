@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -20,7 +19,6 @@ import (
 
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule/plan"
 )
 
 // StoreCandidates wraps store list and provide utilities to select source or
@@ -35,14 +33,14 @@ func NewCandidates(stores []*core.StoreInfo) *StoreCandidates {
 }
 
 // FilterSource keeps stores that can pass all source filters.
-func (c *StoreCandidates) FilterSource(opt *config.PersistOptions, collector *plan.Collector, counter *Counter, filters ...Filter) *StoreCandidates {
-	c.Stores = SelectSourceStores(c.Stores, filters, opt, collector, counter)
+func (c *StoreCandidates) FilterSource(opt *config.PersistOptions, filters ...Filter) *StoreCandidates {
+	c.Stores = SelectSourceStores(c.Stores, filters, opt)
 	return c
 }
 
 // FilterTarget keeps stores that can pass all target filters.
-func (c *StoreCandidates) FilterTarget(opt *config.PersistOptions, collector *plan.Collector, counter *Counter, filters ...Filter) *StoreCandidates {
-	c.Stores = SelectTargetStores(c.Stores, filters, opt, collector, counter)
+func (c *StoreCandidates) FilterTarget(opt *config.PersistOptions, filters ...Filter) *StoreCandidates {
+	c.Stores = SelectTargetStores(c.Stores, filters, opt)
 	return c
 }
 
@@ -52,47 +50,30 @@ func (c *StoreCandidates) Sort(less StoreComparer) *StoreCandidates {
 	return c
 }
 
+// Reverse reverses the candidate store list.
+func (c *StoreCandidates) Reverse() *StoreCandidates {
+	for i := len(c.Stores)/2 - 1; i >= 0; i-- {
+		opp := len(c.Stores) - 1 - i
+		c.Stores[i], c.Stores[opp] = c.Stores[opp], c.Stores[i]
+	}
+	return c
+}
+
 // Shuffle reorders all candidates randomly.
 func (c *StoreCandidates) Shuffle() *StoreCandidates {
 	rand.Shuffle(len(c.Stores), func(i, j int) { c.Stores[i], c.Stores[j] = c.Stores[j], c.Stores[i] })
 	return c
 }
 
-// KeepTheTopStores keeps the slice of the stores in the front order by asc.
-func (c *StoreCandidates) KeepTheTopStores(cmp StoreComparer, asc bool) *StoreCandidates {
-	if len(c.Stores) <= 1 {
-		return c
+// Top keeps all stores that have the same priority with the first store.
+// The store list should be sorted before calling Top.
+func (c *StoreCandidates) Top(less StoreComparer) *StoreCandidates {
+	var i int
+	for i < len(c.Stores) && less(c.Stores[0], c.Stores[i]) == 0 {
+		i++
 	}
-	topIdx := 0
-	for idx := 1; idx < c.Len(); idx++ {
-		compare := cmp(c.Stores[topIdx], c.Stores[idx])
-		if compare == 0 {
-			topIdx++
-		} else if (compare > 0 && asc) || (!asc && compare < 0) {
-			topIdx = 0
-		} else {
-			continue
-		}
-		c.Stores[idx], c.Stores[topIdx] = c.Stores[topIdx], c.Stores[idx]
-	}
-	c.Stores = c.Stores[:topIdx+1]
+	c.Stores = c.Stores[:i]
 	return c
-}
-
-// PickTheTopStore returns the first store order by asc.
-// It returns the min item when asc is true, returns the max item when asc is false.
-func (c *StoreCandidates) PickTheTopStore(cmp StoreComparer, asc bool) *core.StoreInfo {
-	if len(c.Stores) == 0 {
-		return nil
-	}
-	topIdx := 0
-	for idx := 1; idx < len(c.Stores); idx++ {
-		compare := cmp(c.Stores[topIdx], c.Stores[idx])
-		if (compare > 0 && asc) || (!asc && compare < 0) {
-			topIdx = idx
-		}
-	}
-	return c.Stores[topIdx]
 }
 
 // PickFirst returns the first store in candidate list.
@@ -109,11 +90,6 @@ func (c *StoreCandidates) RandomPick() *core.StoreInfo {
 		return nil
 	}
 	return c.Stores[rand.Intn(len(c.Stores))]
-}
-
-// PickAll return all stores in candidate list.
-func (c *StoreCandidates) PickAll() []*core.StoreInfo {
-	return c.Stores
 }
 
 // Len returns a length of candidate list.

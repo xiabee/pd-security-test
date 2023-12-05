@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -45,7 +44,7 @@ func NewClusterStatusCommand() *cobra.Command {
 }
 
 func showClusterCommandFunc(cmd *cobra.Command, args []string) {
-	r, err := doRequest(cmd, clusterPrefix, http.MethodGet, http.Header{})
+	r, err := doRequest(cmd, clusterPrefix, http.MethodGet)
 	if err != nil {
 		cmd.Printf("Failed to get the cluster information: %s\n", err)
 		return
@@ -54,7 +53,7 @@ func showClusterCommandFunc(cmd *cobra.Command, args []string) {
 }
 
 func showClusterStatusCommandFunc(cmd *cobra.Command, args []string) {
-	r, err := doRequest(cmd, clusterStatusPrefix, http.MethodGet, http.Header{})
+	r, err := doRequest(cmd, clusterStatusPrefix, http.MethodGet)
 	if err != nil {
 		cmd.Printf("Failed to get the cluster status: %s\n", err)
 		return

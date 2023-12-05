@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -20,7 +19,6 @@ import (
 	"math/rand"
 	"os"
 
-	"github.com/docker/go-units"
 	"github.com/go-echarts/go-echarts/charts"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
@@ -36,8 +34,11 @@ func newImportData() *Case {
 	// Initialize the cluster
 	for i := 1; i <= 10; i++ {
 		simCase.Stores = append(simCase.Stores, &Store{
-			ID:     IDAllocator.nextID(),
-			Status: metapb.StoreState_Up,
+			ID:        IDAllocator.nextID(),
+			Status:    metapb.StoreState_Up,
+			Capacity:  1 * TB,
+			Available: 900 * GB,
+			Version:   "2.1.0",
 		})
 	}
 
@@ -52,12 +53,12 @@ func newImportData() *Case {
 			ID:     IDAllocator.nextID(),
 			Peers:  peers,
 			Leader: peers[0],
-			Size:   32 * units.MiB,
+			Size:   32 * MB,
 			Keys:   320000,
 		})
 	}
 
-	simCase.RegionSplitSize = 64 * units.MiB
+	simCase.RegionSplitSize = 64 * MB
 	simCase.RegionSplitKeys = 640000
 	simCase.TableNumber = 10
 	// Events description
@@ -69,7 +70,7 @@ func newImportData() *Case {
 			return nil
 		}
 		return map[string]int64{
-			table12: 32 * units.MiB,
+			table12: 32 * MB,
 		}
 	}
 	simCase.Events = []EventDescriptor{e}

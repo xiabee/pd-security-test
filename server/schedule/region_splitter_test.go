@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -17,9 +16,8 @@ package schedule
 import (
 	"bytes"
 	"context"
-	"testing"
 
-	"github.com/stretchr/testify/suite"
+	. "github.com/pingcap/check"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
@@ -61,56 +59,52 @@ func (m *mockSplitRegionsHandler) ScanRegionsByKeyRange(groupKeys *regionGroupKe
 	groupKeys.finished = true
 }
 
-type regionSplitterTestSuite struct {
-	suite.Suite
+var _ = Suite(&testRegionSplitterSuite{})
 
+type testRegionSplitterSuite struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func TestRegionSplitterTestSuite(t *testing.T) {
-	suite.Run(t, new(regionSplitterTestSuite))
+func (s *testRegionSplitterSuite) SetUpSuite(c *C) {
+	s.ctx, s.cancel = context.WithCancel(context.Background())
 }
 
-func (suite *regionSplitterTestSuite) SetupSuite() {
-	suite.ctx, suite.cancel = context.WithCancel(context.Background())
+func (s *testRegionSplitterSuite) TearDownTest(c *C) {
+	s.cancel()
 }
 
-func (suite *regionSplitterTestSuite) TearDownTest() {
-	suite.cancel()
-}
-
-func (suite *regionSplitterTestSuite) TestRegionSplitter() {
+func (s *testRegionSplitterSuite) TestRegionSplitter(c *C) {
 	opt := config.NewTestOptions()
 	opt.SetPlacementRuleEnabled(false)
-	tc := mockcluster.NewCluster(suite.ctx, opt)
+	tc := mockcluster.NewCluster(s.ctx, opt)
 	handler := newMockSplitRegionsHandler()
 	tc.AddLeaderRegionWithRange(1, "eee", "hhh", 2, 3, 4)
 	splitter := NewRegionSplitter(tc, handler)
 	newRegions := map[uint64]struct{}{}
 	// assert success
-	failureKeys := splitter.splitRegionsByKeys(suite.ctx, [][]byte{[]byte("fff"), []byte("ggg")}, newRegions)
-	suite.Empty(failureKeys)
-	suite.Len(newRegions, 2)
+	failureKeys := splitter.splitRegionsByKeys(s.ctx, [][]byte{[]byte("fff"), []byte("ggg")}, newRegions)
+	c.Assert(len(failureKeys), Equals, 0)
+	c.Assert(len(newRegions), Equals, 2)
 
-	percentage, newRegionsID := splitter.SplitRegions(suite.ctx, [][]byte{[]byte("fff"), []byte("ggg")}, 1)
-	suite.Equal(100, percentage)
-	suite.Len(newRegionsID, 2)
+	percentage, newRegionsID := splitter.SplitRegions(s.ctx, [][]byte{[]byte("fff"), []byte("ggg")}, 1)
+	c.Assert(percentage, Equals, 100)
+	c.Assert(len(newRegionsID), Equals, 2)
 	// assert out of range
 	newRegions = map[uint64]struct{}{}
-	failureKeys = splitter.splitRegionsByKeys(suite.ctx, [][]byte{[]byte("aaa"), []byte("bbb")}, newRegions)
-	suite.Len(failureKeys, 2)
-	suite.Empty(newRegions)
+	failureKeys = splitter.splitRegionsByKeys(s.ctx, [][]byte{[]byte("aaa"), []byte("bbb")}, newRegions)
+	c.Assert(len(failureKeys), Equals, 2)
+	c.Assert(len(newRegions), Equals, 0)
 
-	percentage, newRegionsID = splitter.SplitRegions(suite.ctx, [][]byte{[]byte("aaa"), []byte("bbb")}, 1)
-	suite.Equal(0, percentage)
-	suite.Empty(newRegionsID)
+	percentage, newRegionsID = splitter.SplitRegions(s.ctx, [][]byte{[]byte("aaa"), []byte("bbb")}, 1)
+	c.Assert(percentage, Equals, 0)
+	c.Assert(len(newRegionsID), Equals, 0)
 }
 
-func (suite *regionSplitterTestSuite) TestGroupKeysByRegion() {
+func (s *testRegionSplitterSuite) TestGroupKeysByRegion(c *C) {
 	opt := config.NewTestOptions()
 	opt.SetPlacementRuleEnabled(false)
-	tc := mockcluster.NewCluster(suite.ctx, opt)
+	tc := mockcluster.NewCluster(s.ctx, opt)
 	handler := newMockSplitRegionsHandler()
 	tc.AddLeaderRegionWithRange(1, "aaa", "ccc", 2, 3, 4)
 	tc.AddLeaderRegionWithRange(2, "ccc", "eee", 2, 3, 4)
@@ -122,18 +116,18 @@ func (suite *regionSplitterTestSuite) TestGroupKeysByRegion() {
 		[]byte("fff"),
 		[]byte("zzz"),
 	})
-	suite.Len(groupKeys, 3)
+	c.Assert(len(groupKeys), Equals, 3)
 	for k, v := range groupKeys {
 		switch k {
 		case uint64(1):
-			suite.Len(v.keys, 1)
-			suite.Equal([]byte("bbb"), v.keys[0])
+			c.Assert(len(v.keys), Equals, 1)
+			c.Assert(v.keys[0], DeepEquals, []byte("bbb"))
 		case uint64(2):
-			suite.Len(v.keys, 1)
-			suite.Equal([]byte("ddd"), v.keys[0])
+			c.Assert(len(v.keys), Equals, 1)
+			c.Assert(v.keys[0], DeepEquals, []byte("ddd"))
 		case uint64(3):
-			suite.Len(v.keys, 1)
-			suite.Equal([]byte("fff"), v.keys[0])
+			c.Assert(len(v.keys), Equals, 1)
+			c.Assert(v.keys[0], DeepEquals, []byte("fff"))
 		}
 	}
 }

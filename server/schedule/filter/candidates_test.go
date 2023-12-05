@@ -8,20 +8,17 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package filter
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
+
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule/plan"
 )
 
 // A dummy comparer for testing.
@@ -48,66 +45,54 @@ func idComparer2(a, b *core.StoreInfo) int {
 
 type idFilter func(uint64) bool
 
-func (f idFilter) Scope() string    { return "idFilter" }
-func (f idFilter) Type() filterType { return filterType(0) }
-func (f idFilter) Source(opt *config.PersistOptions, store *core.StoreInfo) *plan.Status {
-	if f(store.GetID()) {
-		return statusOK
-	}
-	// return any status as long as it's not statusOK
-	return statusStoreScoreDisallowed
+func (f idFilter) Scope() string { return "idFilter" }
+func (f idFilter) Type() string  { return "idFilter" }
+func (f idFilter) Source(opt *config.PersistOptions, store *core.StoreInfo) bool {
+	return f(store.GetID())
+}
+func (f idFilter) Target(opt *config.PersistOptions, store *core.StoreInfo) bool {
+	return f(store.GetID())
 }
 
-func (f idFilter) Target(opt *config.PersistOptions, store *core.StoreInfo) *plan.Status {
-	if f(store.GetID()) {
-		return statusOK
-	}
-	return statusStoreScoreDisallowed
-}
+type testCandidatesSuite struct{}
 
-func TestCandidates(t *testing.T) {
-	re := require.New(t)
-	cs := newTestCandidates(1, 2, 3, 4, 5)
-	cs.FilterSource(nil, nil, nil, idFilter(func(id uint64) bool { return id > 2 }))
-	check(re, cs, 3, 4, 5)
-	cs.FilterTarget(nil, nil, nil, idFilter(func(id uint64) bool { return id%2 == 1 }))
-	check(re, cs, 3, 5)
-	cs.FilterTarget(nil, nil, nil, idFilter(func(id uint64) bool { return id > 100 }))
-	check(re, cs)
+var _ = Suite(&testCandidatesSuite{})
+
+func (s *testCandidatesSuite) TestCandidates(c *C) {
+	cs := s.newCandidates(1, 2, 3, 4, 5)
+	cs.FilterSource(nil, idFilter(func(id uint64) bool { return id > 2 }))
+	s.check(c, cs, 3, 4, 5)
+	cs.FilterTarget(nil, idFilter(func(id uint64) bool { return id%2 == 1 }))
+	s.check(c, cs, 3, 5)
+	cs.FilterTarget(nil, idFilter(func(id uint64) bool { return id > 100 }))
+	s.check(c, cs)
 	store := cs.PickFirst()
-	re.Nil(store)
+	c.Assert(store, IsNil)
 	store = cs.RandomPick()
-	re.Nil(store)
+	c.Assert(store, IsNil)
 
-	cs = newTestCandidates(1, 3, 5, 7, 6, 2, 4)
-	minStore := cs.PickTheTopStore(idComparer, true)
-	re.Equal(uint64(1), minStore.GetID())
-	maxStore := cs.PickTheTopStore(idComparer, false)
-	re.Equal(uint64(7), maxStore.GetID())
-
+	cs = s.newCandidates(1, 3, 5, 7, 6, 2, 4)
 	cs.Sort(idComparer)
-	check(re, cs, 1, 2, 3, 4, 5, 6, 7)
+	s.check(c, cs, 1, 2, 3, 4, 5, 6, 7)
 	store = cs.PickFirst()
-	re.Equal(uint64(1), store.GetID())
-	store = cs.PickTheTopStore(idComparer, false)
-	re.Equal(uint64(7), store.GetID())
+	c.Assert(store.GetID(), Equals, uint64(1))
+	cs.Reverse()
+	s.check(c, cs, 7, 6, 5, 4, 3, 2, 1)
+	store = cs.PickFirst()
+	c.Assert(store.GetID(), Equals, uint64(7))
 	cs.Shuffle()
 	cs.Sort(idComparer)
-	check(re, cs, 1, 2, 3, 4, 5, 6, 7)
+	s.check(c, cs, 1, 2, 3, 4, 5, 6, 7)
 	store = cs.RandomPick()
-	re.Greater(store.GetID(), uint64(0))
-	re.Less(store.GetID(), uint64(8))
+	c.Assert(store.GetID(), Greater, uint64(0))
+	c.Assert(store.GetID(), Less, uint64(8))
 
-	cs = newTestCandidates(10, 15, 23, 20, 33, 32, 31)
-	cs.KeepTheTopStores(idComparer2, false)
-	check(re, cs, 33, 32, 31)
-
-	cs = newTestCandidates(10, 15, 23, 20, 33, 32, 31)
-	cs.KeepTheTopStores(idComparer2, true)
-	check(re, cs, 10, 15)
+	cs = s.newCandidates(10, 15, 23, 20, 33, 32, 31)
+	cs.Sort(idComparer).Reverse().Top(idComparer2)
+	s.check(c, cs, 33, 32, 31)
 }
 
-func newTestCandidates(ids ...uint64) *StoreCandidates {
+func (s *testCandidatesSuite) newCandidates(ids ...uint64) *StoreCandidates {
 	stores := make([]*core.StoreInfo, 0, len(ids))
 	for _, id := range ids {
 		stores = append(stores, core.NewStoreInfo(&metapb.Store{Id: id}))
@@ -115,9 +100,9 @@ func newTestCandidates(ids ...uint64) *StoreCandidates {
 	return NewCandidates(stores)
 }
 
-func check(re *require.Assertions, candidates *StoreCandidates, ids ...uint64) {
-	re.Len(candidates.Stores, len(ids))
+func (s *testCandidatesSuite) check(c *C, candidates *StoreCandidates, ids ...uint64) {
+	c.Assert(candidates.Stores, HasLen, len(ids))
 	for i, s := range candidates.Stores {
-		re.Equal(ids[i], s.GetID())
+		c.Assert(s.GetID(), Equals, ids[i])
 	}
 }

@@ -1,8 +1,6 @@
 # PD
 
-[![Check Status](https://github.com/tikv/pd/actions/workflows/check.yaml/badge.svg)](https://github.com/tikv/pd/actions/workflows/check.yaml)
 [![Build & Test Status](https://github.com/tikv/pd/actions/workflows/pd-tests.yaml/badge.svg?branch=master)](https://github.com/tikv/pd/actions/workflows/pd-tests.yaml)
-[![TSO Consistency Test Status](https://github.com/tikv/pd/actions/workflows/tso-consistency-test.yaml/badge.svg)](https://github.com/tikv/pd/actions/workflows/tso-consistency-test.yaml)
 [![GitHub release](https://img.shields.io/github/release/tikv/pd.svg)](https://github.com/tikv/pd/releases)
 [![Go Report Card](https://goreportcard.com/badge/github.com/tikv/pd)](https://goreportcard.com/report/github.com/tikv/pd)
 [![codecov](https://codecov.io/gh/tikv/pd/branch/master/graph/badge.svg)](https://codecov.io/gh/tikv/pd)
@@ -122,4 +120,9 @@ docker run -d -p 2379:2379 -p 2380:2380 --name pd tikv/pd \
 
 ### Cluster
 
-As a component of TiKV project, PD needs to run with TiKV to work. The cluster can also include TiDB to provide SQL services. You can refer [Deploy a TiDB Cluster Using TiUP](https://docs.pingcap.com/tidb/stable/production-deployment-using-tiup) or [TiDB in Kubernetes Documentation](https://docs.pingcap.com/tidb-in-kubernetes/stable) for detailed instructions to deploy a cluster.
+PD is a component in TiDB project, you must run it with TiDB and TiKV together, see
+[TiDB-Ansible](https://pingcap.com/docs/dev/how-to/deploy/orchestrated/ansible/#deploy-tidb-using-ansible)
+to learn how to set up the cluster and run them.
+
+You can also use [Docker](https://pingcap.com/docs/dev/how-to/deploy/orchestrated/docker/#deploy-tidb-using-docker)
+to run the cluster.

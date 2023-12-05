@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -16,15 +15,16 @@ package movingaverage
 
 import (
 	"math/rand"
-	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestPulse(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+var _ = Suite(&testAvgOverTimeSuite{})
+
+type testAvgOverTimeSuite struct{}
+
+func (t *testAvgOverTimeSuite) TestPulse(c *C) {
 	aot := NewAvgOverTime(5 * time.Second)
 	// warm up
 	for i := 0; i < 5; i++ {
@@ -37,67 +37,61 @@ func TestPulse(t *testing.T) {
 		} else {
 			aot.Add(0, time.Second)
 		}
-		re.LessOrEqual(aot.Get(), 600.)
-		re.GreaterOrEqual(aot.Get(), 400.)
+		c.Assert(aot.Get(), LessEqual, 600.)
+		c.Assert(aot.Get(), GreaterEqual, 400.)
 	}
 }
 
-func TestChange(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (t *testAvgOverTimeSuite) TestChange(c *C) {
 	aot := NewAvgOverTime(5 * time.Second)
 
 	// phase 1: 1000
 	for i := 0; i < 20; i++ {
 		aot.Add(1000, time.Second)
 	}
-	re.LessOrEqual(aot.Get(), 1010.)
-	re.GreaterOrEqual(aot.Get(), 990.)
+	c.Assert(aot.Get(), LessEqual, 1010.)
+	c.Assert(aot.Get(), GreaterEqual, 990.)
 
-	// phase 2: 500
+	//phase 2: 500
 	for i := 0; i < 5; i++ {
 		aot.Add(500, time.Second)
 	}
-	re.LessOrEqual(aot.Get(), 900.)
-	re.GreaterOrEqual(aot.Get(), 495.)
+	c.Assert(aot.Get(), LessEqual, 900.)
+	c.Assert(aot.Get(), GreaterEqual, 495.)
 	for i := 0; i < 15; i++ {
 		aot.Add(500, time.Second)
 	}
 
-	// phase 3: 100
+	//phase 3: 100
 	for i := 0; i < 5; i++ {
 		aot.Add(100, time.Second)
 	}
-	re.LessOrEqual(aot.Get(), 678.)
-	re.GreaterOrEqual(aot.Get(), 99.)
+	c.Assert(aot.Get(), LessEqual, 678.)
+	c.Assert(aot.Get(), GreaterEqual, 99.)
 
 	// clear
 	aot.Set(10)
-	re.Equal(10., aot.Get())
+	c.Assert(aot.Get(), Equals, 10.)
 }
 
-func TestMinFilled(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (t *testAvgOverTimeSuite) TestMinFilled(c *C) {
 	interval := 10 * time.Second
 	rate := 1.0
 	for aotSize := 2; aotSize < 10; aotSize++ {
 		for mfSize := 2; mfSize < 10; mfSize++ {
 			tm := NewTimeMedian(aotSize, mfSize, interval)
 			for i := 0; i < tm.GetFilledPeriod(); i++ {
-				re.Equal(0.0, tm.Get())
+				c.Assert(tm.Get(), Equals, 0.0)
 				tm.Add(rate*interval.Seconds(), interval)
 			}
-			re.Equal(rate, tm.Get())
+			c.Assert(tm.Get(), Equals, rate)
 		}
 	}
 }
 
-func TestUnstableInterval(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func (t *testAvgOverTimeSuite) TestUnstableInterval(c *C) {
 	aot := NewAvgOverTime(5 * time.Second)
-	re.Equal(0., aot.Get())
+	c.Assert(aot.Get(), Equals, 0.)
 	// warm up
 	for i := 0; i < 5; i++ {
 		aot.Add(1000, time.Second)
@@ -106,8 +100,8 @@ func TestUnstableInterval(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		r := float64(rand.Intn(5))
 		aot.Add(1000*r, time.Second*time.Duration(r))
-		re.LessOrEqual(aot.Get(), 1010.)
-		re.GreaterOrEqual(aot.Get(), 990.)
+		c.Assert(aot.Get(), LessEqual, 1010.)
+		c.Assert(aot.Get(), GreaterEqual, 990.)
 	}
 	// warm up
 	for i := 0; i < 5; i++ {
@@ -117,7 +111,7 @@ func TestUnstableInterval(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		rate := float64(i%5*100) + 500
 		aot.Add(rate*3, time.Second*3)
-		re.LessOrEqual(aot.Get(), 910.)
-		re.GreaterOrEqual(aot.Get(), 490.)
+		c.Assert(aot.Get(), LessEqual, 910.)
+		c.Assert(aot.Get(), GreaterEqual, 490.)
 	}
 }

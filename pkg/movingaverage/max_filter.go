@@ -8,13 +8,12 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package movingaverage
 
-import "github.com/elliotchance/pie/v2"
+import "github.com/montanaflynn/stats"
 
 // MaxFilter works as a maximum filter with specified window size.
 // There are at most `size` data points for calculating.
@@ -47,7 +46,8 @@ func (r *MaxFilter) Get() float64 {
 	if r.count < r.size {
 		records = r.records[:r.count]
 	}
-	return pie.Max(records)
+	max, _ := stats.Max(records)
+	return max
 }
 
 // Reset cleans the data set.
@@ -59,12 +59,4 @@ func (r *MaxFilter) Reset() {
 func (r *MaxFilter) Set(n float64) {
 	r.records[0] = n
 	r.count = 1
-}
-
-// GetInstantaneous returns the value just added.
-func (r *MaxFilter) GetInstantaneous() float64 {
-	if r.count == 0 {
-		return 0
-	}
-	return r.records[(r.count-1)%r.size]
 }

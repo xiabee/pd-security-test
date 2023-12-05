@@ -4,11 +4,10 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	   http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -17,34 +16,29 @@ package server
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/apiutil"
-	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/core/storelimit"
 	"github.com/tikv/pd/server/schedule"
-	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/server/schedulers"
 	"github.com/tikv/pd/server/statistics"
-	"github.com/tikv/pd/server/storage"
 	"github.com/tikv/pd/server/tso"
 	"go.uber.org/zap"
 )
@@ -77,8 +71,6 @@ var (
 	ErrPluginNotFound = func(pluginPath string) error {
 		return errors.Errorf("plugin is not found: %s", pluginPath)
 	}
-
-	schedulerConfigPrefix = "pd/api/v1/scheduler-config"
 )
 
 // Handler is a helper to export methods to handle API/RPC requests.
@@ -86,11 +78,11 @@ type Handler struct {
 	s               *Server
 	opt             *config.PersistOptions
 	pluginChMap     map[string]chan string
-	pluginChMapLock syncutil.RWMutex
+	pluginChMapLock sync.RWMutex
 }
 
 func newHandler(s *Server) *Handler {
-	return &Handler{s: s, opt: s.persistOptions, pluginChMap: make(map[string]chan string), pluginChMapLock: syncutil.RWMutex{}}
+	return &Handler{s: s, opt: s.persistOptions, pluginChMap: make(map[string]chan string), pluginChMapLock: sync.RWMutex{}}
 }
 
 // GetRaftCluster returns RaftCluster.
@@ -129,15 +121,6 @@ func (h *Handler) IsSchedulerDisabled(name string) (bool, error) {
 	return rc.IsSchedulerDisabled(name)
 }
 
-// IsSchedulerExisted returns whether scheduler is existed.
-func (h *Handler) IsSchedulerExisted(name string) (bool, error) {
-	rc, err := h.GetRaftCluster()
-	if err != nil {
-		return false, err
-	}
-	return rc.IsSchedulerExisted(name)
-}
-
 // GetScheduleConfig returns ScheduleConfig.
 func (h *Handler) GetScheduleConfig() *config.ScheduleConfig {
 	return h.s.GetScheduleConfig()
@@ -150,15 +133,6 @@ func (h *Handler) GetSchedulers() ([]string, error) {
 		return nil, err
 	}
 	return c.GetSchedulers(), nil
-}
-
-// IsCheckerPaused returns if checker is paused
-func (h *Handler) IsCheckerPaused(name string) (bool, error) {
-	rc, err := h.GetRaftCluster()
-	if err != nil {
-		return false, err
-	}
-	return rc.IsCheckerPaused(name)
 }
 
 // GetStores returns all stores in the cluster.
@@ -198,16 +172,6 @@ func (h *Handler) GetHotReadRegions() *statistics.StoreHotPeersInfos {
 	return c.GetHotReadRegions()
 }
 
-// GetHotRegionsWriteInterval gets interval for PD to store Hot Region information..
-func (h *Handler) GetHotRegionsWriteInterval() time.Duration {
-	return h.opt.GetHotRegionsWriteInterval()
-}
-
-// GetHotRegionsReservedDays gets days hot region information is kept.
-func (h *Handler) GetHotRegionsReservedDays() uint64 {
-	return h.opt.GetHotRegionsReservedDays()
-}
-
 // GetStoresLoads gets all hot write stores stats.
 func (h *Handler) GetStoresLoads() map[uint64][]float64 {
 	rc := h.s.GetRaftCluster()
@@ -233,8 +197,6 @@ func (h *Handler) AddScheduler(name string, args ...string) error {
 		log.Error("can not add scheduler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", args), errs.ZapError(err))
 	} else if err = h.opt.Persist(c.GetStorage()); err != nil {
 		log.Error("can not persist scheduler config", errs.ZapError(err))
-	} else {
-		log.Info("add scheduler successfully", zap.String("scheduler-name", name), zap.Strings("scheduler-args", args))
 	}
 	return err
 }
@@ -247,8 +209,6 @@ func (h *Handler) RemoveScheduler(name string) error {
 	}
 	if err = c.RemoveScheduler(name); err != nil {
 		log.Error("can not remove scheduler", zap.String("scheduler-name", name), errs.ZapError(err))
-	} else {
-		log.Info("remove scheduler successfully", zap.String("scheduler-name", name))
 	}
 	return err
 }
@@ -266,30 +226,6 @@ func (h *Handler) PauseOrResumeScheduler(name string, t int64) error {
 			log.Error("can not resume scheduler", zap.String("scheduler-name", name), errs.ZapError(err))
 		} else {
 			log.Error("can not pause scheduler", zap.String("scheduler-name", name), errs.ZapError(err))
-		}
-	} else {
-		if t == 0 {
-			log.Info("resume scheduler successfully", zap.String("scheduler-name", name))
-		} else {
-			log.Info("pause scheduler successfully", zap.String("scheduler-name", name), zap.Int64("pause-seconds", t))
-		}
-	}
-	return err
-}
-
-// PauseOrResumeChecker pauses checker for delay seconds or resume checker
-// t == 0 : resume checker.
-// t > 0 : checker delays t seconds.
-func (h *Handler) PauseOrResumeChecker(name string, t int64) error {
-	c, err := h.GetRaftCluster()
-	if err != nil {
-		return err
-	}
-	if err = c.PauseOrResumeChecker(name, t); err != nil {
-		if t == 0 {
-			log.Error("can not resume checker", zap.String("checker-name", name), errs.ZapError(err))
-		} else {
-			log.Error("can not pause checker", zap.String("checker-name", name), errs.ZapError(err))
 		}
 	}
 	return err
@@ -345,24 +281,9 @@ func (h *Handler) AddShuffleHotRegionScheduler(limit uint64) error {
 	return h.AddScheduler(schedulers.ShuffleHotRegionType, strconv.FormatUint(limit, 10))
 }
 
-// AddEvictSlowStoreScheduler adds a evict-slow-store-scheduler.
-func (h *Handler) AddEvictSlowStoreScheduler() error {
-	return h.AddScheduler(schedulers.EvictSlowStoreType)
-}
-
-// AddSplitBucketScheduler adds a split-bucket-scheduler.
-func (h *Handler) AddSplitBucketScheduler() error {
-	return h.AddScheduler(schedulers.SplitBucketType)
-}
-
 // AddRandomMergeScheduler adds a random-merge-scheduler.
 func (h *Handler) AddRandomMergeScheduler() error {
 	return h.AddScheduler(schedulers.RandomMergeType)
-}
-
-// AddGrantHotRegionScheduler adds a grant-hot-region-scheduler
-func (h *Handler) AddGrantHotRegionScheduler(leaderID, peers string) error {
-	return h.AddScheduler(schedulers.GrantHotRegionType, leaderID, peers)
 }
 
 // GetOperator returns the region operator.
@@ -468,19 +389,6 @@ func (h *Handler) GetHistory(start time.Time) ([]operator.OpHistory, error) {
 	return c.GetHistory(start), nil
 }
 
-// GetRecords returns finished operators since start.
-func (h *Handler) GetRecords(from time.Time) ([]*operator.OpRecord, error) {
-	c, err := h.GetOperatorController()
-	if err != nil {
-		return nil, err
-	}
-	records := c.GetRecords(from)
-	if len(records) == 0 {
-		return nil, ErrOperatorNotFound
-	}
-	return records, nil
-}
-
 // SetAllStoresLimit is used to set limit of all stores.
 func (h *Handler) SetAllStoresLimit(ratePerMin float64, limitType storelimit.Type) error {
 	c, err := h.GetRaftCluster()
@@ -554,7 +462,7 @@ func (h *Handler) AddTransferLeaderOperator(regionID uint64, storeID uint64) err
 		return errors.Errorf("region has no voter in store %v", storeID)
 	}
 
-	op, err := operator.CreateTransferLeaderOperator("admin-transfer-leader", c, region, region.GetLeader().GetStoreId(), newLeader.GetStoreId(), []uint64{}, operator.OpAdmin)
+	op, err := operator.CreateTransferLeaderOperator("admin-transfer-leader", c, region, region.GetLeader().GetStoreId(), newLeader.GetStoreId(), operator.OpAdmin)
 	if err != nil {
 		log.Debug("fail to create transfer leader operator", errs.ZapError(err))
 		return err
@@ -630,7 +538,7 @@ func (h *Handler) AddTransferPeerOperator(regionID uint64, fromStoreID, toStoreI
 		return err
 	}
 
-	newPeer := &metapb.Peer{StoreId: toStoreID, Role: oldPeer.GetRole(), IsWitness: oldPeer.GetIsWitness()}
+	newPeer := &metapb.Peer{StoreId: toStoreID, Role: oldPeer.GetRole()}
 	op, err := operator.CreateMovePeerOperator("admin-move-peer", c, region, operator.OpAdmin, fromStoreID, newPeer)
 	if err != nil {
 		log.Debug("fail to create move peer operator", errs.ZapError(err))
@@ -751,11 +659,11 @@ func (h *Handler) AddMergeRegionOperator(regionID uint64, targetID uint64) error
 		return ErrRegionNotFound(targetID)
 	}
 
-	if !filter.IsRegionHealthy(region) || !filter.IsRegionReplicated(c, region) {
+	if !opt.IsRegionHealthy(c, region) || !opt.IsRegionReplicated(c, region) {
 		return ErrRegionAbnormalPeer(regionID)
 	}
 
-	if !filter.IsRegionHealthy(target) || !filter.IsRegionReplicated(c, target) {
+	if !opt.IsRegionHealthy(c, target) || !opt.IsRegionReplicated(c, target) {
 		return ErrRegionAbnormalPeer(targetID)
 	}
 
@@ -851,7 +759,7 @@ func (h *Handler) AddScatterRegionsOperators(regionIDs []uint64, startRawKey, en
 	if err != nil {
 		return 0, err
 	}
-	opsCount := 0
+	var ops []*operator.Operator
 	var failures map[uint64]error
 	// If startKey and endKey are both defined, use them first.
 	if len(startRawKey) > 0 && len(endRawKey) > 0 {
@@ -863,19 +771,25 @@ func (h *Handler) AddScatterRegionsOperators(regionIDs []uint64, startRawKey, en
 		if err != nil {
 			return 0, err
 		}
-		opsCount, failures, err = c.GetRegionScatter().ScatterRegionsByRange(startKey, endKey, group, retryLimit)
+		ops, failures, err = c.GetRegionScatter().ScatterRegionsByRange(startKey, endKey, group, retryLimit)
 		if err != nil {
 			return 0, err
 		}
 	} else {
-		opsCount, failures, err = c.GetRegionScatter().ScatterRegionsByID(regionIDs, group, retryLimit)
+		ops, failures, err = c.GetRegionScatter().ScatterRegionsByID(regionIDs, group, retryLimit)
 		if err != nil {
 			return 0, err
 		}
 	}
+	// If there existed any operator failed to be added into Operator Controller, add its regions into unProcessedRegions
+	for _, op := range ops {
+		if ok := c.GetOperatorController().AddOperator(op); !ok {
+			failures[op.RegionID()] = fmt.Errorf("region %v failed to add operator", op.RegionID())
+		}
+	}
 	percentage := 100
 	if len(failures) > 0 {
-		percentage = 100 - 100*len(failures)/(opsCount+len(failures))
+		percentage = 100 - 100*len(failures)/(len(ops)+len(failures))
 	}
 	return percentage, nil
 }
@@ -890,10 +804,10 @@ func (h *Handler) GetRegionsByType(typ statistics.RegionStatisticType) ([]*core.
 }
 
 // GetSchedulerConfigHandler gets the handler of schedulers.
-func (h *Handler) GetSchedulerConfigHandler() (http.Handler, error) {
+func (h *Handler) GetSchedulerConfigHandler() http.Handler {
 	c, err := h.GetRaftCluster()
 	if err != nil {
-		return nil, err
+		return nil
 	}
 	mux := http.NewServeMux()
 	for name, handler := range c.GetSchedulerHandlers() {
@@ -901,7 +815,7 @@ func (h *Handler) GetSchedulerConfigHandler() (http.Handler, error) {
 		urlPath := prefix + "/"
 		mux.Handle(urlPath, http.StripPrefix(prefix, handler))
 	}
-	return mux, nil
+	return mux
 }
 
 // GetOfflinePeer gets the region with offline peer.
@@ -914,11 +828,7 @@ func (h *Handler) GetOfflinePeer(typ statistics.RegionStatisticType) ([]*core.Re
 }
 
 // ResetTS resets the ts with specified tso.
-func (h *Handler) ResetTS(ts uint64, ignoreSmaller, skipUpperBoundCheck bool) error {
-	log.Info("reset-ts",
-		zap.Uint64("new-ts", ts),
-		zap.Bool("ignore-smaller", ignoreSmaller),
-		zap.Bool("skip-upper-bound-check", skipUpperBoundCheck))
+func (h *Handler) ResetTS(ts uint64) error {
 	tsoAllocator, err := h.s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
 	if err != nil {
 		return err
@@ -926,35 +836,19 @@ func (h *Handler) ResetTS(ts uint64, ignoreSmaller, skipUpperBoundCheck bool) er
 	if tsoAllocator == nil {
 		return ErrServerNotStarted
 	}
-	return tsoAllocator.SetTSO(ts, ignoreSmaller, skipUpperBoundCheck)
+	return tsoAllocator.SetTSO(ts)
 }
 
 // SetStoreLimitScene sets the limit values for different scenes
 func (h *Handler) SetStoreLimitScene(scene *storelimit.Scene, limitType storelimit.Type) {
-	rc := h.s.GetRaftCluster()
-	if rc == nil {
-		return
-	}
-	rc.GetStoreLimiter().ReplaceStoreLimitScene(scene, limitType)
+	cluster := h.s.GetRaftCluster()
+	cluster.GetStoreLimiter().ReplaceStoreLimitScene(scene, limitType)
 }
 
 // GetStoreLimitScene returns the limit values for different scenes
 func (h *Handler) GetStoreLimitScene(limitType storelimit.Type) *storelimit.Scene {
-	rc := h.s.GetRaftCluster()
-	if rc == nil {
-		return nil
-	}
-	return rc.GetStoreLimiter().StoreLimitScene(limitType)
-}
-
-// GetProgressByID returns the progress details for a given store ID.
-func (h *Handler) GetProgressByID(storeID string) (action string, p, ls, cs float64, err error) {
-	return h.s.GetRaftCluster().GetProgressByID(storeID)
-}
-
-// GetProgressByAction returns the progress details for a given action.
-func (h *Handler) GetProgressByAction(action string) (p, ls, cs float64, err error) {
-	return h.s.GetRaftCluster().GetProgressByAction(action)
+	cluster := h.s.GetRaftCluster()
+	return cluster.GetStoreLimiter().StoreLimitScene(limitType)
 }
 
 // PluginLoad loads the plugin referenced by the pluginPath
@@ -968,13 +862,6 @@ func (h *Handler) PluginLoad(pluginPath string) error {
 	c := cluster.GetCoordinator()
 	ch := make(chan string)
 	h.pluginChMap[pluginPath] = ch
-
-	// make sure path is in data dir
-	filePath, err := filepath.Abs(pluginPath)
-	if err != nil || !isPathInDirectory(filePath, h.s.GetConfig().DataDir) {
-		return errs.ErrFilePathAbs.Wrap(err).FastGenWithCause()
-	}
-
 	c.LoadPlugin(pluginPath, ch)
 	return nil
 }
@@ -1002,147 +889,16 @@ func (h *Handler) SetStoreLimitTTL(data string, value float64, ttl time.Duration
 	}, ttl)
 }
 
-// IsLeader return true if this server is leader
-func (h *Handler) IsLeader() bool {
-	return h.s.member.IsLeader()
-}
-
-// PackHistoryHotReadRegions get read hot region info in HistoryHotRegion form.
-func (h *Handler) PackHistoryHotReadRegions() ([]storage.HistoryHotRegion, error) {
-	hotReadRegions := h.GetHotReadRegions()
-	if hotReadRegions == nil {
-		return nil, nil
-	}
-	hotReadPeerRegions := hotReadRegions.AsPeer
-	return h.packHotRegions(hotReadPeerRegions, storage.ReadType.String())
-}
-
-// PackHistoryHotWriteRegions get write hot region info in HistoryHotRegion from
-func (h *Handler) PackHistoryHotWriteRegions() ([]storage.HistoryHotRegion, error) {
-	hotWriteRegions := h.GetHotWriteRegions()
-	if hotWriteRegions == nil {
-		return nil, nil
-	}
-	hotWritePeerRegions := hotWriteRegions.AsPeer
-	return h.packHotRegions(hotWritePeerRegions, storage.WriteType.String())
-}
-
-func (h *Handler) packHotRegions(hotPeersStat statistics.StoreHotPeersStat, hotRegionType string) (historyHotRegions []storage.HistoryHotRegion, err error) {
-	c, err := h.GetRaftCluster()
-	if err != nil {
-		return nil, err
-	}
-	for _, hotPeersStat := range hotPeersStat {
-		stats := hotPeersStat.Stats
-		for _, hotPeerStat := range stats {
-			region := c.GetRegion(hotPeerStat.RegionID)
-			if region == nil {
-				continue
-			}
-			meta := region.GetMeta()
-			meta, err := encryption.EncryptRegion(meta, h.s.encryptionKeyManager)
-			if err != nil {
-				return nil, err
-			}
-			stat := storage.HistoryHotRegion{
-				// store in ms.
-				// todo: distinguish store heartbeat interval and region heartbeat interval
-				// read statistic from store heartbeat, write statistic from region heartbeat
-				UpdateTime:     int64(region.GetInterval().GetEndTimestamp() * 1000),
-				RegionID:       hotPeerStat.RegionID,
-				StoreID:        hotPeerStat.StoreID,
-				PeerID:         region.GetStorePeer(hotPeerStat.StoreID).GetId(),
-				IsLeader:       hotPeerStat.IsLeader,
-				IsLearner:      core.IsLearner(region.GetPeer(hotPeerStat.StoreID)),
-				HotDegree:      int64(hotPeerStat.HotDegree),
-				FlowBytes:      hotPeerStat.ByteRate,
-				KeyRate:        hotPeerStat.KeyRate,
-				QueryRate:      hotPeerStat.QueryRate,
-				StartKey:       string(region.GetStartKey()),
-				EndKey:         string(region.GetEndKey()),
-				EncryptionMeta: meta.GetEncryptionMeta(),
-				HotRegionType:  hotRegionType,
-			}
-			historyHotRegions = append(historyHotRegions, stat)
-		}
-	}
-	return
-}
-
-// GetHistoryHotRegionIter return a iter which iter all qualified item .
-func (h *Handler) GetHistoryHotRegionIter(
-	hotRegionTypes []string,
-	startTime, endTime int64,
-) storage.HotRegionStorageIterator {
-	iter := h.s.hotRegionStorage.NewIterator(hotRegionTypes, startTime, endTime)
-	return iter
-}
-
 func checkStoreState(rc *cluster.RaftCluster, storeID uint64) error {
 	store := rc.GetStore(storeID)
 	if store == nil {
 		return errs.ErrStoreNotFound.FastGenByArgs(storeID)
 	}
-	if store.IsRemoved() {
-		return errs.ErrStoreRemoved.FastGenByArgs(storeID)
+	if store.IsTombstone() {
+		return errs.ErrStoreTombstone.FastGenByArgs(storeID)
 	}
 	if store.IsUnhealthy() {
 		return errs.ErrStoreUnhealthy.FastGenByArgs(storeID)
 	}
 	return nil
-}
-
-// RedirectSchedulerUpdate update scheduler config. Export this func to help handle damaged store.
-func (h *Handler) redirectSchedulerUpdate(name string, storeID float64) error {
-	input := make(map[string]interface{})
-	input["name"] = name
-	input["store_id"] = storeID
-	updateURL := fmt.Sprintf("%s/%s/%s/config", h.GetAddr(), schedulerConfigPrefix, name)
-	body, err := json.Marshal(input)
-	if err != nil {
-		return err
-	}
-	return apiutil.PostJSONIgnoreResp(h.s.GetHTTPClient(), updateURL, body)
-}
-
-// AddEvictOrGrant add evict leader scheduler or grant leader scheduler.
-func (h *Handler) AddEvictOrGrant(storeID float64, name string) error {
-	if exist, err := h.IsSchedulerExisted(name); !exist {
-		if err != nil && !errors.ErrorEqual(err, errs.ErrSchedulerNotFound.FastGenByArgs()) {
-			return err
-		}
-		switch name {
-		case schedulers.EvictLeaderName:
-			err = h.AddEvictLeaderScheduler(uint64(storeID))
-		case schedulers.GrantLeaderName:
-			err = h.AddGrantLeaderScheduler(uint64(storeID))
-		}
-		if err != nil {
-			return err
-		}
-	} else {
-		if err := h.redirectSchedulerUpdate(name, storeID); err != nil {
-			return err
-		}
-		log.Info("update scheduler", zap.String("scheduler-name", name), zap.Uint64("store-id", uint64(storeID)))
-	}
-	return nil
-}
-
-// GetPausedSchedulerDelayAt returns paused unix timestamp when a scheduler is paused
-func (h *Handler) GetPausedSchedulerDelayAt(name string) (int64, error) {
-	rc, err := h.GetRaftCluster()
-	if err != nil {
-		return -1, err
-	}
-	return rc.GetPausedSchedulerDelayAt(name)
-}
-
-// GetPausedSchedulerDelayUntil returns resume unix timestamp when a scheduler is paused
-func (h *Handler) GetPausedSchedulerDelayUntil(name string) (int64, error) {
-	rc, err := h.GetRaftCluster()
-	if err != nil {
-		return -1, err
-	}
-	return rc.GetPausedSchedulerDelayUntil(name)
 }

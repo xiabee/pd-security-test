@@ -8,20 +8,21 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package placement
 
 import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestTrim(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testConfigSuite{})
+
+type testConfigSuite struct {
+}
+
+func (s *testConfigSuite) TestTrim(c *C) {
 	rc := newRuleConfig()
 	rc.setRule(&Rule{GroupID: "g1", ID: "id1"})
 	rc.setRule(&Rule{GroupID: "g1", ID: "id2"})
@@ -70,11 +71,11 @@ func TestTrim(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
+	for _, tc := range testCases {
 		p := rc.beginPatch()
-		testCase.ops(p)
+		tc.ops(p)
 		p.trim()
-		re.Equal(testCase.mutRules, p.mut.rules)
-		re.Equal(testCase.mutGroups, p.mut.groups)
+		c.Assert(p.mut.rules, DeepEquals, tc.mutRules)
+		c.Assert(p.mut.groups, DeepEquals, tc.mutGroups)
 	}
 }

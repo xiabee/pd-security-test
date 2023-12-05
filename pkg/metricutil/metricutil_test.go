@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -18,13 +17,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 	"github.com/tikv/pd/pkg/typeutil"
 )
 
-func TestCamelCaseToSnakeCase(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testMetricsSuite{})
+
+type testMetricsSuite struct {
+}
+
+func (s *testMetricsSuite) TestCamelCaseToSnakeCase(c *C) {
 	inputs := []struct {
 		name    string
 		newName string
@@ -52,11 +58,11 @@ func TestCamelCaseToSnakeCase(t *testing.T) {
 	}
 
 	for _, input := range inputs {
-		re.Equal(input.newName, camelCaseToSnakeCase(input.name))
+		c.Assert(camelCaseToSnakeCase(input.name), Equals, input.newName)
 	}
 }
 
-func TestCoverage(t *testing.T) {
+func (s *testMetricsSuite) TestCoverage(c *C) {
 	cfgs := []*MetricConfig{
 		{
 			PushJob:     "j1",

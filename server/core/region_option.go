@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -22,6 +21,9 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/replication_modepb"
 )
+
+// RegionOption is used to select region.
+type RegionOption func(region *RegionInfo) bool
 
 // RegionCreateOption used to create region.
 type RegionCreateOption func(region *RegionInfo)
@@ -47,21 +49,6 @@ func WithPendingPeers(pendingPeers []*metapb.Peer) RegionCreateOption {
 	return func(region *RegionInfo) {
 		region.pendingPeers = append(pendingPeers[:0:0], pendingPeers...)
 		sort.Sort(peerSlice(region.pendingPeers))
-	}
-}
-
-// WithWitnesses sets the witnesses for the region.
-func WithWitnesses(witnesses []*metapb.Peer) RegionCreateOption {
-	return func(region *RegionInfo) {
-		peers := region.meta.GetPeers()
-		for i := range peers {
-			for _, l := range witnesses {
-				if peers[i].GetId() == l.GetId() {
-					peers[i].IsWitness = true
-					break
-				}
-			}
-		}
 	}
 }
 
@@ -108,14 +95,14 @@ func WithNewRegionID(id uint64) RegionCreateOption {
 	}
 }
 
-// WithNewPeerIDs sets new ids for peers.
-func WithNewPeerIDs(peerIDs ...uint64) RegionCreateOption {
+// WithNewPeerIds sets new ids for peers.
+func WithNewPeerIds(peerIds ...uint64) RegionCreateOption {
 	return func(region *RegionInfo) {
-		if len(peerIDs) != len(region.meta.GetPeers()) {
+		if len(peerIds) != len(region.meta.GetPeers()) {
 			return
 		}
 		for i, p := range region.meta.GetPeers() {
-			p.Id = peerIDs[i]
+			p.Id = peerIds[i]
 		}
 	}
 }
@@ -126,11 +113,6 @@ func WithIncVersion() RegionCreateOption {
 		e := region.meta.GetRegionEpoch()
 		if e != nil {
 			e.Version++
-		} else {
-			region.meta.RegionEpoch = &metapb.RegionEpoch{
-				ConfVer: 0,
-				Version: 1,
-			}
 		}
 	}
 }
@@ -151,11 +133,6 @@ func WithIncConfVer() RegionCreateOption {
 		e := region.meta.GetRegionEpoch()
 		if e != nil {
 			e.ConfVer++
-		} else {
-			region.meta.RegionEpoch = &metapb.RegionEpoch{
-				ConfVer: 1,
-				Version: 0,
-			}
 		}
 	}
 }
@@ -167,20 +144,6 @@ func WithDecConfVer() RegionCreateOption {
 		if e != nil {
 			e.ConfVer--
 		}
-	}
-}
-
-// WithFlashback set region flashback states.
-func WithFlashback(isInFlashback bool, flashbackTS uint64) RegionCreateOption {
-	return func(region *RegionInfo) {
-		region.meta.IsInFlashback = isInFlashback
-	}
-}
-
-// SetCPUUsage sets the CPU usage of the region.
-func SetCPUUsage(v uint64) RegionCreateOption {
-	return func(region *RegionInfo) {
-		region.cpuUsage = v
 	}
 }
 
@@ -211,13 +174,6 @@ func WithRemoveStorePeer(storeID uint64) RegionCreateOption {
 	}
 }
 
-// SetBuckets sets the buckets for the region, only use test.
-func SetBuckets(buckets *metapb.Buckets) RegionCreateOption {
-	return func(region *RegionInfo) {
-		region.UpdateBuckets(buckets, region.GetBuckets())
-	}
-}
-
 // SetReadBytes sets the read bytes for the region.
 func SetReadBytes(v uint64) RegionCreateOption {
 	return func(region *RegionInfo) {
@@ -229,44 +185,6 @@ func SetReadBytes(v uint64) RegionCreateOption {
 func SetReadKeys(v uint64) RegionCreateOption {
 	return func(region *RegionInfo) {
 		region.readKeys = v
-	}
-}
-
-// SetReadQuery sets the read query for the region, only used for unit test.
-func SetReadQuery(v uint64) RegionCreateOption {
-	q := RandomKindReadQuery(v)
-	return SetQueryStats(q)
-}
-
-// SetWrittenQuery sets the write query for the region, only used for unit test.
-func SetWrittenQuery(v uint64) RegionCreateOption {
-	q := RandomKindWriteQuery(v)
-	return SetQueryStats(q)
-}
-
-// SetQueryNum sets the read and write query with specific num.
-// This func is only used for test and simulator.
-func SetQueryNum(read, write uint64) RegionCreateOption {
-	r := RandomKindReadQuery(read)
-	w := RandomKindWriteQuery(write)
-	q := mergeQueryStat(r, w)
-	return SetQueryStats(q)
-}
-
-// SetQueryStats sets the query stats for the region, it will cover previous statistic.
-// This func is only used for unit test.
-func SetQueryStats(v *pdpb.QueryStats) RegionCreateOption {
-	return func(region *RegionInfo) {
-		region.queryStats = v
-	}
-}
-
-// AddQueryStats sets the query stats for the region, it will preserve previous statistic.
-// This func is only used for test and simulator.
-func AddQueryStats(v *pdpb.QueryStats) RegionCreateOption {
-	return func(region *RegionInfo) {
-		q := mergeQueryStat(region.queryStats, v)
-		region.queryStats = q
 	}
 }
 
@@ -285,10 +203,9 @@ func SetApproximateKeys(v int64) RegionCreateOption {
 }
 
 // SetReportInterval sets the report interval for the region.
-// This func is only used for test.
-func SetReportInterval(start, end uint64) RegionCreateOption {
+func SetReportInterval(v uint64) RegionCreateOption {
 	return func(region *RegionInfo) {
-		region.interval = &pdpb.TimeInterval{StartTimestamp: start, EndTimestamp: end}
+		region.interval = &pdpb.TimeInterval{StartTimestamp: 0, EndTimestamp: v}
 	}
 }
 
@@ -340,12 +257,12 @@ func WithAddPeer(peer *metapb.Peer) RegionCreateOption {
 	}
 }
 
-// WithRole changes the role.
-func WithRole(peerID uint64, role metapb.PeerRole) RegionCreateOption {
+// WithPromoteLearner promotes the learner.
+func WithPromoteLearner(peerID uint64) RegionCreateOption {
 	return func(region *RegionInfo) {
 		for _, p := range region.GetPeers() {
 			if p.GetId() == peerID {
-				p.Role = role
+				p.Role = metapb.PeerRole_Voter
 			}
 		}
 	}
@@ -369,33 +286,9 @@ func WithInterval(interval *pdpb.TimeInterval) RegionCreateOption {
 	}
 }
 
-// SetSource sets the region info's come from.
-func SetSource(source RegionSource) RegionCreateOption {
+// SetFromHeartbeat sets if the region info comes from the region heartbeat.
+func SetFromHeartbeat(fromHeartbeat bool) RegionCreateOption {
 	return func(region *RegionInfo) {
-		region.source = source
+		region.fromHeartbeat = fromHeartbeat
 	}
-}
-
-func mergeQueryStat(q1, q2 *pdpb.QueryStats) *pdpb.QueryStats {
-	if q1 == nil && q2 == nil {
-		return &pdpb.QueryStats{}
-	}
-	if q1 == nil {
-		return q2
-	}
-	if q2 == nil {
-		return q1
-	}
-	q2.GC += q1.GC
-	q2.Get += q1.Get
-	q2.Scan += q1.Scan
-	q2.Coprocessor += q1.Coprocessor
-	q2.Delete += q1.Delete
-	q2.DeleteRange += q1.DeleteRange
-	q2.Put += q1.Put
-	q2.Prewrite += q1.Prewrite
-	q2.AcquirePessimisticLock += q1.AcquirePessimisticLock
-	q2.Commit += q1.Commit
-	q2.Rollback += q1.Rollback
-	return q2
 }

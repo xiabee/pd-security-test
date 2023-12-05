@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -65,16 +64,4 @@ func IsCompatible(a, b semver.Version) bool {
 		return true
 	}
 	return a.Major == b.Major && a.Minor == b.Minor
-}
-
-// IsFeatureSupported checks if the feature is supported by current cluster.
-func IsFeatureSupported(clusterVersion *semver.Version, f Feature) bool {
-	minSupportVersion := *MinSupportedVersion(f)
-	// For features before version 5.0 (such as BatchSplit), strict version checks are performed according to the
-	// original logic. But according to Semantic Versioning, specify a version MAJOR.MINOR.PATCH, PATCH is used when you
-	// make backwards compatible bug fixes. In version 5.0 and later, we need to strictly comply.
-	if IsCompatible(minSupportVersion, *MinSupportedVersion(Version4_0)) {
-		return !clusterVersion.LessThan(minSupportVersion)
-	}
-	return IsCompatible(minSupportVersion, *clusterVersion)
 }

@@ -8,42 +8,45 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package core
 
 import (
-	"testing"
-
-	"github.com/docker/go-units"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/stretchr/testify/require"
 )
 
-func TestStoreStats(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testStoreStatsSuite{})
+
+type testStoreStatsSuite struct{}
+
+func (s *testStoreStatsSuite) TestStoreStats(c *C) {
+	G := uint64(1024 * 1024 * 1024)
 	meta := &metapb.Store{Id: 1, State: metapb.StoreState_Up}
 	store := NewStoreInfo(meta, SetStoreStats(&pdpb.StoreStats{
-		Capacity:  uint64(200 * units.GiB),
-		UsedSize:  uint64(50 * units.GiB),
-		Available: uint64(150 * units.GiB),
+		Capacity:  200 * G,
+		UsedSize:  50 * G,
+		Available: 150 * G,
 	}))
 
-	re.Equal(uint64(200*units.GiB), store.GetCapacity())
-	re.Equal(uint64(50*units.GiB), store.GetUsedSize())
-	re.Equal(uint64(150*units.GiB), store.GetAvailable())
-	re.Equal(uint64(150*units.GiB), store.GetAvgAvailable())
+	c.Assert(store.GetCapacity(), Equals, 200*G)
+	c.Assert(store.GetUsedSize(), Equals, 50*G)
+	c.Assert(store.GetAvailable(), Equals, 150*G)
+	c.Assert(store.GetAvgAvailable(), Equals, 150*G)
+	c.Assert(store.GetAvailableDeviation(), Equals, uint64(0))
 
 	store = store.Clone(SetStoreStats(&pdpb.StoreStats{
-		Capacity:  uint64(200 * units.GiB),
-		UsedSize:  uint64(50 * units.GiB),
-		Available: uint64(160 * units.GiB),
+		Capacity:  200 * G,
+		UsedSize:  50 * G,
+		Available: 160 * G,
 	}))
 
-	re.Equal(uint64(160*units.GiB), store.GetAvailable())
-	re.Greater(store.GetAvgAvailable(), uint64(150*units.GiB))
-	re.Less(store.GetAvgAvailable(), uint64(160*units.GiB))
+	c.Assert(store.GetAvailable(), Equals, 160*G)
+	c.Assert(store.GetAvgAvailable(), Greater, 150*G)
+	c.Assert(store.GetAvgAvailable(), Less, 160*G)
+	c.Assert(store.GetAvailableDeviation(), Greater, uint64(0))
+	c.Assert(store.GetAvailableDeviation(), Less, 10*G)
 }

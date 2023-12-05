@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -19,49 +18,56 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 )
 
 const (
-	defaultWaitFor      = time.Second * 20
-	defaultTickInterval = time.Millisecond * 100
+	waitMaxRetry   = 200
+	waitRetrySleep = time.Millisecond * 100
 )
 
-// WaitOp represents available options when execute Eventually.
+// CheckFunc is a condition checker that passed to WaitUntil. Its implementation
+// may call c.Fatal() to abort the test, or c.Log() to add more information.
+type CheckFunc func(c *check.C) bool
+
+// WaitOp represents available options when execute WaitUntil
 type WaitOp struct {
-	waitFor      time.Duration
-	tickInterval time.Duration
+	retryTimes    int
+	sleepInterval time.Duration
 }
 
-// WaitOption configures WaitOp.
+// WaitOption configures WaitOp
 type WaitOption func(op *WaitOp)
 
-// WithWaitFor specify the max wait duration.
-func WithWaitFor(waitFor time.Duration) WaitOption {
-	return func(op *WaitOp) { op.waitFor = waitFor }
+// WithRetryTimes specify the retry times
+func WithRetryTimes(retryTimes int) WaitOption {
+	return func(op *WaitOp) { op.retryTimes = retryTimes }
 }
 
-// WithTickInterval specify the tick interval to check the condition.
-func WithTickInterval(tickInterval time.Duration) WaitOption {
-	return func(op *WaitOp) { op.tickInterval = tickInterval }
+// WithSleepInterval specify the sleep duration
+func WithSleepInterval(sleep time.Duration) WaitOption {
+	return func(op *WaitOp) { op.sleepInterval = sleep }
 }
 
-// Eventually asserts that given condition will be met in a period of time.
-func Eventually(re *require.Assertions, condition func() bool, opts ...WaitOption) {
+// WaitUntil repeatedly evaluates f() for a period of time, util it returns true.
+func WaitUntil(c *check.C, f CheckFunc, opts ...WaitOption) {
+	c.Log("wait start")
 	option := &WaitOp{
-		waitFor:      defaultWaitFor,
-		tickInterval: defaultTickInterval,
+		retryTimes:    waitMaxRetry,
+		sleepInterval: waitRetrySleep,
 	}
 	for _, opt := range opts {
 		opt(option)
 	}
-	re.Eventually(
-		condition,
-		option.waitFor,
-		option.tickInterval,
-	)
+	for i := 0; i < option.retryTimes; i++ {
+		if f(c) {
+			return
+		}
+		time.Sleep(option.sleepInterval)
+	}
+	c.Fatal("wait timeout")
 }
 
 // NewRequestHeader creates a new request header.
@@ -72,10 +78,10 @@ func NewRequestHeader(clusterID uint64) *pdpb.RequestHeader {
 }
 
 // MustNewGrpcClient must create a new grpc client.
-func MustNewGrpcClient(re *require.Assertions, addr string) pdpb.PDClient {
+func MustNewGrpcClient(c *check.C, addr string) pdpb.PDClient {
 	conn, err := grpc.Dial(strings.TrimPrefix(addr, "http://"), grpc.WithInsecure())
 
-	re.NoError(err)
+	c.Assert(err, check.IsNil)
 	return pdpb.NewPDClient(conn)
 }
 

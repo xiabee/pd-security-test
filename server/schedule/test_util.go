@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -37,6 +36,15 @@ func ApplyOperatorStep(region *core.RegionInfo, op *operator.Operator) *core.Reg
 				StoreId: s.ToStore,
 			}
 			region = region.Clone(core.WithAddPeer(peer))
+		case operator.AddLightPeer:
+			if region.GetStorePeer(s.ToStore) != nil {
+				panic("Add peer that exists")
+			}
+			peer := &metapb.Peer{
+				Id:      s.PeerID,
+				StoreId: s.ToStore,
+			}
+			region = region.Clone(core.WithAddPeer(peer))
 		case operator.RemovePeer:
 			if region.GetStorePeer(s.FromStore) == nil {
 				panic("Remove peer that doesn't exist")
@@ -46,6 +54,16 @@ func ApplyOperatorStep(region *core.RegionInfo, op *operator.Operator) *core.Reg
 			}
 			region = region.Clone(core.WithRemoveStorePeer(s.FromStore))
 		case operator.AddLearner:
+			if region.GetStorePeer(s.ToStore) != nil {
+				panic("Add learner that exists")
+			}
+			peer := &metapb.Peer{
+				Id:      s.PeerID,
+				StoreId: s.ToStore,
+				Role:    metapb.PeerRole_Learner,
+			}
+			region = region.Clone(core.WithAddPeer(peer))
+		case operator.AddLightLearner:
 			if region.GetStorePeer(s.ToStore) != nil {
 				panic("Add learner that exists")
 			}
@@ -79,10 +97,10 @@ func ApplyOperator(mc *mockcluster.Cluster, op *operator.Operator) {
 		region = ApplyOperatorStep(region, op)
 	}
 	mc.PutRegion(region)
-	for id := range region.GetStoreIDs() {
+	for id := range region.GetStoreIds() {
 		mc.UpdateStoreStatus(id)
 	}
-	for id := range origin.GetStoreIDs() {
+	for id := range origin.GetStoreIds() {
 		mc.UpdateStoreStatus(id)
 	}
 }

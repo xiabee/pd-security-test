@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -32,7 +31,6 @@ import (
 	"github.com/tikv/pd/pkg/swaggerserver"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
-	"github.com/tikv/pd/server/apiv2"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/join"
 	"go.uber.org/zap"
@@ -75,6 +73,12 @@ func main() {
 	// Flushing any buffered log entries
 	defer log.Sync()
 
+	// The old logger
+	err = logutil.InitLogger(&cfg.Log)
+	if err != nil {
+		log.Fatal("initialize logger error", errs.ZapError(err))
+	}
+
 	server.LogPDInfo()
 
 	for _, msg := range cfg.WarningMsgs {
@@ -93,10 +97,7 @@ func main() {
 
 	// Creates server.
 	ctx, cancel := context.WithCancel(context.Background())
-	serviceBuilders := []server.HandlerBuilder{api.NewHandler, apiv2.NewV2Handler, autoscaling.NewHandler}
-	if swaggerserver.Enabled() {
-		serviceBuilders = append(serviceBuilders, swaggerserver.NewHandler)
-	}
+	serviceBuilders := []server.HandlerBuilder{api.NewHandler, swaggerserver.NewHandler, autoscaling.NewHandler}
 	serviceBuilders = append(serviceBuilders, dashboard.GetServiceBuilders()...)
 	svr, err := server.CreateServer(ctx, cfg, serviceBuilders...)
 	if err != nil {

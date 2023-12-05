@@ -8,31 +8,31 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package schedule
 
 import (
-	"github.com/docker/go-units"
+	"github.com/gogo/protobuf/proto"
+	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule/opt"
 )
 
 // RangeCluster isolates the cluster by range.
 type RangeCluster struct {
-	Cluster
+	opt.Cluster
 	subCluster        *core.BasicCluster // Collect all regions belong to the range.
 	tolerantSizeRatio float64
 }
 
 // GenRangeCluster gets a range cluster by specifying start key and end key.
 // The cluster can only know the regions within [startKey, endKey].
-func GenRangeCluster(cluster Cluster, startKey, endKey []byte) *RangeCluster {
+func GenRangeCluster(cluster opt.Cluster, startKey, endKey []byte) *RangeCluster {
 	subCluster := core.NewBasicCluster()
 	for _, r := range cluster.ScanRegions(startKey, endKey, -1) {
-		origin, overlaps, rangeChanged := subCluster.SetRegionWithUpdate(r)
-		subCluster.UpdateSubTree(r, origin, overlaps, rangeChanged)
+		subCluster.Regions.SetRegion(r)
 	}
 	return &RangeCluster{
 		Cluster:    cluster,
@@ -43,7 +43,7 @@ func GenRangeCluster(cluster Cluster, startKey, endKey []byte) *RangeCluster {
 func (r *RangeCluster) updateStoreInfo(s *core.StoreInfo) *core.StoreInfo {
 	id := s.GetID()
 
-	used := float64(s.GetUsedSize()) / units.MiB
+	used := float64(s.GetUsedSize()) / (1 << 20)
 	if used == 0 {
 		return s
 	}
@@ -53,8 +53,8 @@ func (r *RangeCluster) updateStoreInfo(s *core.StoreInfo) *core.StoreInfo {
 	regionCount := r.subCluster.GetStoreRegionCount(id)
 	regionSize := r.subCluster.GetStoreRegionSize(id)
 	pendingPeerCount := r.subCluster.GetStorePendingPeerCount(id)
-	newStats := s.CloneStoreStats()
-	newStats.UsedSize = uint64(float64(regionSize)/amplification) * units.MiB
+	newStats := proto.Clone(s.GetStoreStats()).(*pdpb.StoreStats)
+	newStats.UsedSize = uint64(float64(regionSize)/amplification) * (1 << 20)
 	newStats.Available = s.GetCapacity() - newStats.UsedSize
 	newStore := s.Clone(
 		core.SetNewStoreStats(newStats), // it means to use instant value directly
@@ -99,14 +99,14 @@ func (r *RangeCluster) GetTolerantSizeRatio() float64 {
 	return r.Cluster.GetOpts().GetTolerantSizeRatio()
 }
 
-// RandFollowerRegions returns a random region that has a follower on the store.
-func (r *RangeCluster) RandFollowerRegions(storeID uint64, ranges []core.KeyRange) []*core.RegionInfo {
-	return r.subCluster.RandFollowerRegions(storeID, ranges)
+// RandFollowerRegion returns a random region that has a follower on the store.
+func (r *RangeCluster) RandFollowerRegion(storeID uint64, ranges []core.KeyRange, opts ...core.RegionOption) *core.RegionInfo {
+	return r.subCluster.RandFollowerRegion(storeID, ranges, opts...)
 }
 
-// RandLeaderRegions returns a random region that has leader on the store.
-func (r *RangeCluster) RandLeaderRegions(storeID uint64, ranges []core.KeyRange) []*core.RegionInfo {
-	return r.subCluster.RandLeaderRegions(storeID, ranges)
+// RandLeaderRegion returns a random region that has leader on the store.
+func (r *RangeCluster) RandLeaderRegion(storeID uint64, ranges []core.KeyRange, opts ...core.RegionOption) *core.RegionInfo {
+	return r.subCluster.RandLeaderRegion(storeID, ranges, opts...)
 }
 
 // GetAverageRegionSize returns the average region approximate size.

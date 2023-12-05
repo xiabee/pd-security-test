@@ -8,11 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !without_dashboard
 // +build !without_dashboard
 
 package dashboard
@@ -27,7 +25,6 @@ import (
 	"github.com/pingcap/tidb-dashboard/pkg/uiserver"
 
 	"github.com/tikv/pd/pkg/dashboard/adapter"
-	"github.com/tikv/pd/pkg/dashboard/distroutil"
 	"github.com/tikv/pd/pkg/dashboard/keyvisual"
 	ui "github.com/tikv/pd/pkg/dashboard/uiserver"
 	"github.com/tikv/pd/server"
@@ -69,8 +66,6 @@ func GetServiceBuilders() []server.HandlerBuilder {
 	return []server.HandlerBuilder{
 		// Dashboard API Service
 		func(ctx context.Context, srv *server.Server) (http.Handler, server.ServiceGroup, error) {
-			distroutil.MustLoadAndReplaceStrings()
-
 			if cfg, err = adapter.GenDashboardConfig(srv); err != nil {
 				return nil, apiServiceGroup, err
 			}

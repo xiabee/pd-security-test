@@ -8,16 +8,16 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
-// limitations under the License.
+// limitations under the License
 
 package cluster
 
 import (
+	"sync"
+
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core/storelimit"
 	"go.uber.org/zap"
@@ -25,7 +25,7 @@ import (
 
 // StoreLimiter adjust the store limit dynamically
 type StoreLimiter struct {
-	m       syncutil.RWMutex
+	m       sync.RWMutex
 	opt     *config.PersistOptions
 	scene   map[storelimit.Type]*storelimit.Scene
 	state   *State

@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -32,7 +31,7 @@ func newQueryMetric(s *server.Server) *queryMetric {
 	return &queryMetric{s: s}
 }
 
-func (h *queryMetric) QueryMetric(w http.ResponseWriter, r *http.Request) {
+func (h *queryMetric) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	metricAddr := h.s.GetConfig().PDServerCfg.MetricStorage
 	if metricAddr == "" {
 		http.Error(w, "metric storage doesn't set", http.StatusInternalServerError)

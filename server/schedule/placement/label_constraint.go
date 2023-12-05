@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -67,7 +66,7 @@ func (c *LabelConstraint) MatchStore(store *core.StoreInfo) bool {
 }
 
 // For backward compatibility. Need to remove later.
-var legacyExclusiveLabels = []string{core.EngineKey, "exclusive"}
+var legacyExclusiveLabels = []string{"engine", "exclusive"}
 
 // If a store has exclusiveLabels, it can only be selected when the label is
 // explicitly specified in constraints.

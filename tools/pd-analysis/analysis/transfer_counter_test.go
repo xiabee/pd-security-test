@@ -8,17 +8,18 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package analysis
 
 import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
+
+var _ = Suite(&testTransferRegionCounter{})
+
+type testTransferRegionCounter struct{}
 
 func addData(test [][]uint64) {
 	for i, row := range test {
@@ -31,8 +32,7 @@ func addData(test [][]uint64) {
 	}
 }
 
-func TestCounterRedundant(t *testing.T) {
-	re := require.New(t)
+func (t *testTransferRegionCounter) TestCounterRedundant(c *C) {
 	{
 		test := [][]uint64{
 			{0, 0, 0, 0, 0, 0, 0},
@@ -43,12 +43,12 @@ func TestCounterRedundant(t *testing.T) {
 			{0, 5, 9, 0, 0, 0, 0},
 			{0, 0, 8, 0, 0, 0, 0}}
 		GetTransferCounter().Init(6, 3000)
-		re.Equal(uint64(0), GetTransferCounter().Redundant)
-		re.Equal(uint64(0), GetTransferCounter().Necessary)
+		c.Assert(GetTransferCounter().Redundant, Equals, uint64(0))
+		c.Assert(GetTransferCounter().Necessary, Equals, uint64(0))
 		addData(test)
 		GetTransferCounter().Result()
-		re.Equal(uint64(64), GetTransferCounter().Redundant)
-		re.Equal(uint64(5), GetTransferCounter().Necessary)
+		c.Assert(GetTransferCounter().Redundant, Equals, uint64(64))
+		c.Assert(GetTransferCounter().Necessary, Equals, uint64(5))
 	}
 	{
 		test := [][]uint64{
@@ -60,12 +60,12 @@ func TestCounterRedundant(t *testing.T) {
 			{0, 1, 0, 0, 0, 0, 0},
 			{0, 0, 1, 0, 0, 0, 0}}
 		GetTransferCounter().Init(6, 3000)
-		re.Equal(uint64(0), GetTransferCounter().Redundant)
-		re.Equal(uint64(0), GetTransferCounter().Necessary)
+		c.Assert(GetTransferCounter().Redundant, Equals, uint64(0))
+		c.Assert(GetTransferCounter().Necessary, Equals, uint64(0))
 		addData(test)
 		GetTransferCounter().Result()
-		re.Equal(uint64(0), GetTransferCounter().Redundant)
-		re.Equal(uint64(5), GetTransferCounter().Necessary)
+		c.Assert(GetTransferCounter().Redundant, Equals, uint64(0))
+		c.Assert(GetTransferCounter().Necessary, Equals, uint64(5))
 	}
 	{
 		test := [][]uint64{
@@ -79,12 +79,12 @@ func TestCounterRedundant(t *testing.T) {
 			{0, 0, 48, 0, 84, 1, 48, 0, 20},
 			{0, 61, 2, 57, 7, 122, 1, 21, 0}}
 		GetTransferCounter().Init(8, 3000)
-		re.Equal(uint64(0), GetTransferCounter().Redundant)
-		re.Equal(uint64(0), GetTransferCounter().Necessary)
+		c.Assert(GetTransferCounter().Redundant, Equals, uint64(0))
+		c.Assert(GetTransferCounter().Necessary, Equals, uint64(0))
 		addData(test)
 		GetTransferCounter().Result()
-		re.Equal(uint64(1778), GetTransferCounter().Redundant)
-		re.Equal(uint64(938), GetTransferCounter().Necessary)
+		c.Assert(GetTransferCounter().Redundant, Equals, uint64(1778))
+		c.Assert(GetTransferCounter().Necessary, Equals, uint64(938))
 		GetTransferCounter().PrintResult()
 	}
 }

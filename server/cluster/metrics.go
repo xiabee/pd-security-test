@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -33,14 +32,6 @@ var (
 			Help:      "Counter of the region event",
 		}, []string{"event"})
 
-	bucketEventCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "pd",
-			Subsystem: "cluster",
-			Name:      "bucket_event",
-			Help:      "Counter of the bucket event",
-		}, []string{"event"})
-
 	schedulerStatusGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "pd",
@@ -57,28 +48,12 @@ var (
 			Help:      "Status of the hotspot.",
 		}, []string{"address", "store", "type"})
 
-	hotPendingSum = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "scheduler",
-			Name:      "hot_pending_sum",
-			Help:      "Pending influence sum of store in hot region scheduler.",
-		}, []string{"store", "rw", "dim"})
-
 	patrolCheckRegionsGauge = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: "pd",
 			Subsystem: "checker",
 			Name:      "patrol_regions_time",
 			Help:      "Time spent of patrol checks region.",
-		})
-
-	updateStoreStatsGauge = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "cluster",
-			Name:      "update_stores_stats_time",
-			Help:      "Time spent of updating store stats.",
 		})
 
 	clusterStateCPUGauge = prometheus.NewGauge(
@@ -96,53 +71,13 @@ var (
 			Help:      "Current state of the cluster",
 		}, []string{"state"})
 
-	regionListGauge = prometheus.NewGaugeVec(
+	regionWaitingListGauge = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: "pd",
 			Subsystem: "checker",
-			Name:      "region_list",
+			Name:      "region_waiting_list",
 			Help:      "Number of region in waiting list",
-		}, []string{"type"})
-
-	storesProgressGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "cluster",
-			Name:      "progress",
-			Help:      "The current progress of corresponding action",
-		}, []string{"address", "store", "action"})
-
-	storesSpeedGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "cluster",
-			Name:      "speed",
-			Help:      "The current speed of corresponding action",
-		}, []string{"address", "store", "action"})
-
-	storesETAGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "cluster",
-			Name:      "eta",
-			Help:      "The ETA of corresponding action",
-		}, []string{"address", "store", "action"})
-
-	storeSyncConfigEvent = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "pd",
-			Subsystem: "cluster",
-			Name:      "store_sync",
-			Help:      "The state of store sync config",
-		}, []string{"address", "state"})
-
-	schedulingAllowanceStatusGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "scheduling",
-			Name:      "allowance_status",
-			Help:      "Status of the scheduling allowance.",
-		}, []string{"kind"})
+		})
 )
 
 func init() {
@@ -151,14 +86,7 @@ func init() {
 	prometheus.MustRegister(schedulerStatusGauge)
 	prometheus.MustRegister(hotSpotStatusGauge)
 	prometheus.MustRegister(patrolCheckRegionsGauge)
-	prometheus.MustRegister(schedulingAllowanceStatusGauge)
 	prometheus.MustRegister(clusterStateCPUGauge)
 	prometheus.MustRegister(clusterStateCurrent)
-	prometheus.MustRegister(regionListGauge)
-	prometheus.MustRegister(bucketEventCounter)
-	prometheus.MustRegister(storesProgressGauge)
-	prometheus.MustRegister(storesSpeedGauge)
-	prometheus.MustRegister(storesETAGauge)
-	prometheus.MustRegister(storeSyncConfigEvent)
-	prometheus.MustRegister(updateStoreStatsGauge)
+	prometheus.MustRegister(regionWaitingListGauge)
 }

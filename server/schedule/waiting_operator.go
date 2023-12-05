@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -22,7 +21,7 @@ import (
 )
 
 // PriorityWeight is used to represent the weight of different priorities of operators.
-var PriorityWeight = []float64{1.0, 4.0, 9.0, 16.0}
+var PriorityWeight = []float64{1.0, 4.0, 9.0}
 
 // WaitingOperator is an interface of waiting operators.
 type WaitingOperator interface {
@@ -69,7 +68,9 @@ func (b *RandBuckets) ListOperator() []*operator.Operator {
 	var ops []*operator.Operator
 	for i := range b.buckets {
 		bucket := b.buckets[i]
-		ops = append(ops, bucket.ops...)
+		for j := range bucket.ops {
+			ops = append(ops, bucket.ops[j])
+		}
 	}
 	return ops
 }

@@ -15,39 +15,39 @@
 package schedulers
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/server/core"
 )
 
-func TestRetryQuota(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testUtilsSuite{})
 
+type testUtilsSuite struct{}
+
+func (s *testUtilsSuite) TestRetryQuota(c *C) {
 	q := newRetryQuota(10, 1, 2)
 	store1 := core.NewStoreInfo(&metapb.Store{Id: 1})
 	store2 := core.NewStoreInfo(&metapb.Store{Id: 2})
 	keepStores := []*core.StoreInfo{store1}
 
 	// test GetLimit
-	re.Equal(10, q.GetLimit(store1))
+	c.Assert(q.GetLimit(store1), Equals, 10)
 
 	// test Attenuate
 	for _, expected := range []int{5, 2, 1, 1, 1} {
 		q.Attenuate(store1)
-		re.Equal(expected, q.GetLimit(store1))
+		c.Assert(q.GetLimit(store1), Equals, expected)
 	}
 
 	// test GC
-	re.Equal(10, q.GetLimit(store2))
+	c.Assert(q.GetLimit(store2), Equals, 10)
 	q.Attenuate(store2)
-	re.Equal(5, q.GetLimit(store2))
+	c.Assert(q.GetLimit(store2), Equals, 5)
 	q.GC(keepStores)
-	re.Equal(1, q.GetLimit(store1))
-	re.Equal(10, q.GetLimit(store2))
+	c.Assert(q.GetLimit(store1), Equals, 1)
+	c.Assert(q.GetLimit(store2), Equals, 10)
 
 	// test ResetLimit
 	q.ResetLimit(store1)
-	re.Equal(10, q.GetLimit(store1))
+	c.Assert(q.GetLimit(store1), Equals, 10)
 }

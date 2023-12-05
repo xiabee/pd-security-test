@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,7 +26,6 @@ import (
 	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
-	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
@@ -45,13 +43,13 @@ func newMemberHandler(svr *server.Server, rd *render.Render) *memberHandler {
 	}
 }
 
-// @Tags     member
-// @Summary  List all PD servers in the cluster.
-// @Produce  json
-// @Success  200  {object}  pdpb.GetMembersResponse
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /members [get]
-func (h *memberHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
+// @Tags member
+// @Summary List all PD servers in the cluster.
+// @Produce json
+// @Success 200 {object} pdpb.GetMembersResponse
+// @Failure 500 {string} string "PD server failed to proceed the request."
+// @Router /members [get]
+func (h *memberHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	members, err := getMembers(h.svr)
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
@@ -62,28 +60,26 @@ func (h *memberHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 
 func getMembers(svr *server.Server) (*pdpb.GetMembersResponse, error) {
 	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()}}
-	grpcServer := &server.GrpcServer{Server: svr}
-	members, err := grpcServer.GetMembers(context.Background(), req)
+	members, err := svr.GetMembers(context.Background(), req)
 	if err != nil {
 		return nil, errors.WithStack(err)
-	}
-	if members.GetHeader().GetError() != nil {
-		return nil, errors.WithStack(errors.New(members.GetHeader().GetError().String()))
 	}
 	dclocationDistribution, err := svr.GetTSOAllocatorManager().GetClusterDCLocationsFromEtcd()
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	for _, m := range members.GetMembers() {
-		var e error
-		m.BinaryVersion, e = svr.GetMember().GetMemberBinaryVersion(m.GetMemberId())
+		m.DcLocation = ""
+		binaryVersion, e := svr.GetMember().GetMemberBinaryVersion(m.GetMemberId())
 		if e != nil {
 			log.Error("failed to load binary version", zap.Uint64("member", m.GetMemberId()), errs.ZapError(e))
 		}
-		m.DeployPath, e = svr.GetMember().GetMemberDeployPath(m.GetMemberId())
+		m.BinaryVersion = binaryVersion
+		deployPath, e := svr.GetMember().GetMemberDeployPath(m.GetMemberId())
 		if e != nil {
 			log.Error("failed to load deploy path", zap.Uint64("member", m.GetMemberId()), errs.ZapError(e))
 		}
+		m.DeployPath = deployPath
 		if svr.GetMember().GetEtcdLeader() == 0 {
 			log.Warn("no etcd leader, skip get leader priority", zap.Uint64("member", m.GetMemberId()))
 			continue
@@ -94,15 +90,22 @@ func getMembers(svr *server.Server) (*pdpb.GetMembersResponse, error) {
 			continue
 		}
 		m.LeaderPriority = int32(leaderPriority)
-		m.GitHash, e = svr.GetMember().GetMemberGitHash(m.GetMemberId())
+		gitHash, e := svr.GetMember().GetMemberGitHash(m.GetMemberId())
 		if e != nil {
 			log.Error("failed to load git hash", zap.Uint64("member", m.GetMemberId()), errs.ZapError(e))
 			continue
 		}
+		m.GitHash = gitHash
+		found := false
 		for dcLocation, serverIDs := range dclocationDistribution {
-			found := slice.Contains(serverIDs, m.MemberId)
+			for _, serverID := range serverIDs {
+				if serverID == m.MemberId {
+					m.DcLocation = dcLocation
+					found = true
+					break
+				}
+			}
 			if found {
-				m.DcLocation = dcLocation
 				break
 			}
 		}
@@ -110,16 +113,16 @@ func getMembers(svr *server.Server) (*pdpb.GetMembersResponse, error) {
 	return members, nil
 }
 
-// @Tags     member
-// @Summary  Remove a PD server from the cluster.
-// @Param    name  path  string  true  "PD server name"
-// @Produce  json
-// @Success  200  {string}  string  "The PD server is successfully removed."
-// @Failure  400  {string}  string  "The input is invalid."
-// @Failure  404  {string}  string  "The member does not exist."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /members/name/{name} [delete]
-func (h *memberHandler) DeleteMemberByName(w http.ResponseWriter, r *http.Request) {
+// @Tags member
+// @Summary Remove a PD server from the cluster.
+// @Param name path string true "PD server name"
+// @Produce json
+// @Success 200 {string} string "The PD server is successfully removed."
+// @Failure 400 {string} string "The input is invalid."
+// @Failure 404 {string} string "The member does not exist."
+// @Failure 500 {string} string "PD server failed to proceed the request."
+// @Router /members/name/{name} [delete]
+func (h *memberHandler) DeleteByName(w http.ResponseWriter, r *http.Request) {
 	client := h.svr.GetClient()
 
 	// Get etcd ID by name.
@@ -164,15 +167,15 @@ func (h *memberHandler) DeleteMemberByName(w http.ResponseWriter, r *http.Reques
 	h.rd.JSON(w, http.StatusOK, fmt.Sprintf("removed, pd: %s", name))
 }
 
-// @Tags     member
-// @Summary  Remove a PD server from the cluster.
-// @Param    id  path  integer  true  "PD server Id"
-// @Produce  json
-// @Success  200  {string}  string  "The PD server is successfully removed."
-// @Failure  400  {string}  string  "The input is invalid."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /members/id/{id} [delete]
-func (h *memberHandler) DeleteMemberByID(w http.ResponseWriter, r *http.Request) {
+// @Tags member
+// @Summary Remove a PD server from the cluster.
+// @Param id path integer true "PD server Id"
+// @Produce json
+// @Success 200 {string} string "The PD server is successfully removed."
+// @Failure 400 {string} string "The input is invalid."
+// @Failure 500 {string} string "PD server failed to proceed the request."
+// @Router /members/id/{id} [delete]
+func (h *memberHandler) DeleteByID(w http.ResponseWriter, r *http.Request) {
 	idStr := mux.Vars(r)["id"]
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -204,17 +207,17 @@ func (h *memberHandler) DeleteMemberByID(w http.ResponseWriter, r *http.Request)
 }
 
 // FIXME: details of input json body params
-// @Tags     member
-// @Summary  Set leader priority of a PD member.
-// @Accept   json
-// @Param    name  path  string  true  "PD server name"
-// @Param    body  body  object  true  "json params"
-// @Produce  json
-// @Success  200  {string}  string  "The leader priority is updated."
-// @Failure  400  {string}  string  "The input is invalid."
-// @Failure  404  {string}  string  "The member does not exist."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /members/name/{name} [post]
+// @Tags member
+// @Summary Set leader priority of a PD member.
+// @Accept json
+// @Param name path string true "PD server name"
+// @Param body body object true "json params"
+// @Produce json
+// @Success 200 {string} string "The leader priority is updated."
+// @Failure 400 {string} string "The input is invalid."
+// @Failure 404 {string} string "The member does not exist."
+// @Failure 500 {string} string "PD server failed to proceed the request."
+// @Router /members/name/{name} [post]
 func (h *memberHandler) SetMemberPropertyByName(w http.ResponseWriter, r *http.Request) {
 	members, membersErr := getMembers(h.svr)
 	if membersErr != nil {
@@ -240,7 +243,8 @@ func (h *memberHandler) SetMemberPropertyByName(w http.ResponseWriter, r *http.R
 		return
 	}
 	for k, v := range input {
-		if k == "leader-priority" {
+		switch k {
+		case "leader-priority":
 			priority, ok := v.(float64)
 			if !ok {
 				h.rd.JSON(w, http.StatusBadRequest, "bad format leader priority")
@@ -268,22 +272,22 @@ func newLeaderHandler(svr *server.Server, rd *render.Render) *leaderHandler {
 	}
 }
 
-// @Tags     leader
-// @Summary  Get the leader PD server of the cluster.
-// @Produce  json
-// @Success  200  {object}  pdpb.Member
-// @Router   /leader [get]
-func (h *leaderHandler) GetLeader(w http.ResponseWriter, r *http.Request) {
+// @Tags leader
+// @Summary Get the leader PD server of the cluster.
+// @Produce json
+// @Success 200 {object} pdpb.Member
+// @Router /leader [get]
+func (h *leaderHandler) Get(w http.ResponseWriter, r *http.Request) {
 	h.rd.JSON(w, http.StatusOK, h.svr.GetLeader())
 }
 
-// @Tags     leader
-// @Summary  Transfer etcd leadership to another PD server.
-// @Produce  json
-// @Success  200  {string}  string  "The resign command is submitted."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /leader/resign [post]
-func (h *leaderHandler) ResignLeader(w http.ResponseWriter, r *http.Request) {
+// @Tags leader
+// @Summary Transfer etcd leadership to another PD server.
+// @Produce json
+// @Success 200 {string} string "The resign command is submitted."
+// @Failure 500 {string} string "PD server failed to proceed the request."
+// @Router /leader/resign [post]
+func (h *leaderHandler) Resign(w http.ResponseWriter, r *http.Request) {
 	err := h.svr.GetMember().ResignEtcdLeader(h.svr.Context(), h.svr.Name(), "")
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
@@ -293,14 +297,14 @@ func (h *leaderHandler) ResignLeader(w http.ResponseWriter, r *http.Request) {
 	h.rd.JSON(w, http.StatusOK, "The resign command is submitted.")
 }
 
-// @Tags     leader
-// @Summary  Transfer etcd leadership to the specific PD server.
-// @Param    nextLeader  path  string  true  "PD server that transfer leader to"
-// @Produce  json
-// @Success  200  {string}  string  "The transfer command is submitted."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /leader/transfer/{nextLeader} [post]
-func (h *leaderHandler) TransferLeader(w http.ResponseWriter, r *http.Request) {
+// @Tags leader
+// @Summary Transfer etcd leadership to the specific PD server.
+// @Param nextLeader path string true "PD server that transfer leader to"
+// @Produce json
+// @Success 200 {string} string "The transfer command is submitted."
+// @Failure 500 {string} string "PD server failed to proceed the request."
+// @Router /leader/transfer/{nextLeader} [post]
+func (h *leaderHandler) Transfer(w http.ResponseWriter, r *http.Request) {
 	err := h.svr.GetMember().ResignEtcdLeader(h.svr.Context(), h.svr.Name(), mux.Vars(r)["next_leader"])
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())

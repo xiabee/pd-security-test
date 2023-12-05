@@ -8,36 +8,111 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package logutil
 
 import (
+	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	"github.com/coreos/pkg/capnslog"
+	. "github.com/pingcap/check"
+	zaplog "github.com/pingcap/log"
+	log "github.com/sirupsen/logrus"
 	"go.uber.org/zap/zapcore"
 )
 
-func TestStringToZapLogLevel(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	re.Equal(zapcore.FatalLevel, StringToZapLogLevel("fatal"))
-	re.Equal(zapcore.ErrorLevel, StringToZapLogLevel("ERROR"))
-	re.Equal(zapcore.WarnLevel, StringToZapLogLevel("warn"))
-	re.Equal(zapcore.WarnLevel, StringToZapLogLevel("warning"))
-	re.Equal(zapcore.DebugLevel, StringToZapLogLevel("debug"))
-	re.Equal(zapcore.InfoLevel, StringToZapLogLevel("info"))
-	re.Equal(zapcore.InfoLevel, StringToZapLogLevel("whatever"))
+const (
+	logPattern = `\d\d\d\d/\d\d/\d\d \d\d:\d\d:\d\d\.\d\d\d ([\w_%!$@.,+~-]+|\\.)+:\d+: \[(fatal|error|warning|info|debug)\] .*?\n`
+)
+
+func Test(t *testing.T) {
+	TestingT(t)
 }
 
-func TestRedactLog(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	testCases := []struct {
+var _ = Suite(&testLogSuite{})
+
+type testLogSuite struct {
+	buf *bytes.Buffer
+}
+
+func (s *testLogSuite) SetUpSuite(c *C) {
+	s.buf = &bytes.Buffer{}
+}
+
+func (s *testLogSuite) TestStringToLogLevel(c *C) {
+	c.Assert(StringToLogLevel("fatal"), Equals, log.FatalLevel)
+	c.Assert(StringToLogLevel("ERROR"), Equals, log.ErrorLevel)
+	c.Assert(StringToLogLevel("warn"), Equals, log.WarnLevel)
+	c.Assert(StringToLogLevel("warning"), Equals, log.WarnLevel)
+	c.Assert(StringToLogLevel("debug"), Equals, log.DebugLevel)
+	c.Assert(StringToLogLevel("info"), Equals, log.InfoLevel)
+	c.Assert(StringToLogLevel("whatever"), Equals, log.InfoLevel)
+}
+
+func (s *testLogSuite) TestStringToZapLogLevel(c *C) {
+	c.Assert(StringToZapLogLevel("fatal"), Equals, zapcore.FatalLevel)
+	c.Assert(StringToZapLogLevel("ERROR"), Equals, zapcore.ErrorLevel)
+	c.Assert(StringToZapLogLevel("warn"), Equals, zapcore.WarnLevel)
+	c.Assert(StringToZapLogLevel("warning"), Equals, zapcore.WarnLevel)
+	c.Assert(StringToZapLogLevel("debug"), Equals, zapcore.DebugLevel)
+	c.Assert(StringToZapLogLevel("info"), Equals, zapcore.InfoLevel)
+	c.Assert(StringToZapLogLevel("whatever"), Equals, zapcore.InfoLevel)
+}
+
+func (s *testLogSuite) TestStringToLogFormatter(c *C) {
+	c.Assert(StringToLogFormatter("text", true), DeepEquals, &textFormatter{
+		DisableTimestamp: true,
+	})
+	c.Assert(StringToLogFormatter("json", true), DeepEquals, &log.JSONFormatter{
+		DisableTimestamp: true,
+		TimestampFormat:  defaultLogTimeFormat,
+	})
+	c.Assert(StringToLogFormatter("console", true), DeepEquals, &log.TextFormatter{
+		DisableTimestamp: true,
+		FullTimestamp:    true,
+		TimestampFormat:  defaultLogTimeFormat,
+	})
+	c.Assert(StringToLogFormatter("", true), DeepEquals, &textFormatter{})
+}
+
+// TestLogging assure log format and log redirection works.
+func (s *testLogSuite) TestLogging(c *C) {
+	conf := &zaplog.Config{Level: "warn", File: zaplog.FileLogConfig{}}
+	c.Assert(InitLogger(conf), IsNil)
+
+	log.SetOutput(s.buf)
+
+	tlog := capnslog.NewPackageLogger("github.com/tikv/pd/pkg/logutil", "test")
+
+	tlog.Infof("[this message should not be sent to buf]")
+	c.Assert(s.buf.Len(), Equals, 0)
+
+	tlog.Warningf("[this message should be sent to buf]")
+	entry, err := s.buf.ReadString('\n')
+	c.Assert(err, IsNil)
+	c.Assert(entry, Matches, logPattern)
+	// All capnslog log will be trigered in logutil/log.go
+	c.Assert(strings.Contains(entry, "log.go"), IsTrue)
+
+	log.Warnf("this message comes from logrus")
+	entry, err = s.buf.ReadString('\n')
+	c.Assert(err, IsNil)
+	c.Assert(entry, Matches, logPattern)
+	c.Assert(strings.Contains(entry, "log_test.go"), IsTrue)
+}
+
+func (s *testLogSuite) TestFileLog(c *C) {
+	c.Assert(InitFileLog(&zaplog.FileLogConfig{Filename: "/tmp"}), NotNil)
+	c.Assert(InitFileLog(&zaplog.FileLogConfig{Filename: "/tmp/test_file_log", MaxSize: 0}), IsNil)
+}
+
+func (s *testLogSuite) TestRedactLog(c *C) {
+	testcases := []struct {
 		name            string
 		arg             interface{}
 		enableRedactLog bool
@@ -69,16 +144,19 @@ func TestRedactLog(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
-		t.Log(testCase.name)
-		SetRedactLog(testCase.enableRedactLog)
-		switch r := testCase.arg.(type) {
+	for _, testcase := range testcases {
+		c.Log(testcase.name)
+		SetRedactLog(testcase.enableRedactLog)
+		switch testcase.arg.(type) {
 		case []byte:
-			re.Equal(testCase.expect, RedactBytes(r))
+			r := RedactBytes(testcase.arg.([]byte))
+			c.Assert(r, DeepEquals, testcase.expect)
 		case string:
-			re.Equal(testCase.expect, RedactString(r))
+			r := RedactString(testcase.arg.(string))
+			c.Assert(r, DeepEquals, testcase.expect)
 		case fmt.Stringer:
-			re.Equal(testCase.expect, RedactStringer(r))
+			r := RedactStringer(testcase.arg.(fmt.Stringer))
+			c.Assert(r, DeepEquals, testcase.expect)
 		default:
 			panic("unmatched case")
 		}

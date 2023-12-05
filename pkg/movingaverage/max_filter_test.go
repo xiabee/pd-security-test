@@ -8,29 +8,28 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package movingaverage
 
 import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestMaxFilter(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+var _ = Suite(&testMaxFilter{})
+
+type testMaxFilter struct{}
+
+func (t *testMaxFilter) TestMaxFilter(c *C) {
 	var empty float64 = 0
 	data := []float64{2, 1, 3, 4, 1, 1, 3, 3, 2, 0, 5}
 	expected := []float64{2, 2, 3, 4, 4, 4, 4, 4, 3, 3, 5}
 
 	mf := NewMaxFilter(5)
-	re.Equal(empty, mf.Get())
+	c.Assert(mf.Get(), Equals, empty)
 
-	checkReset(re, mf, empty)
-	checkAdd(re, mf, data, expected)
-	checkSet(re, mf, data, expected)
+	checkReset(c, mf, empty)
+	checkAdd(c, mf, data, expected)
+	checkSet(c, mf, data, expected)
 }

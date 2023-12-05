@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -50,21 +49,4 @@ func BoolToInt(b bool) int {
 		return 1
 	}
 	return 0
-}
-
-// JSONToUint64Slice converts JSON slice to uint64 slice.
-func JSONToUint64Slice(from interface{}) ([]uint64, bool) {
-	items, ok := from.([]interface{})
-	if !ok {
-		return nil, false
-	}
-	to := make([]uint64, 0, len(items))
-	for _, item := range items {
-		id, ok := item.(float64)
-		if !ok {
-			return nil, false
-		}
-		to = append(to, uint64(id))
-	}
-	return to, true
 }

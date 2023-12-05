@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -23,12 +22,6 @@ const (
 	StoreHeartBeatReportInterval = 10
 	// RegionHeartBeatReportInterval is the heartbeat report interval of a region.
 	RegionHeartBeatReportInterval = 60
-	// DefaultAotSize is default size of average over time.
-	DefaultAotSize = 1
-	// DefaultWriteMfSize is default size of write median filter.
-	DefaultWriteMfSize = 5
-	// DefaultReadMfSize is default size of read median filter.
-	DefaultReadMfSize = 5
 )
 
 func storeTag(id uint64) string {

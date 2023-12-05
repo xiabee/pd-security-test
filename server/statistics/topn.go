@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -18,9 +17,8 @@ import (
 	"container/heap"
 	"container/list"
 	"fmt"
+	"sync"
 	"time"
-
-	"github.com/tikv/pd/pkg/syncutil"
 )
 
 // TopNItem represents a single object in TopN.
@@ -33,7 +31,7 @@ type TopNItem interface {
 
 // TopN maintains the N largest items of multiple dimensions.
 type TopN struct {
-	rw     syncutil.RWMutex
+	rw     sync.RWMutex
 	topns  []*singleTopN
 	ttlLst *ttlList
 }

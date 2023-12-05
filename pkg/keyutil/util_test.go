@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -17,14 +16,21 @@ package keyutil
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestKeyUtil(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testKeyUtilSuite{})
+
+type testKeyUtilSuite struct {
+}
+
+func (s *testKeyUtilSuite) TestKeyUtil(c *C) {
 	startKey := []byte("a")
 	endKey := []byte("b")
 	key := BuildKeyRangeKey(startKey, endKey)
-	re.Equal("61-62", key)
+	c.Assert(key, Equals, "61-62")
 }

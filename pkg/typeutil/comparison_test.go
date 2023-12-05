@@ -8,48 +8,40 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package typeutil
 
 import (
-	"math/rand"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestMinUint64(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	re.Equal(uint64(1), MinUint64(1, 2))
-	re.Equal(uint64(1), MinUint64(2, 1))
-	re.Equal(uint64(1), MinUint64(1, 1))
+func TestTypeUtil(t *testing.T) {
+	TestingT(t)
 }
 
-func TestMaxUint64(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	re.Equal(uint64(2), MaxUint64(1, 2))
-	re.Equal(uint64(2), MaxUint64(2, 1))
-	re.Equal(uint64(1), MaxUint64(1, 1))
+var _ = Suite(&testMinMaxSuite{})
+
+type testMinMaxSuite struct{}
+
+func (s *testMinMaxSuite) TestMinUint64(c *C) {
+	c.Assert(MinUint64(1, 2), Equals, uint64(1))
+	c.Assert(MinUint64(2, 1), Equals, uint64(1))
+	c.Assert(MinUint64(1, 1), Equals, uint64(1))
 }
 
-func TestMinDuration(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	re.Equal(time.Second, MinDuration(time.Minute, time.Second))
-	re.Equal(time.Second, MinDuration(time.Second, time.Minute))
-	re.Equal(time.Second, MinDuration(time.Second, time.Second))
+func (s *testMinMaxSuite) TestMaxUint64(c *C) {
+	c.Assert(MaxUint64(1, 2), Equals, uint64(2))
+	c.Assert(MaxUint64(2, 1), Equals, uint64(2))
+	c.Assert(MaxUint64(1, 1), Equals, uint64(1))
 }
 
-func TestEqualFloat(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	f1 := rand.Float64()
-	re.True(Float64Equal(f1, f1*1.000))
-	re.True(Float64Equal(f1, f1/1.000))
+func (s *testMinMaxSuite) TestMinDuration(c *C) {
+	c.Assert(MinDuration(time.Minute, time.Second), Equals, time.Second)
+	c.Assert(MinDuration(time.Second, time.Minute), Equals, time.Second)
+	c.Assert(MinDuration(time.Second, time.Second), Equals, time.Second)
 }

@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -22,24 +21,21 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/codec"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/syncutil"
-	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage/endpoint"
 	"go.uber.org/zap"
 )
 
 // RuleManager is responsible for the lifecycle of all placement Rules.
 // It is thread safe.
 type RuleManager struct {
-	storage endpoint.RuleStorage
-	syncutil.RWMutex
+	storage *core.Storage
+	sync.RWMutex
 	initialized bool
 	ruleConfig  *ruleConfig
 	ruleList    ruleList
@@ -47,24 +43,20 @@ type RuleManager struct {
 	// used for rule validation
 	keyType          string
 	storeSetInformer core.StoreSetInformer
-	cache            *RegionRuleFitCacheManager
-	opt              *config.PersistOptions
 }
 
 // NewRuleManager creates a RuleManager instance.
-func NewRuleManager(storage endpoint.RuleStorage, storeSetInformer core.StoreSetInformer, opt *config.PersistOptions) *RuleManager {
+func NewRuleManager(storage *core.Storage, storeSetInformer core.StoreSetInformer) *RuleManager {
 	return &RuleManager{
 		storage:          storage,
 		storeSetInformer: storeSetInformer,
-		opt:              opt,
 		ruleConfig:       newRuleConfig(),
-		cache:            NewRegionRuleFitCacheManager(),
 	}
 }
 
 // Initialize loads rules from storage. If Placement Rules feature is never enabled, it creates default rule that is
 // compatible with previous configuration.
-func (m *RuleManager) Initialize(maxReplica int, locationLabels []string, isolationLevel string) error {
+func (m *RuleManager) Initialize(maxReplica int, locationLabels []string) error {
 	m.Lock()
 	defer m.Unlock()
 	if m.initialized {
@@ -85,7 +77,6 @@ func (m *RuleManager) Initialize(maxReplica int, locationLabels []string, isolat
 			Role:           Voter,
 			Count:          maxReplica,
 			LocationLabels: locationLabels,
-			IsolationLevel: isolationLevel,
 		}
 		if err := m.storage.SaveRule(defaultRule.StoreKey(), defaultRule); err != nil {
 			return err
@@ -205,9 +196,6 @@ func (m *RuleManager) adjustRule(r *Rule, groupID string) (err error) {
 	if r.Role == Leader && r.Count > 1 {
 		return errs.ErrRuleContent.FastGenByArgs(fmt.Sprintf("define multiple leaders by count %d", r.Count))
 	}
-	if r.IsWitness && r.Count > 1 {
-		return errs.ErrRuleContent.FastGenByArgs(fmt.Sprintf("define multiple witness by count %d", r.Count))
-	}
 	for _, c := range r.LabelConstraints {
 		if !validateOp(c.Op) {
 			return errs.ErrRuleContent.FastGenByArgs(fmt.Sprintf("invalid op %s", c.Op))
@@ -267,7 +255,7 @@ func (m *RuleManager) DeleteRule(group, id string) error {
 func (m *RuleManager) GetSplitKeys(start, end []byte) [][]byte {
 	m.RLock()
 	defer m.RUnlock()
-	return m.ruleList.rangeList.GetSplitKeys(start, end)
+	return m.ruleList.getSplitKeys(start, end)
 }
 
 // GetAllRules returns sorted all rules.
@@ -312,39 +300,13 @@ func (m *RuleManager) GetRulesByKey(key []byte) []*Rule {
 func (m *RuleManager) GetRulesForApplyRegion(region *core.RegionInfo) []*Rule {
 	m.RLock()
 	defer m.RUnlock()
-	return m.ruleList.getRulesForApplyRange(region.GetStartKey(), region.GetEndKey())
-}
-
-// GetRulesForApplyRange returns the rules list that should be applied to a range.
-func (m *RuleManager) GetRulesForApplyRange(start, end []byte) []*Rule {
-	m.RLock()
-	defer m.RUnlock()
-	return m.ruleList.getRulesForApplyRange(start, end)
+	return m.ruleList.getRulesForApplyRegion(region.GetStartKey(), region.GetEndKey())
 }
 
 // FitRegion fits a region to the rules it matches.
-func (m *RuleManager) FitRegion(storeSet StoreSet, region *core.RegionInfo) *RegionFit {
-	regionStores := getStoresByRegion(storeSet, region)
+func (m *RuleManager) FitRegion(stores StoreSet, region *core.RegionInfo) *RegionFit {
 	rules := m.GetRulesForApplyRegion(region)
-	if m.opt.IsPlacementRulesCacheEnabled() {
-		if ok, fit := m.cache.CheckAndGetCache(region, rules, regionStores); fit != nil && ok {
-			return fit
-		}
-	}
-	fit := fitRegion(regionStores, region, rules, m.opt.IsWitnessAllowed())
-	fit.regionStores = regionStores
-	fit.rules = rules
-	return fit
-}
-
-// SetRegionFitCache sets RegionFitCache
-func (m *RuleManager) SetRegionFitCache(region *core.RegionInfo, fit *RegionFit) {
-	m.cache.SetCache(region, fit)
-}
-
-// InvalidCache invalids the cache.
-func (m *RuleManager) InvalidCache(regionID uint64) {
-	m.cache.Invalid(regionID)
+	return FitRegion(stores, region, rules)
 }
 
 func (m *RuleManager) beginPatch() *ruleConfigPatch {
@@ -437,8 +399,8 @@ const (
 // RuleOp is for batching placement rule actions. The action type is
 // distinguished by the field `Action`.
 type RuleOp struct {
-	*Rule                       // information of the placement rule to add/delete the operation type
-	Action           RuleOpType `json:"action"`
+	*Rule                       // information of the placement rule to add/delete
+	Action           RuleOpType `json:"action"`              // the operation type
 	DeleteByIDPrefix bool       `json:"delete_by_id_prefix"` // if action == delete, delete by the prefix of id
 }
 
@@ -450,7 +412,8 @@ func (r RuleOp) String() string {
 // Batch executes a series of actions at once.
 func (m *RuleManager) Batch(todo []RuleOp) error {
 	for _, t := range todo {
-		if t.Action == RuleOpAdd {
+		switch t.Action {
+		case RuleOpAdd:
 			err := m.adjustRule(t.Rule, "")
 			if err != nil {
 				return err
@@ -698,9 +661,12 @@ func (m *RuleManager) IsInitialized() bool {
 // checkRule check the rule whether will have RuleFit after FitRegion
 // in order to reduce the calculation.
 func checkRule(rule *Rule, stores []*core.StoreInfo) bool {
-	return slice.AnyOf(stores, func(idx int) bool {
-		return MatchLabelConstraints(stores[idx], rule.LabelConstraints)
-	})
+	for _, store := range stores {
+		if MatchLabelConstraints(store, rule.LabelConstraints) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetKeyType will update keyType for adjustRule()
@@ -709,24 +675,4 @@ func (m *RuleManager) SetKeyType(h string) *RuleManager {
 	defer m.Unlock()
 	m.keyType = h
 	return m
-}
-
-func getStoresByRegion(storeSet StoreSet, region *core.RegionInfo) []*core.StoreInfo {
-	r := make([]*core.StoreInfo, 0, len(region.GetPeers()))
-	for _, peer := range region.GetPeers() {
-		store := storeSet.GetStore(peer.GetStoreId())
-		if store != nil {
-			r = append(r, store)
-		}
-	}
-	return r
-}
-
-func getStoreByID(stores []*core.StoreInfo, id uint64) *core.StoreInfo {
-	for _, store := range stores {
-		if store != nil && store.GetID() == id {
-			return store
-		}
-	}
-	return nil
 }

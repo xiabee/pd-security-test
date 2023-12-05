@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -44,33 +43,14 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(0.0005, 2, 13),
 		}, []string{"type"})
 
-	tsoBestBatchSize = prometheus.NewHistogram(
-		prometheus.HistogramOpts{
-			Namespace: "pd_client",
-			Subsystem: "request",
-			Name:      "handle_tso_best_batch_size",
-			Help:      "Bucketed histogram of the best batch size of handled requests.",
-			Buckets:   prometheus.ExponentialBuckets(1, 2, 13),
-		})
-
 	tsoBatchSize = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: "pd_client",
 			Subsystem: "request",
 			Name:      "handle_tso_batch_size",
 			Help:      "Bucketed histogram of the batch size of handled requests.",
-			Buckets:   []float64{1, 2, 4, 8, 10, 14, 18, 22, 26, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 110, 120, 140, 160, 180, 200, 500, 1000},
+			Buckets:   prometheus.ExponentialBuckets(1, 2, 13),
 		})
-
-	tsoBatchSendLatency = prometheus.NewHistogram(
-		prometheus.HistogramOpts{
-			Namespace: "pd_client",
-			Subsystem: "request",
-			Name:      "tso_batch_send_latency",
-			Buckets:   prometheus.ExponentialBuckets(1, 2, 34), // 1ns ~ 8s
-			Help:      "tso batch send latency",
-		})
-
 	requestForwarded = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "pd_client",
@@ -98,8 +78,6 @@ var (
 	cmdDurationScatterRegions           = cmdDuration.WithLabelValues("scatter_regions")
 	cmdDurationGetOperator              = cmdDuration.WithLabelValues("get_operator")
 	cmdDurationSplitRegions             = cmdDuration.WithLabelValues("split_regions")
-	cmdDurationSplitAndScatterRegions   = cmdDuration.WithLabelValues("split_and_scatter_regions")
-	cmdDurationLoadKeyspace             = cmdDuration.WithLabelValues("load_keyspace")
 
 	cmdFailDurationGetRegion                  = cmdFailedDuration.WithLabelValues("get_region")
 	cmdFailDurationTSO                        = cmdFailedDuration.WithLabelValues("tso")
@@ -111,7 +89,6 @@ var (
 	cmdFailedDurationGetAllStores             = cmdFailedDuration.WithLabelValues("get_all_stores")
 	cmdFailedDurationUpdateGCSafePoint        = cmdFailedDuration.WithLabelValues("update_gc_safe_point")
 	cmdFailedDurationUpdateServiceGCSafePoint = cmdFailedDuration.WithLabelValues("update_service_gc_safe_point")
-	cmdFailedDurationLoadKeyspace             = cmdDuration.WithLabelValues("load_keyspace")
 	requestDurationTSO                        = requestDuration.WithLabelValues("tso")
 )
 
@@ -119,8 +96,6 @@ func init() {
 	prometheus.MustRegister(cmdDuration)
 	prometheus.MustRegister(cmdFailedDuration)
 	prometheus.MustRegister(requestDuration)
-	prometheus.MustRegister(tsoBestBatchSize)
 	prometheus.MustRegister(tsoBatchSize)
-	prometheus.MustRegister(tsoBatchSendLatency)
 	prometheus.MustRegister(requestForwarded)
 }

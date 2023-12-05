@@ -8,27 +8,27 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package operator
 
 import (
-	"testing"
-
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestIsEndStatus(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testOpStatusSuite{})
+
+type testOpStatusSuite struct{}
+
+func (s *testOpStatusSuite) TestIsEndStatus(c *C) {
 	for st := OpStatus(0); st < firstEndStatus; st++ {
-		re.False(IsEndStatus(st))
+		c.Assert(IsEndStatus(st), IsFalse)
 	}
 	for st := firstEndStatus; st < statusCount; st++ {
-		re.True(IsEndStatus(st))
+		c.Assert(IsEndStatus(st), IsTrue)
 	}
 	for st := statusCount; st < statusCount+100; st++ {
-		re.False(IsEndStatus(st))
+		c.Assert(IsEndStatus(st), IsFalse)
 	}
 }

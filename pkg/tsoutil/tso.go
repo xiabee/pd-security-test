@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,16 +26,10 @@ const (
 
 // ParseTS parses the ts to (physical,logical).
 func ParseTS(ts uint64) (time.Time, uint64) {
-	physical, logical := ParseTSUint64(ts)
+	logical := ts & logicalBits
+	physical := ts >> physicalShiftBits
 	physicalTime := time.Unix(int64(physical/1000), int64(physical)%1000*time.Millisecond.Nanoseconds())
 	return physicalTime, logical
-}
-
-// ParseTSUint64 parses the ts to (physical,logical).
-func ParseTSUint64(ts uint64) (physical uint64, logical uint64) {
-	logical = ts & logicalBits
-	physical = ts >> physicalShiftBits
-	return physical, logical
 }
 
 // ParseTimestamp parses `pdpb.Timestamp` to `time.Time`
@@ -73,22 +66,6 @@ func CompareTimestamp(tsoOne, tsoTwo *pdpb.Timestamp) int {
 		return 1
 	}
 	if tsoOne.GetPhysical() == tsoTwo.GetPhysical() && tsoOne.GetLogical() == tsoTwo.GetLogical() {
-		return 0
-	}
-	return -1
-}
-
-// CompareTimestampUint64 is used to compare two timestamps.
-// If tsoOne > tsoTwo, returns 1.
-// If tsoOne = tsoTwo, returns 0.
-// If tsoOne < tsoTwo, returns -1.
-func CompareTimestampUint64(tsoOne, tsoTwo uint64) int {
-	tsoOnePhysical, tsoOneLogical := ParseTSUint64(tsoOne)
-	tsoTwoPhysical, tsoTwoLogical := ParseTSUint64(tsoTwo)
-	if tsoOnePhysical > tsoTwoPhysical || (tsoOnePhysical == tsoTwoPhysical && tsoOneLogical > tsoTwoLogical) {
-		return 1
-	}
-	if tsoOnePhysical == tsoTwoPhysical && tsoOneLogical == tsoTwoLogical {
 		return 0
 	}
 	return -1

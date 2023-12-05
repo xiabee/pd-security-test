@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -17,14 +16,21 @@ package syncer
 import (
 	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage/kv"
+	"github.com/tikv/pd/server/kv"
 )
 
-func TestBufferSize(t *testing.T) {
-	re := require.New(t)
+var _ = Suite(&testHistoryBuffer{})
+
+type testHistoryBuffer struct{}
+
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+func (t *testHistoryBuffer) TestBufferSize(c *C) {
 	var regions []*core.RegionInfo
 	for i := 0; i <= 100; i++ {
 		regions = append(regions, core.NewRegionInfo(&metapb.Region{Id: uint64(i)}, nil))
@@ -32,23 +38,23 @@ func TestBufferSize(t *testing.T) {
 
 	// size equals 1
 	h := newHistoryBuffer(1, kv.NewMemoryKV())
-	re.Equal(0, h.len())
+	c.Assert(h.len(), Equals, 0)
 	for _, r := range regions {
 		h.Record(r)
 	}
-	re.Equal(1, h.len())
-	re.Equal(regions[h.nextIndex()-1], h.get(100))
-	re.Nil(h.get(99))
+	c.Assert(h.len(), Equals, 1)
+	c.Assert(h.get(100), Equals, regions[h.nextIndex()-1])
+	c.Assert(h.get(99), IsNil)
 
 	// size equals 2
 	h = newHistoryBuffer(2, kv.NewMemoryKV())
 	for _, r := range regions {
 		h.Record(r)
 	}
-	re.Equal(2, h.len())
-	re.Equal(regions[h.nextIndex()-1], h.get(100))
-	re.Equal(regions[h.nextIndex()-2], h.get(99))
-	re.Nil(h.get(98))
+	c.Assert(h.len(), Equals, 2)
+	c.Assert(h.get(100), Equals, regions[h.nextIndex()-1])
+	c.Assert(h.get(99), Equals, regions[h.nextIndex()-2])
+	c.Assert(h.get(98), IsNil)
 
 	// size equals 100
 	kvMem := kv.NewMemoryKV()
@@ -56,33 +62,33 @@ func TestBufferSize(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		h1.Record(regions[i])
 	}
-	re.Equal(6, h1.len())
-	re.Equal(uint64(6), h1.nextIndex())
+	c.Assert(h1.len(), Equals, 6)
+	c.Assert(h1.nextIndex(), Equals, uint64(6))
 	h1.persist()
 
 	// restart the buffer
 	h2 := newHistoryBuffer(100, kvMem)
-	re.Equal(uint64(6), h2.nextIndex())
-	re.Equal(uint64(6), h2.firstIndex())
-	re.Nil(h2.get(h.nextIndex() - 1))
-	re.Equal(0, h2.len())
+	c.Assert(h2.nextIndex(), Equals, uint64(6))
+	c.Assert(h2.firstIndex(), Equals, uint64(6))
+	c.Assert(h2.get(h.nextIndex()-1), IsNil)
+	c.Assert(h2.len(), Equals, 0)
 	for _, r := range regions {
 		index := h2.nextIndex()
 		h2.Record(r)
-		re.Equal(r, h2.get(index))
+		c.Assert(h2.get(index), Equals, r)
 	}
 
-	re.Equal(uint64(107), h2.nextIndex())
-	re.Nil(h2.get(h2.nextIndex()))
+	c.Assert(h2.nextIndex(), Equals, uint64(107))
+	c.Assert(h2.get(h2.nextIndex()), IsNil)
 	s, err := h2.kv.Load(historyKey)
-	re.NoError(err)
+	c.Assert(err, IsNil)
 	// flush in index 106
-	re.Equal("106", s)
+	c.Assert(s, Equals, "106")
 
 	histories := h2.RecordsFrom(uint64(1))
-	re.Empty(histories)
+	c.Assert(len(histories), Equals, 0)
 	histories = h2.RecordsFrom(h2.firstIndex())
-	re.Len(histories, 100)
-	re.Equal(uint64(7), h2.firstIndex())
-	re.Equal(regions[1:], histories)
+	c.Assert(len(histories), Equals, 100)
+	c.Assert(h2.firstIndex(), Equals, uint64(7))
+	c.Assert(histories, DeepEquals, regions[1:])
 }

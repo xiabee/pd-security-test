@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -22,9 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pingcap/check"
 	"github.com/pingcap/log"
-	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/assertutil"
 	"github.com/tikv/pd/pkg/tempurl"
 	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/pkg/typeutil"
@@ -39,7 +37,7 @@ import (
 type CleanupFunc func()
 
 // NewTestServer creates a pd server for testing.
-func NewTestServer(c *assertutil.Checker) (*Server, CleanupFunc, error) {
+func NewTestServer(c *check.C) (*Server, CleanupFunc, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := NewTestSingleConfig(c)
 	s, err := CreateServer(ctx, cfg)
@@ -55,7 +53,7 @@ func NewTestServer(c *assertutil.Checker) (*Server, CleanupFunc, error) {
 	cleanup := func() {
 		cancel()
 		s.Close()
-		os.RemoveAll(cfg.DataDir)
+		testutil.CleanServer(cfg.DataDir)
 	}
 	return s, cleanup, nil
 }
@@ -64,7 +62,7 @@ var zapLogOnce sync.Once
 
 // NewTestSingleConfig is only for test to create one pd.
 // Because PD client also needs this, so export here.
-func NewTestSingleConfig(c *assertutil.Checker) *config.Config {
+func NewTestSingleConfig(c *check.C) *config.Config {
 	cfg := &config.Config{
 		Name:       "pd",
 		ClientUrls: tempurl.Alloc(),
@@ -72,7 +70,7 @@ func NewTestSingleConfig(c *assertutil.Checker) *config.Config {
 
 		InitialClusterState: embed.ClusterStateFlagNew,
 
-		LeaderLease:     10,
+		LeaderLease:     1,
 		TSOSaveInterval: typeutil.NewDuration(200 * time.Millisecond),
 	}
 
@@ -85,19 +83,19 @@ func NewTestSingleConfig(c *assertutil.Checker) *config.Config {
 	cfg.ElectionInterval = typeutil.NewDuration(3 * time.Second)
 	cfg.LeaderPriorityCheckInterval = typeutil.NewDuration(100 * time.Millisecond)
 	err := cfg.SetupLogger()
-	c.AssertNil(err)
+	c.Assert(err, check.IsNil)
 	zapLogOnce.Do(func() {
 		log.ReplaceGlobals(cfg.GetZapLogger(), cfg.GetZapLogProperties())
 	})
 
-	c.AssertNil(cfg.Adjust(nil, false))
+	c.Assert(cfg.Adjust(nil, false), check.IsNil)
 
 	return cfg
 }
 
 // NewTestMultiConfig is only for test to create multiple pd configurations.
 // Because PD client also needs this, so export here.
-func NewTestMultiConfig(c *assertutil.Checker, count int) []*config.Config {
+func NewTestMultiConfig(c *check.C, count int) []*config.Config {
 	cfgs := make([]*config.Config, count)
 
 	clusters := []string{}
@@ -116,22 +114,4 @@ func NewTestMultiConfig(c *assertutil.Checker, count int) []*config.Config {
 	}
 
 	return cfgs
-}
-
-// MustWaitLeader return the leader until timeout.
-func MustWaitLeader(re *require.Assertions, svrs []*Server) *Server {
-	var leader *Server
-	testutil.Eventually(re, func() bool {
-		for _, svr := range svrs {
-			// All servers' GetLeader should return the same leader.
-			if svr.GetLeader() == nil || (leader != nil && svr.GetLeader().GetMemberId() != leader.GetLeader().GetMemberId()) {
-				return false
-			}
-			if leader == nil && !svr.IsClosed() {
-				leader = svr
-			}
-		}
-		return true
-	})
-	return leader
 }
