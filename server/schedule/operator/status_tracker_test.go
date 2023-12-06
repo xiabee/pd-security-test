@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -113,35 +114,29 @@ func (s *testOpStatusTrackerSuite) TestCheckExpired(c *C) {
 	}
 }
 
-func (s *testOpStatusTrackerSuite) TestCheckTimeout(c *C) {
-	{
-		// Not timeout
-		trk := NewOpStatusTracker()
-		before := time.Now()
-		c.Assert(trk.To(STARTED), IsTrue)
-		after := time.Now()
-		c.Assert(trk.CheckTimeout(10*time.Second), IsFalse)
-		c.Assert(trk.Status(), Equals, STARTED)
-		checkTimeOrder(c, before, trk.ReachTime(), after)
-	}
-	{
-		// Timeout but status not changed
-		trk := NewOpStatusTracker()
-		c.Assert(trk.To(STARTED), IsTrue)
-		trk.setTime(STARTED, time.Now().Add(-10*time.Second))
-		c.Assert(trk.CheckTimeout(5*time.Second), IsTrue)
-		c.Assert(trk.Status(), Equals, TIMEOUT)
-	}
-	{
+func (s *testOpStatusTrackerSuite) TestCheckStepTimeout(c *C) {
+	testdata := []struct {
+		step   OpStep
+		start  time.Time
+		status OpStatus
+	}{{
+		step: AddLearner{},
+
+		start:  time.Now().Add(-(SlowStepWaitTime - time.Second)),
+		status: STARTED,
+	}, {
+		step:   AddLearner{},
+		start:  time.Now().Add(-(SlowStepWaitTime + time.Second)),
+		status: TIMEOUT,
+	}}
+
+	for _, v := range testdata {
 		// Timeout and status changed
 		trk := NewOpStatusTracker()
-		c.Assert(trk.To(STARTED), IsTrue)
-		before := time.Now()
-		c.Assert(trk.To(TIMEOUT), IsTrue)
-		after := time.Now()
-		c.Assert(trk.CheckTimeout(0), IsTrue)
-		c.Assert(trk.Status(), Equals, TIMEOUT)
-		checkTimeOrder(c, before, trk.ReachTime(), after)
+		trk.To(STARTED)
+		trk.reachTimes[STARTED] = v.start
+		c.Assert(v.status == TIMEOUT, Equals, trk.CheckTimeout(SlowStepWaitTime))
+		c.Assert(v.status, Equals, trk.Status())
 	}
 }
 

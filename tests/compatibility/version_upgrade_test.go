@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -65,7 +66,7 @@ func (s *compatibilityTestSuite) TestStoreRegister(c *C) {
 		},
 	}
 
-	svr := leaderServer.GetServer()
+	svr := &server.GrpcServer{Server: leaderServer.GetServer()}
 	_, err = svr.PutStore(context.Background(), putStoreRequest)
 	c.Assert(err, IsNil)
 	// FIX ME: read v0.0.0 in sometime
@@ -92,8 +93,9 @@ func (s *compatibilityTestSuite) TestStoreRegister(c *C) {
 			Version: "1.0.1",
 		},
 	}
-	_, err = svr.PutStore(context.Background(), putStoreRequest)
-	c.Assert(err, NotNil)
+	resp, err := svr.PutStore(context.Background(), putStoreRequest)
+	c.Assert(err, IsNil)
+	c.Assert(len(resp.GetHeader().GetError().String()) > 0, IsTrue)
 }
 
 func (s *compatibilityTestSuite) TestRollingUpgrade(c *C) {
@@ -141,7 +143,7 @@ func (s *compatibilityTestSuite) TestRollingUpgrade(c *C) {
 		},
 	}
 
-	svr := leaderServer.GetServer()
+	svr := &server.GrpcServer{Server: leaderServer.GetServer()}
 	for _, store := range stores {
 		_, err = svr.PutStore(context.Background(), store)
 		c.Assert(err, IsNil)
@@ -151,6 +153,7 @@ func (s *compatibilityTestSuite) TestRollingUpgrade(c *C) {
 	for i, store := range stores {
 		if i == 0 {
 			store.Store.State = metapb.StoreState_Tombstone
+			store.Store.NodeState = metapb.NodeState_Removed
 		}
 		store.Store.Version = "2.1.0"
 		resp, err := svr.PutStore(context.Background(), store)

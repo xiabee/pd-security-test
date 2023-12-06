@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -19,7 +20,7 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/schedule/hbstream"
 )
 
 // HeartbeatStream is used to mock HeartbeatStream for test use.
@@ -48,7 +49,7 @@ func (s HeartbeatStream) Send(m *pdpb.RegionHeartbeatResponse) error {
 func (s HeartbeatStream) SendMsg(region *core.RegionInfo, msg *pdpb.RegionHeartbeatResponse) {}
 
 // BindStream mock method.
-func (s HeartbeatStream) BindStream(storeID uint64, stream opt.HeartbeatStream) {}
+func (s HeartbeatStream) BindStream(storeID uint64, stream hbstream.HeartbeatStream) {}
 
 // Recv mocks method.
 func (s HeartbeatStream) Recv() *pdpb.RegionHeartbeatResponse {

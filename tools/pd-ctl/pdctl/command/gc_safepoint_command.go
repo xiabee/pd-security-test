@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -46,7 +47,7 @@ func NewDeleteServiceGCSafepointCommand() *cobra.Command {
 }
 
 func showSSPs(cmd *cobra.Command, args []string) {
-	r, err := doRequest(cmd, serviceGCSafepointPrefix, http.MethodGet)
+	r, err := doRequest(cmd, serviceGCSafepointPrefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get service GC safepoint: %s\n", err)
 		return
@@ -61,7 +62,7 @@ func deleteSSP(cmd *cobra.Command, args []string) {
 	}
 	serviceID := args[0]
 	deleteURL := serviceGCSafepointPrefix + "/" + serviceID
-	r, err := doRequest(cmd, deleteURL, http.MethodDelete)
+	r, err := doRequest(cmd, deleteURL, http.MethodDelete, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to delete service GC safepoint: %s\n", err)
 		return

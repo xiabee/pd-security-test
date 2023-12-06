@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -33,6 +34,7 @@ import (
 	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
+	"github.com/tikv/pd/server/apiv2"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
@@ -60,8 +62,9 @@ var (
 // TestServer is only for test.
 type TestServer struct {
 	sync.RWMutex
-	server *server.Server
-	state  int32
+	server     *server.Server
+	grpcServer *server.GrpcServer
+	state      int32
 }
 
 var zapLogOnce sync.Once
@@ -79,15 +82,16 @@ func NewTestServer(ctx context.Context, cfg *config.Config) (*TestServer, error)
 	if err != nil {
 		return nil, err
 	}
-	serviceBuilders := []server.HandlerBuilder{api.NewHandler, swaggerserver.NewHandler, autoscaling.NewHandler}
+	serviceBuilders := []server.HandlerBuilder{api.NewHandler, apiv2.NewV2Handler, swaggerserver.NewHandler, autoscaling.NewHandler}
 	serviceBuilders = append(serviceBuilders, dashboard.GetServiceBuilders()...)
 	svr, err := server.CreateServer(ctx, cfg, serviceBuilders...)
 	if err != nil {
 		return nil, err
 	}
 	return &TestServer{
-		server: svr,
-		state:  Initial,
+		server:     svr,
+		grpcServer: &server.GrpcServer{Server: svr},
+		state:      Initial,
 	}, nil
 }
 
@@ -256,9 +260,9 @@ func (s *TestServer) GetEtcdLeader() (string, error) {
 	s.RLock()
 	defer s.RUnlock()
 	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: s.server.ClusterID()}}
-	members, err := s.server.GetMembers(context.TODO(), req)
-	if err != nil {
-		return "", errors.WithStack(err)
+	members, _ := s.grpcServer.GetMembers(context.TODO(), req)
+	if members.Header.GetError() != nil {
+		return "", errors.WithStack(errors.New(members.Header.GetError().String()))
 	}
 	return members.GetEtcdLeader().GetName(), nil
 }
@@ -268,9 +272,12 @@ func (s *TestServer) GetEtcdLeaderID() (uint64, error) {
 	s.RLock()
 	defer s.RUnlock()
 	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: s.server.ClusterID()}}
-	members, err := s.server.GetMembers(context.TODO(), req)
+	members, err := s.grpcServer.GetMembers(context.TODO(), req)
 	if err != nil {
 		return 0, errors.WithStack(err)
+	}
+	if members.GetHeader().GetError() != nil {
+		return 0, errors.WithStack(errors.New(members.GetHeader().GetError().String()))
 	}
 	return members.GetEtcdLeader().GetMemberId(), nil
 }
@@ -340,6 +347,13 @@ func (s *TestServer) GetAdjacentRegions(region *core.RegionInfo) []*core.RegionI
 	return []*core.RegionInfo{left, right}
 }
 
+// GetRangeHoles returns all range holes, i.e the key ranges without any region info.
+func (s *TestServer) GetRangeHoles() [][]string {
+	s.RLock()
+	defer s.RUnlock()
+	return s.server.GetRaftCluster().GetRangeHoles()
+}
+
 // GetStoreRegions returns all regions' information with a given storeID.
 func (s *TestServer) GetStoreRegions(storeID uint64) []*core.RegionInfo {
 	s.RLock()
@@ -351,12 +365,15 @@ func (s *TestServer) GetStoreRegions(storeID uint64) []*core.RegionInfo {
 func (s *TestServer) BootstrapCluster() error {
 	bootstrapReq := &pdpb.BootstrapRequest{
 		Header: &pdpb.RequestHeader{ClusterId: s.GetClusterID()},
-		Store:  &metapb.Store{Id: 1, Address: "mock://1"},
+		Store:  &metapb.Store{Id: 1, Address: "mock://1", LastHeartbeat: time.Now().UnixNano()},
 		Region: &metapb.Region{Id: 2, Peers: []*metapb.Peer{{Id: 3, StoreId: 1, Role: metapb.PeerRole_Voter}}},
 	}
-	_, err := s.server.Bootstrap(context.Background(), bootstrapReq)
+	resp, err := s.grpcServer.Bootstrap(context.Background(), bootstrapReq)
 	if err != nil {
 		return err
+	}
+	if resp.GetHeader().GetError() != nil {
+		return errors.New(resp.GetHeader().GetError().String())
 	}
 	return nil
 }
@@ -526,6 +543,31 @@ func (c *TestCluster) WaitLeader(ops ...WaitOption) string {
 	return ""
 }
 
+// WaitRegionSyncerClientsReady is used to wait the region syncer clients establish the connection.
+// n means wait n clients.
+func (c *TestCluster) WaitRegionSyncerClientsReady(n int) bool {
+	option := &WaitOp{
+		retryTimes:   40,
+		waitInterval: WaitLeaderCheckInterval,
+	}
+	for i := 0; i < option.retryTimes; i++ {
+		name := c.GetLeader()
+		if len(name) == 0 {
+			time.Sleep(option.waitInterval)
+			continue
+		}
+		leaderServer := c.GetServer(name)
+		clus := leaderServer.GetServer().GetRaftCluster()
+		if clus != nil {
+			if len(clus.GetRegionSyncer().GetAllDownstreamNames()) == n {
+				return true
+			}
+		}
+		time.Sleep(option.waitInterval)
+	}
+	return false
+}
+
 // ResignLeader resigns the leader of the cluster.
 func (c *TestCluster) ResignLeader() error {
 	leader := c.GetLeader()
@@ -576,7 +618,7 @@ func (c *TestCluster) WaitAllLeaders(testC *check.C, dcLocations map[string]stri
 	for _, dcLocation := range dcLocations {
 		wg.Add(1)
 		go func(dc string) {
-			testutil.WaitUntil(testC, func(testC *check.C) bool {
+			testutil.WaitUntil(testC, func() bool {
 				leaderName := c.WaitAllocatorLeader(dc)
 				return leaderName != ""
 			})

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -41,7 +42,7 @@ func (t *testStoreStatisticsSuite) TestStoreStatistics(c *C) {
 		{Id: 6, Address: "mock://tikv-6", Labels: []*metapb.StoreLabel{{Key: "zone", Value: "z3"}, {Key: "host", Value: "h2"}}},
 		{Id: 7, Address: "mock://tikv-7", Labels: []*metapb.StoreLabel{{Key: "host", Value: "h1"}}},
 		{Id: 8, Address: "mock://tikv-8", Labels: []*metapb.StoreLabel{{Key: "host", Value: "h2"}}},
-		{Id: 8, Address: "mock://tikv-9", Labels: []*metapb.StoreLabel{{Key: "host", Value: "h3"}}, State: metapb.StoreState_Tombstone},
+		{Id: 8, Address: "mock://tikv-9", Labels: []*metapb.StoreLabel{{Key: "host", Value: "h3"}}, State: metapb.StoreState_Tombstone, NodeState: metapb.NodeState_Removed},
 	}
 	storesStats := NewStoresStats()
 	stores := make([]*core.StoreInfo, 0, len(metaStores))
@@ -55,13 +56,17 @@ func (t *testStoreStatisticsSuite) TestStoreStatistics(c *C) {
 	stores[3] = store3
 	store4 := stores[4].Clone(core.SetLastHeartbeatTS(stores[4].GetLastHeartbeatTS().Add(-time.Hour)))
 	stores[4] = store4
-	storeStats := NewStoreStatisticsMap(opt)
+	storeStats := NewStoreStatisticsMap(opt, nil)
 	for _, store := range stores {
 		storeStats.Observe(store, storesStats)
 	}
 	stats := storeStats.stats
 
 	c.Assert(stats.Up, Equals, 6)
+	c.Assert(stats.Preparing, Equals, 7)
+	c.Assert(stats.Serving, Equals, 0)
+	c.Assert(stats.Removing, Equals, 1)
+	c.Assert(stats.Removed, Equals, 1)
 	c.Assert(stats.Down, Equals, 1)
 	c.Assert(stats.Offline, Equals, 1)
 	c.Assert(stats.RegionCount, Equals, 0)

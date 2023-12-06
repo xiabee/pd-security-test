@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -34,6 +35,7 @@ import (
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/core/storelimit"
+	"github.com/tikv/pd/server/storage/endpoint"
 	"go.etcd.io/etcd/clientv3"
 )
 
@@ -133,6 +135,13 @@ func (o *PersistOptions) GetLocationLabels() []string {
 	return o.GetReplicationConfig().LocationLabels
 }
 
+// SetLocationLabels sets the location labels.
+func (o *PersistOptions) SetLocationLabels(labels []string) {
+	v := o.GetReplicationConfig().Clone()
+	v.LocationLabels = labels
+	o.SetReplicationConfig(v)
+}
+
 // GetIsolationLevel returns the isolation label for each region.
 func (o *PersistOptions) GetIsolationLevel() string {
 	return o.GetReplicationConfig().IsolationLevel
@@ -147,6 +156,18 @@ func (o *PersistOptions) IsPlacementRulesEnabled() bool {
 func (o *PersistOptions) SetPlacementRuleEnabled(enabled bool) {
 	v := o.GetReplicationConfig().Clone()
 	v.EnablePlacementRules = enabled
+	o.SetReplicationConfig(v)
+}
+
+// IsPlacementRulesCacheEnabled returns if the placement rules cache is enabled
+func (o *PersistOptions) IsPlacementRulesCacheEnabled() bool {
+	return o.GetReplicationConfig().EnablePlacementRulesCache
+}
+
+// SetPlacementRulesCacheEnabled set EnablePlacementRulesCache
+func (o *PersistOptions) SetPlacementRulesCacheEnabled(enabled bool) {
+	v := o.GetReplicationConfig().Clone()
+	v.EnablePlacementRulesCache = enabled
 	o.SetReplicationConfig(v)
 }
 
@@ -239,6 +260,20 @@ func (o *PersistOptions) SetSplitMergeInterval(splitMergeInterval time.Duration)
 	o.SetScheduleConfig(v)
 }
 
+// SetMaxMergeRegionSize sets the max merge region size.
+func (o *PersistOptions) SetMaxMergeRegionSize(maxMergeRegionSize uint64) {
+	v := o.GetScheduleConfig().Clone()
+	v.MaxMergeRegionSize = maxMergeRegionSize
+	o.SetScheduleConfig(v)
+}
+
+// SetMaxMergeRegionKeys sets the max merge region keys.
+func (o *PersistOptions) SetMaxMergeRegionKeys(maxMergeRegionKeys uint64) {
+	v := o.GetScheduleConfig().Clone()
+	v.MaxMergeRegionKeys = maxMergeRegionKeys
+	o.SetScheduleConfig(v)
+}
+
 // SetStoreLimit sets a store limit for a given type and rate.
 func (o *PersistOptions) SetStoreLimit(storeID uint64, typ storelimit.Type, ratePerMin float64) {
 	v := o.GetScheduleConfig().Clone()
@@ -303,6 +338,11 @@ func (o *PersistOptions) GetPatrolRegionInterval() time.Duration {
 // GetMaxStoreDownTime returns the max down time of a store.
 func (o *PersistOptions) GetMaxStoreDownTime() time.Duration {
 	return o.GetScheduleConfig().MaxStoreDownTime.Duration
+}
+
+// GetMaxStorePreparingTime returns the max preparing time of a store.
+func (o *PersistOptions) GetMaxStorePreparingTime() time.Duration {
+	return o.GetScheduleConfig().MaxStorePreparingTime.Duration
 }
 
 // GetLeaderScheduleLimit returns the limit for leader schedule.
@@ -472,7 +512,7 @@ func (o *PersistOptions) IsRemoveExtraReplicaEnabled() bool {
 
 // IsLocationReplacementEnabled returns if location replace is enabled.
 func (o *PersistOptions) IsLocationReplacementEnabled() bool {
-	if v, ok := o.getTTLData(enableLocationReplacement); ok {
+	if v, ok := o.GetTTLData(enableLocationReplacement); ok {
 		result, err := strconv.ParseBool(v)
 		if err == nil {
 			return result
@@ -480,6 +520,15 @@ func (o *PersistOptions) IsLocationReplacementEnabled() bool {
 		log.Warn("failed to parse " + enableLocationReplacement + " from PersistOptions's ttl storage")
 	}
 	return o.GetScheduleConfig().EnableLocationReplacement
+}
+
+// GetMaxMovableHotPeerSize returns the max movable hot peer size.
+func (o *PersistOptions) GetMaxMovableHotPeerSize() int64 {
+	size := o.GetScheduleConfig().MaxMovableHotPeerSize
+	if size <= 0 {
+		size = defaultMaxMovableHotPeerSize
+	}
+	return size
 }
 
 // IsDebugMetricsEnabled returns if debug metrics is enabled.
@@ -490,6 +539,12 @@ func (o *PersistOptions) IsDebugMetricsEnabled() bool {
 // IsUseJointConsensus returns if using joint consensus as a operator step is enabled.
 func (o *PersistOptions) IsUseJointConsensus() bool {
 	return o.GetScheduleConfig().EnableJointConsensus
+}
+
+// IsTraceRegionFlow returns if the region flow is tracing.
+// If the accuracy cannot reach 0.1 MB, it is considered not.
+func (o *PersistOptions) IsTraceRegionFlow() bool {
+	return o.GetPDServerConfig().FlowRoundByDigit <= maxTraceFlowRoundByDigit
 }
 
 // GetHotRegionCacheHitsThreshold is a threshold to decide if a region is hot.
@@ -505,6 +560,16 @@ func (o *PersistOptions) GetStoresLimit() map[uint64]StoreLimitConfig {
 // GetSchedulers gets the scheduler configurations.
 func (o *PersistOptions) GetSchedulers() SchedulerConfigs {
 	return o.GetScheduleConfig().Schedulers
+}
+
+// GetHotRegionsWriteInterval gets interval for PD to store Hot Region information.
+func (o *PersistOptions) GetHotRegionsWriteInterval() time.Duration {
+	return o.GetScheduleConfig().HotRegionsWriteInterval.Duration
+}
+
+// GetHotRegionsReservedDays gets days hot region information is kept.
+func (o *PersistOptions) GetHotRegionsReservedDays() uint64 {
+	return o.GetScheduleConfig().HotRegionsReservedDays
 }
 
 // AddSchedulerCfg adds the scheduler configurations.
@@ -559,7 +624,7 @@ func (o *PersistOptions) DeleteLabelProperty(typ, labelKey, labelValue string) {
 }
 
 // Persist saves the configuration to the storage.
-func (o *PersistOptions) Persist(storage *core.Storage) error {
+func (o *PersistOptions) Persist(storage endpoint.ConfigStorage) error {
 	cfg := &Config{
 		Schedule:        *o.GetScheduleConfig(),
 		Replication:     *o.GetReplicationConfig(),
@@ -576,7 +641,7 @@ func (o *PersistOptions) Persist(storage *core.Storage) error {
 }
 
 // Reload reloads the configuration from the storage.
-func (o *PersistOptions) Reload(storage *core.Storage) error {
+func (o *PersistOptions) Reload(storage endpoint.ConfigStorage) error {
 	cfg := &Config{}
 	// pass nil to initialize cfg to default values (all items undefined)
 	cfg.Adjust(nil, true)
@@ -623,6 +688,11 @@ func (o *PersistOptions) CheckLabelProperty(typ string, labels []*metapb.StoreLa
 	return false
 }
 
+// GetMinResolvedTSPersistenceInterval gets the interval for PD to save min resolved ts.
+func (o *PersistOptions) GetMinResolvedTSPersistenceInterval() time.Duration {
+	return o.GetPDServerConfig().MinResolvedTSPersistenceInterval.Duration
+}
+
 const ttlConfigPrefix = "/config/ttl"
 
 // SetTTLData set temporary configuration
@@ -639,7 +709,7 @@ func (o *PersistOptions) SetTTLData(parCtx context.Context, client *clientv3.Cli
 }
 
 func (o *PersistOptions) getTTLUint(key string) (uint64, bool, error) {
-	stringForm, ok := o.getTTLData(key)
+	stringForm, ok := o.GetTTLData(key)
 	if !ok {
 		return 0, false, nil
 	}
@@ -658,7 +728,7 @@ func (o *PersistOptions) getTTLUintOr(key string, defaultValue uint64) uint64 {
 }
 
 func (o *PersistOptions) getTTLFloat(key string) (float64, bool, error) {
-	stringForm, ok := o.getTTLData(key)
+	stringForm, ok := o.GetTTLData(key)
 	if !ok {
 		return 0, false, nil
 	}
@@ -676,7 +746,8 @@ func (o *PersistOptions) getTTLFloatOr(key string, defaultValue float64) float64
 	return defaultValue
 }
 
-func (o *PersistOptions) getTTLData(key string) (string, bool) {
+// GetTTLData returns if there is a TTL data for a given key.
+func (o *PersistOptions) GetTTLData(key string) (string, bool) {
 	if o.ttl == nil {
 		return "", false
 	}

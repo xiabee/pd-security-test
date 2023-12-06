@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -23,6 +24,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/grpcutil"
+	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/server/core"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -115,6 +117,7 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 	ctx := s.mu.clientCtx
 
 	go func() {
+		defer logutil.LogPanic()
 		defer s.wg.Done()
 		// used to load region from kv storage to cache storage.
 		bc := s.server.GetBasicCluster()
@@ -185,8 +188,10 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 				}
 				stats := resp.GetRegionStats()
 				regions := resp.GetRegions()
+				buckets := resp.GetBuckets()
 				regionLeaders := resp.GetRegionLeaders()
 				hasStats := len(stats) == len(regions)
+				hasBuckets := len(buckets) == len(regions)
 				for i, r := range regions {
 					var (
 						region       *core.RegionInfo
@@ -215,6 +220,11 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 					_, saveKV, _, _ := regionGuide(region, origin)
 					overlaps := bc.PutRegion(region)
 
+					if hasBuckets {
+						if old := region.GetBuckets(); buckets[i].GetVersion() > old.GetVersion() {
+							region.UpdateBuckets(buckets[i], old)
+						}
+					}
 					if saveKV {
 						err = storage.SaveRegion(r)
 					}

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -15,6 +16,7 @@ package filter
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/pingcap/kvproto/pkg/metapb"
@@ -23,19 +25,16 @@ import (
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/core/storelimit"
-	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/schedule/placement"
 	"go.uber.org/zap"
 )
-
-// revive:disable:unused-parameter
 
 // SelectSourceStores selects stores that be selected as source store from the list.
 func SelectSourceStores(stores []*core.StoreInfo, filters []Filter, opt *config.PersistOptions) []*core.StoreInfo {
 	return filterStoresBy(stores, func(s *core.StoreInfo) bool {
 		return slice.AllOf(filters, func(i int) bool {
 			if !filters[i].Source(opt, s) {
-				sourceID := fmt.Sprintf("%d", s.GetID())
+				sourceID := strconv.FormatUint(s.GetID(), 10)
 				targetID := ""
 				filterCounter.WithLabelValues("filter-source", s.GetAddress(),
 					sourceID, filters[i].Scope(), filters[i].Type(), sourceID, targetID).Inc()
@@ -53,10 +52,10 @@ func SelectTargetStores(stores []*core.StoreInfo, filters []Filter, opt *config.
 			filter := filters[i]
 			if !filter.Target(opt, s) {
 				cfilter, ok := filter.(comparingFilter)
-				targetID := fmt.Sprintf("%d", s.GetID())
+				targetID := strconv.FormatUint(s.GetID(), 10)
 				sourceID := ""
 				if ok {
-					sourceID = fmt.Sprintf("%d", cfilter.GetSourceStoreID())
+					sourceID = strconv.FormatUint(cfilter.GetSourceStoreID(), 10)
 				}
 				filterCounter.WithLabelValues("filter-target", s.GetAddress(),
 					targetID, filters[i].Scope(), filters[i].Type(), sourceID, targetID).Inc()
@@ -97,7 +96,7 @@ type comparingFilter interface {
 // Source checks if store can pass all Filters as source store.
 func Source(opt *config.PersistOptions, store *core.StoreInfo, filters []Filter) bool {
 	storeAddress := store.GetAddress()
-	storeID := fmt.Sprintf("%d", store.GetID())
+	storeID := strconv.FormatUint(store.GetID(), 10)
 	for _, filter := range filters {
 		if !filter.Source(opt, store) {
 			sourceID := storeID
@@ -113,14 +112,14 @@ func Source(opt *config.PersistOptions, store *core.StoreInfo, filters []Filter)
 // Target checks if store can pass all Filters as target store.
 func Target(opt *config.PersistOptions, store *core.StoreInfo, filters []Filter) bool {
 	storeAddress := store.GetAddress()
-	storeID := fmt.Sprintf("%d", store.GetID())
+	storeID := strconv.FormatUint(store.GetID(), 10)
 	for _, filter := range filters {
 		if !filter.Target(opt, store) {
 			cfilter, ok := filter.(comparingFilter)
 			targetID := storeID
 			sourceID := ""
 			if ok {
-				sourceID = fmt.Sprintf("%d", cfilter.GetSourceStoreID())
+				sourceID = strconv.FormatUint(cfilter.GetSourceStoreID(), 10)
 			}
 			filterCounter.WithLabelValues("filter-target", storeAddress,
 				targetID, filter.Scope(), filter.Type(), sourceID, targetID).Inc()
@@ -295,9 +294,9 @@ func (f *StoreStateFilter) Type() string {
 // It should consider if the filter allows temporary states.
 type conditionFunc func(*config.PersistOptions, *core.StoreInfo) bool
 
-func (f *StoreStateFilter) isTombstone(opt *config.PersistOptions, store *core.StoreInfo) bool {
+func (f *StoreStateFilter) isRemoved(opt *config.PersistOptions, store *core.StoreInfo) bool {
 	f.Reason = "tombstone"
-	return store.IsTombstone()
+	return store.IsRemoved()
 }
 
 func (f *StoreStateFilter) isDown(opt *config.PersistOptions, store *core.StoreInfo) bool {
@@ -305,14 +304,19 @@ func (f *StoreStateFilter) isDown(opt *config.PersistOptions, store *core.StoreI
 	return store.DownTime() > opt.GetMaxStoreDownTime()
 }
 
-func (f *StoreStateFilter) isOffline(opt *config.PersistOptions, store *core.StoreInfo) bool {
+func (f *StoreStateFilter) isRemoving(opt *config.PersistOptions, store *core.StoreInfo) bool {
 	f.Reason = "offline"
-	return store.IsOffline()
+	return store.IsRemoving()
 }
 
 func (f *StoreStateFilter) pauseLeaderTransfer(opt *config.PersistOptions, store *core.StoreInfo) bool {
 	f.Reason = "pause-leader"
 	return !store.AllowLeaderTransfer()
+}
+
+func (f *StoreStateFilter) slowStoreEvicted(opt *config.PersistOptions, store *core.StoreInfo) bool {
+	f.Reason = "slow-store"
+	return store.EvictedAsSlowStore()
 }
 
 func (f *StoreStateFilter) isDisconnected(opt *config.PersistOptions, store *core.StoreInfo) bool {
@@ -350,7 +354,7 @@ func (f *StoreStateFilter) tooManyPendingPeers(opt *config.PersistOptions, store
 
 func (f *StoreStateFilter) hasRejectLeaderProperty(opts *config.PersistOptions, store *core.StoreInfo) bool {
 	f.Reason = "reject-leader"
-	return opts.CheckLabelProperty(opt.RejectLeader, store.GetLabels())
+	return opts.CheckLabelProperty(config.RejectLeader, store.GetLabels())
 }
 
 // The condition table.
@@ -378,17 +382,17 @@ func (f *StoreStateFilter) anyConditionMatch(typ int, opt *config.PersistOptions
 	var funcs []conditionFunc
 	switch typ {
 	case leaderSource:
-		funcs = []conditionFunc{f.isTombstone, f.isDown, f.pauseLeaderTransfer, f.isDisconnected}
+		funcs = []conditionFunc{f.isRemoved, f.isDown, f.pauseLeaderTransfer, f.isDisconnected}
 	case regionSource:
 		funcs = []conditionFunc{f.isBusy, f.exceedRemoveLimit, f.tooManySnapshots}
 	case leaderTarget:
-		funcs = []conditionFunc{f.isTombstone, f.isOffline, f.isDown, f.pauseLeaderTransfer,
-			f.isDisconnected, f.isBusy, f.hasRejectLeaderProperty}
+		funcs = []conditionFunc{f.isRemoved, f.isRemoving, f.isDown, f.pauseLeaderTransfer,
+			f.slowStoreEvicted, f.isDisconnected, f.isBusy, f.hasRejectLeaderProperty}
 	case regionTarget:
-		funcs = []conditionFunc{f.isTombstone, f.isOffline, f.isDown, f.isDisconnected, f.isBusy,
+		funcs = []conditionFunc{f.isRemoved, f.isRemoving, f.isDown, f.isDisconnected, f.isBusy,
 			f.exceedAddLimit, f.tooManySnapshots, f.tooManyPendingPeers}
 	case scatterRegionTarget:
-		funcs = []conditionFunc{f.isTombstone, f.isOffline, f.isDown, f.isDisconnected, f.isBusy}
+		funcs = []conditionFunc{f.isRemoved, f.isRemoving, f.isDown, f.isDisconnected, f.isBusy}
 	}
 	for _, cf := range funcs {
 		if cf(opt, store) {
@@ -456,29 +460,26 @@ func (f labelConstraintFilter) Target(opt *config.PersistOptions, store *core.St
 	return placement.MatchLabelConstraints(store, f.constraints)
 }
 
-// RegionFitter is the interface that can fit a region against placement rules.
-type RegionFitter interface {
-	FitRegion(*core.RegionInfo) *placement.RegionFit
-}
-
 type ruleFitFilter struct {
-	scope    string
-	fitter   RegionFitter
-	region   *core.RegionInfo
-	oldFit   *placement.RegionFit
-	srcStore uint64
+	scope       string
+	cluster     *core.BasicCluster
+	ruleManager *placement.RuleManager
+	region      *core.RegionInfo
+	oldFit      *placement.RegionFit
+	srcStore    uint64
 }
 
 // newRuleFitFilter creates a filter that ensures after replace a peer with new
 // one, the isolation level will not decrease. Its function is the same as
 // distinctScoreFilter but used when placement rules is enabled.
-func newRuleFitFilter(scope string, fitter RegionFitter, region *core.RegionInfo, oldStoreID uint64) Filter {
+func newRuleFitFilter(scope string, cluster *core.BasicCluster, ruleManager *placement.RuleManager, region *core.RegionInfo, oldStoreID uint64) Filter {
 	return &ruleFitFilter{
-		scope:    scope,
-		fitter:   fitter,
-		region:   region,
-		oldFit:   fitter.FitRegion(region),
-		srcStore: oldStoreID,
+		scope:       scope,
+		cluster:     cluster,
+		ruleManager: ruleManager,
+		region:      region,
+		oldFit:      ruleManager.FitRegion(cluster, region),
+		srcStore:    oldStoreID,
 	}
 }
 
@@ -490,15 +491,15 @@ func (f *ruleFitFilter) Type() string {
 	return "rule-fit-filter"
 }
 
-func (f *ruleFitFilter) Source(opt *config.PersistOptions, store *core.StoreInfo) bool {
+func (f *ruleFitFilter) Source(options *config.PersistOptions, store *core.StoreInfo) bool {
 	return true
 }
 
-func (f *ruleFitFilter) Target(opt *config.PersistOptions, store *core.StoreInfo) bool {
+func (f *ruleFitFilter) Target(options *config.PersistOptions, store *core.StoreInfo) bool {
 	region := createRegionForRuleFit(f.region.GetStartKey(), f.region.GetEndKey(),
 		f.region.GetPeers(), f.region.GetLeader(),
 		core.WithReplacePeerStore(f.srcStore, store.GetID()))
-	newFit := f.fitter.FitRegion(region)
+	newFit := f.ruleManager.FitRegion(f.cluster, region)
 	return placement.CompareRegionFit(f.oldFit, newFit) <= 0
 }
 
@@ -509,21 +510,25 @@ func (f *ruleFitFilter) GetSourceStoreID() uint64 {
 
 type ruleLeaderFitFilter struct {
 	scope            string
-	fitter           RegionFitter
+	cluster          *core.BasicCluster
+	ruleManager      *placement.RuleManager
 	region           *core.RegionInfo
 	oldFit           *placement.RegionFit
 	srcLeaderStoreID uint64
+	allowMoveLeader  bool
 }
 
 // newRuleLeaderFitFilter creates a filter that ensures after transfer leader with new store,
 // the isolation level will not decrease.
-func newRuleLeaderFitFilter(scope string, fitter RegionFitter, region *core.RegionInfo, srcLeaderStoreID uint64) Filter {
+func newRuleLeaderFitFilter(scope string, cluster *core.BasicCluster, ruleManager *placement.RuleManager, region *core.RegionInfo, srcLeaderStoreID uint64, allowMoveLeader bool) Filter {
 	return &ruleLeaderFitFilter{
 		scope:            scope,
-		fitter:           fitter,
+		cluster:          cluster,
+		ruleManager:      ruleManager,
 		region:           region,
-		oldFit:           fitter.FitRegion(region),
+		oldFit:           ruleManager.FitRegion(cluster, region),
 		srcLeaderStoreID: srcLeaderStoreID,
+		allowMoveLeader:  allowMoveLeader,
 	}
 }
 
@@ -535,20 +540,32 @@ func (f *ruleLeaderFitFilter) Type() string {
 	return "rule-fit-leader-filter"
 }
 
-func (f *ruleLeaderFitFilter) Source(opt *config.PersistOptions, store *core.StoreInfo) bool {
+func (f *ruleLeaderFitFilter) Source(options *config.PersistOptions, store *core.StoreInfo) bool {
 	return true
 }
 
-func (f *ruleLeaderFitFilter) Target(opt *config.PersistOptions, store *core.StoreInfo) bool {
-	targetPeer := f.region.GetStorePeer(store.GetID())
+func (f *ruleLeaderFitFilter) Target(options *config.PersistOptions, store *core.StoreInfo) bool {
+	targetStoreID := store.GetID()
+	sourcePeer := f.region.GetStorePeer(f.srcLeaderStoreID)
+	targetPeer := f.region.GetStorePeer(targetStoreID)
+	newRegionOptions := []core.RegionCreateOption{core.WithLeader(targetPeer)}
 	if targetPeer == nil {
-		log.Warn("ruleLeaderFitFilter couldn't find peer on target Store", zap.Uint64("target-store", store.GetID()))
-		return false
+		if !f.allowMoveLeader {
+			log.Warn("ruleLeaderFitFilter couldn't find peer on target Store", zap.Uint64("target-store", store.GetID()))
+			return false
+		}
+		newRegionOptions = []core.RegionCreateOption{
+			core.WithReplacePeerStore(f.srcLeaderStoreID, targetStoreID),
+			core.WithLeader(&metapb.Peer{Id: sourcePeer.GetId(), StoreId: targetStoreID}),
+		}
 	}
 	copyRegion := createRegionForRuleFit(f.region.GetStartKey(), f.region.GetEndKey(),
-		f.region.GetPeers(), f.region.GetLeader(),
-		core.WithLeader(targetPeer))
-	newFit := f.fitter.FitRegion(copyRegion)
+		f.region.GetPeers(), f.region.GetLeader(), newRegionOptions...)
+	targetPeer = copyRegion.GetStorePeer(targetStoreID)
+	if targetPeer.Role == metapb.PeerRole_Learner {
+		return false
+	}
+	newFit := f.ruleManager.FitRegion(f.cluster, copyRegion)
 	return placement.CompareRegionFit(f.oldFit, newFit) <= 0
 }
 
@@ -558,19 +575,19 @@ func (f *ruleLeaderFitFilter) GetSourceStoreID() uint64 {
 
 // NewPlacementSafeguard creates a filter that ensures after replace a peer with new
 // peer, the placement restriction will not become worse.
-func NewPlacementSafeguard(scope string, cluster opt.Cluster, region *core.RegionInfo, sourceStore *core.StoreInfo) Filter {
-	if cluster.GetOpts().IsPlacementRulesEnabled() {
-		return newRuleFitFilter(scope, cluster, region, sourceStore.GetID())
+func NewPlacementSafeguard(scope string, opt *config.PersistOptions, cluster *core.BasicCluster, ruleManager *placement.RuleManager, region *core.RegionInfo, sourceStore *core.StoreInfo) Filter {
+	if opt.IsPlacementRulesEnabled() {
+		return newRuleFitFilter(scope, cluster, ruleManager, region, sourceStore.GetID())
 	}
-	return NewLocationSafeguard(scope, cluster.GetOpts().GetLocationLabels(), cluster.GetRegionStores(region), sourceStore)
+	return NewLocationSafeguard(scope, opt.GetLocationLabels(), cluster.GetRegionStores(region), sourceStore)
 }
 
 // NewPlacementLeaderSafeguard creates a filter that ensures after transfer a leader with
 // existed peer, the placement restriction will not become worse.
 // Note that it only worked when PlacementRules enabled otherwise it will always permit the sourceStore.
-func NewPlacementLeaderSafeguard(scope string, cluster opt.Cluster, region *core.RegionInfo, sourceStore *core.StoreInfo) Filter {
-	if cluster.GetOpts().IsPlacementRulesEnabled() {
-		return newRuleLeaderFitFilter(scope, cluster, region, sourceStore.GetID())
+func NewPlacementLeaderSafeguard(scope string, opt *config.PersistOptions, cluster *core.BasicCluster, ruleManager *placement.RuleManager, region *core.RegionInfo, sourceStore *core.StoreInfo, allowMoveLeader bool) Filter {
+	if opt.IsPlacementRulesEnabled() {
+		return newRuleLeaderFitFilter(scope, cluster, ruleManager, region, sourceStore.GetID(), allowMoveLeader)
 	}
 	return nil
 }
@@ -584,7 +601,7 @@ type engineFilter struct {
 func NewEngineFilter(scope string, allowedEngines ...string) Filter {
 	return &engineFilter{
 		scope:      scope,
-		constraint: placement.LabelConstraint{Key: "engine", Op: "in", Values: allowedEngines},
+		constraint: placement.LabelConstraint{Key: core.EngineKey, Op: placement.In, Values: allowedEngines},
 	}
 }
 
@@ -613,7 +630,7 @@ type ordinaryEngineFilter struct {
 func NewOrdinaryEngineFilter(scope string) Filter {
 	return &ordinaryEngineFilter{
 		scope:      scope,
-		constraint: placement.LabelConstraint{Key: "engine", Op: "notIn", Values: allSpeicalEngines},
+		constraint: placement.LabelConstraint{Key: core.EngineKey, Op: placement.NotIn, Values: allSpecialEngines},
 	}
 }
 
@@ -650,7 +667,7 @@ func NewSpecialUseFilter(scope string, allowUses ...string) Filter {
 	}
 	return &specialUseFilter{
 		scope:      scope,
-		constraint: placement.LabelConstraint{Key: SpecialUseKey, Op: "in", Values: values},
+		constraint: placement.LabelConstraint{Key: SpecialUseKey, Op: placement.In, Values: values},
 	}
 }
 
@@ -680,17 +697,10 @@ const (
 	SpecialUseHotRegion = "hotRegion"
 	// SpecialUseReserved is the reserved value of special use label
 	SpecialUseReserved = "reserved"
-
-	// EngineKey is the label key used to indicate engine.
-	EngineKey = "engine"
-	// EngineTiFlash is the tiflash value of the engine label.
-	EngineTiFlash = "tiflash"
-	// EngineTiKV indicates the tikv engine in metrics
-	EngineTiKV = "tikv"
 )
 
 var allSpecialUses = []string{SpecialUseHotRegion, SpecialUseReserved}
-var allSpeicalEngines = []string{EngineTiFlash}
+var allSpecialEngines = []string{core.EngineTiFlash}
 
 type isolationFilter struct {
 	scope          string
@@ -742,7 +752,7 @@ func (f *isolationFilter) Source(opt *config.PersistOptions, store *core.StoreIn
 
 func (f *isolationFilter) Target(opt *config.PersistOptions, store *core.StoreInfo) bool {
 	// No isolation constraint to fit
-	if len(f.constraintSet) <= 0 {
+	if len(f.constraintSet) == 0 {
 		return true
 	}
 	for _, constrainList := range f.constraintSet {
@@ -778,4 +788,39 @@ func createRegionForRuleFit(startKey, endKey []byte,
 		Peers:    copyPeers,
 	}, copyLeader, opts...)
 	return cloneRegion
+}
+
+// RegionScoreFilter filter target store that it's score must higher than the given score
+type RegionScoreFilter struct {
+	scope string
+	score float64
+}
+
+// NewRegionScoreFilter creates a Filter that filters all high score stores.
+func NewRegionScoreFilter(scope string, source *core.StoreInfo, opt *config.PersistOptions) Filter {
+	return &RegionScoreFilter{
+		scope: scope,
+		score: source.RegionScore(opt.GetRegionScoreFormulaVersion(), opt.GetHighSpaceRatio(), opt.GetLowSpaceRatio(), 0),
+	}
+}
+
+// Scope scopes only for balance region
+func (f *RegionScoreFilter) Scope() string {
+	return f.scope
+}
+
+// Type types region score filter
+func (f *RegionScoreFilter) Type() string {
+	return "region-score-filter"
+}
+
+// Source ignore source
+func (f *RegionScoreFilter) Source(opt *config.PersistOptions, _ *core.StoreInfo) bool {
+	return true
+}
+
+// Target return true if target's score less than source's score
+func (f *RegionScoreFilter) Target(opt *config.PersistOptions, store *core.StoreInfo) bool {
+	score := store.RegionScore(opt.GetRegionScoreFormulaVersion(), opt.GetHighSpaceRatio(), opt.GetLowSpaceRatio(), 0)
+	return score < f.score
 }

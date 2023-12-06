@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -15,14 +16,14 @@ package core
 
 import (
 	"math"
-	"sync"
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/tikv/pd/pkg/movingaverage"
+	"github.com/tikv/pd/pkg/syncutil"
 )
 
 type storeStats struct {
-	mu       sync.RWMutex
+	mu       syncutil.RWMutex
 	rawStats *pdpb.StoreStats
 
 	// avgAvailable is used to make available smooth, aka no sudden changes.
@@ -38,7 +39,7 @@ type storeStats struct {
 func newStoreStats() *storeStats {
 	return &storeStats{
 		rawStats:                 &pdpb.StoreStats{},
-		avgAvailable:             movingaverage.NewHMA(240),       // take 40 minutes sample under 10s heartbeat rate
+		avgAvailable:             movingaverage.NewHMA(60),        // take 10 minutes sample under 10s heartbeat rate
 		maxAvailableDeviation:    movingaverage.NewMaxFilter(120), // take 20 minutes sample under 10s heartbeat rate
 		avgMaxAvailableDeviation: movingaverage.NewHMA(60),        // take 10 minutes sample under 10s heartbeat rate
 	}

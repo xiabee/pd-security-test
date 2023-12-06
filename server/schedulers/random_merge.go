@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -23,7 +24,7 @@ import (
 	"github.com/tikv/pd/server/schedule/checker"
 	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/storage/endpoint"
 )
 
 const (
@@ -49,7 +50,7 @@ func init() {
 			return nil
 		}
 	})
-	schedule.RegisterScheduler(RandomMergeType, func(opController *schedule.OperatorController, storage *core.Storage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	schedule.RegisterScheduler(RandomMergeType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		conf := &randomMergeSchedulerConfig{}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -90,7 +91,7 @@ func (s *randomMergeScheduler) EncodeConfig() ([]byte, error) {
 	return schedule.EncodeConfig(s.conf)
 }
 
-func (s *randomMergeScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
+func (s *randomMergeScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
 	allowed := s.OpController.OperatorCount(operator.OpMerge) < cluster.GetOpts().GetMergeScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpMerge.String()).Inc()
@@ -98,7 +99,7 @@ func (s *randomMergeScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 	return allowed
 }
 
-func (s *randomMergeScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
+func (s *randomMergeScheduler) Schedule(cluster schedule.Cluster) []*operator.Operator {
 	schedulerCounter.WithLabelValues(s.GetName(), "schedule").Inc()
 
 	store := filter.NewCandidates(cluster.GetStores()).
@@ -108,7 +109,7 @@ func (s *randomMergeScheduler) Schedule(cluster opt.Cluster) []*operator.Operato
 		schedulerCounter.WithLabelValues(s.GetName(), "no-source-store").Inc()
 		return nil
 	}
-	region := cluster.RandLeaderRegion(store.GetID(), s.conf.Ranges, opt.HealthRegion(cluster))
+	region := cluster.RandLeaderRegion(store.GetID(), s.conf.Ranges, schedule.IsRegionHealthy)
 	if region == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-region").Inc()
 		return nil
@@ -133,18 +134,15 @@ func (s *randomMergeScheduler) Schedule(cluster opt.Cluster) []*operator.Operato
 		log.Debug("fail to create merge region operator", errs.ZapError(err))
 		return nil
 	}
-	for _, op := range ops {
-		op.SetPriorityLevel(core.HighPriority)
-	}
 	ops[0].Counters = append(ops[0].Counters, schedulerCounter.WithLabelValues(s.GetName(), "new-operator"))
 	return ops
 }
 
-func (s *randomMergeScheduler) allowMerge(cluster opt.Cluster, region, target *core.RegionInfo) bool {
-	if !opt.IsRegionHealthy(cluster, region) || !opt.IsRegionHealthy(cluster, target) {
+func (s *randomMergeScheduler) allowMerge(cluster schedule.Cluster, region, target *core.RegionInfo) bool {
+	if !schedule.IsRegionHealthy(region) || !schedule.IsRegionHealthy(target) {
 		return false
 	}
-	if !opt.IsRegionReplicated(cluster, region) || !opt.IsRegionReplicated(cluster, target) {
+	if !schedule.IsRegionReplicated(cluster, region) || !schedule.IsRegionReplicated(cluster, target) {
 		return false
 	}
 	if cluster.IsRegionHot(region) || cluster.IsRegionHot(target) {

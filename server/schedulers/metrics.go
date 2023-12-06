@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -30,14 +31,6 @@ var schedulerStatus = prometheus.NewGaugeVec(
 		Name:      "inner_status",
 		Help:      "Inner status of the scheduler.",
 	}, []string{"type", "name"})
-
-var hotPeerSummary = prometheus.NewGaugeVec(
-	prometheus.GaugeOpts{
-		Namespace: "pd",
-		Subsystem: "scheduler",
-		Name:      "hot_peers_summary",
-		Help:      "Hot peers summary for each store",
-	}, []string{"type", "store"})
 
 var opInfluenceStatus = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
@@ -93,7 +86,7 @@ var hotDirectionCounter = prometheus.NewCounterVec(
 		Subsystem: "scheduler",
 		Name:      "hot_region_direction",
 		Help:      "Counter of hot region scheduler.",
-	}, []string{"type", "rw", "store", "direction"})
+	}, []string{"type", "rw", "store", "direction", "dim"})
 
 var scatterRangeLeaderCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
@@ -111,10 +104,17 @@ var scatterRangeRegionCounter = prometheus.NewCounterVec(
 		Help:      "Counter of scatter range region scheduler.",
 	}, []string{"type", "store"})
 
+var hotPendingStatus = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "pd",
+		Subsystem: "scheduler",
+		Name:      "hot_pending",
+		Help:      "Counter of direction of balance related schedulers.",
+	}, []string{"type", "source", "target"})
+
 func init() {
 	prometheus.MustRegister(schedulerCounter)
 	prometheus.MustRegister(schedulerStatus)
-	prometheus.MustRegister(hotPeerSummary)
 	prometheus.MustRegister(balanceLeaderCounter)
 	prometheus.MustRegister(balanceRegionCounter)
 	prometheus.MustRegister(hotSchedulerResultCounter)
@@ -124,4 +124,5 @@ func init() {
 	prometheus.MustRegister(scatterRangeRegionCounter)
 	prometheus.MustRegister(opInfluenceStatus)
 	prometheus.MustRegister(tolerantResourceStatus)
+	prometheus.MustRegister(hotPendingStatus)
 }

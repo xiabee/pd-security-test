@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,7 +28,6 @@ import (
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
 	"go.uber.org/zap"
 )
 
@@ -43,7 +43,7 @@ type SplitRegionsHandler interface {
 }
 
 // NewSplitRegionsHandler return SplitRegionsHandler
-func NewSplitRegionsHandler(cluster opt.Cluster, oc *OperatorController) SplitRegionsHandler {
+func NewSplitRegionsHandler(cluster Cluster, oc *OperatorController) SplitRegionsHandler {
 	return &splitRegionsHandler{
 		cluster: cluster,
 		oc:      oc,
@@ -52,12 +52,12 @@ func NewSplitRegionsHandler(cluster opt.Cluster, oc *OperatorController) SplitRe
 
 // RegionSplitter handles split regions
 type RegionSplitter struct {
-	cluster opt.Cluster
+	cluster Cluster
 	handler SplitRegionsHandler
 }
 
 // NewRegionSplitter return a region splitter
-func NewRegionSplitter(cluster opt.Cluster, handler SplitRegionsHandler) *RegionSplitter {
+func NewRegionSplitter(cluster Cluster, handler SplitRegionsHandler) *RegionSplitter {
 	return &RegionSplitter{
 		cluster: cluster,
 		handler: handler,
@@ -165,7 +165,7 @@ func (r *RegionSplitter) checkRegionValid(region *core.RegionInfo) bool {
 	if r.cluster.IsRegionHot(region) {
 		return false
 	}
-	if !opt.IsRegionReplicated(r.cluster, region) {
+	if !IsRegionReplicated(r.cluster, region) {
 		r.cluster.AddSuspectRegions(region.GetID())
 		return false
 	}
@@ -176,7 +176,7 @@ func (r *RegionSplitter) checkRegionValid(region *core.RegionInfo) bool {
 }
 
 type splitRegionsHandler struct {
-	cluster opt.Cluster
+	cluster Cluster
 	oc      *OperatorController
 }
 

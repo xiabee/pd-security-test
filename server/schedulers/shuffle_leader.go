@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -20,7 +21,7 @@ import (
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/storage/endpoint"
 )
 
 const (
@@ -47,7 +48,7 @@ func init() {
 		}
 	})
 
-	schedule.RegisterScheduler(ShuffleLeaderType, func(opController *schedule.OperatorController, storage *core.Storage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	schedule.RegisterScheduler(ShuffleLeaderType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		conf := &shuffleLeaderSchedulerConfig{}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -94,7 +95,7 @@ func (s *shuffleLeaderScheduler) EncodeConfig() ([]byte, error) {
 	return schedule.EncodeConfig(s.conf)
 }
 
-func (s *shuffleLeaderScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
+func (s *shuffleLeaderScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
 	allowed := s.OpController.OperatorCount(operator.OpLeader) < cluster.GetOpts().GetLeaderScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpLeader.String()).Inc()
@@ -102,7 +103,7 @@ func (s *shuffleLeaderScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 	return allowed
 }
 
-func (s *shuffleLeaderScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
+func (s *shuffleLeaderScheduler) Schedule(cluster schedule.Cluster) []*operator.Operator {
 	// We shuffle leaders between stores by:
 	// 1. random select a valid store.
 	// 2. transfer a leader to the store.
@@ -114,12 +115,12 @@ func (s *shuffleLeaderScheduler) Schedule(cluster opt.Cluster) []*operator.Opera
 		schedulerCounter.WithLabelValues(s.GetName(), "no-target-store").Inc()
 		return nil
 	}
-	region := cluster.RandFollowerRegion(targetStore.GetID(), s.conf.Ranges, opt.HealthRegion(cluster))
+	region := cluster.RandFollowerRegion(targetStore.GetID(), s.conf.Ranges, schedule.IsRegionHealthy)
 	if region == nil {
 		schedulerCounter.WithLabelValues(s.GetName(), "no-follower").Inc()
 		return nil
 	}
-	op, err := operator.CreateTransferLeaderOperator(ShuffleLeaderType, cluster, region, region.GetLeader().GetId(), targetStore.GetID(), operator.OpLeader)
+	op, err := operator.CreateTransferLeaderOperator(ShuffleLeaderType, cluster, region, region.GetLeader().GetId(), targetStore.GetID(), []uint64{}, operator.OpAdmin)
 	if err != nil {
 		log.Debug("fail to create shuffle leader operator", errs.ZapError(err))
 		return nil

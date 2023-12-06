@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -22,6 +23,16 @@ import (
 
 // ByteSize is a retype uint64 for TOML and JSON.
 type ByteSize uint64
+
+// ParseMBFromText parses MB from text.
+func ParseMBFromText(text string, value uint64) uint64 {
+	b := ByteSize(0)
+	err := b.UnmarshalText([]byte(text))
+	if err != nil {
+		return value
+	}
+	return uint64(b / units.MiB)
+}
 
 // MarshalJSON returns the size as a JSON string.
 func (b ByteSize) MarshalJSON() ([]byte, error) {

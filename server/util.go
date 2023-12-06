@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -17,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"path"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -120,22 +120,6 @@ func initOrGetClusterID(c *clientv3.Client, key string) (uint64, error) {
 	}
 
 	return typeutil.BytesToUint64(response.Kvs[0].Value)
-}
-
-func makeStoreKey(clusterRootPath string, storeID uint64) string {
-	return path.Join(clusterRootPath, "s", fmt.Sprintf("%020d", storeID))
-}
-
-func makeRegionKey(clusterRootPath string, regionID uint64) string {
-	return path.Join(clusterRootPath, "r", fmt.Sprintf("%020d", regionID))
-}
-
-func makeRaftClusterStatusPrefix(clusterRootPath string) string {
-	return path.Join(clusterRootPath, "status")
-}
-
-func makeBootstrapTimeKey(clusterRootPath string) string {
-	return path.Join(makeRaftClusterStatusPrefix(clusterRootPath), "raft_bootstrap_time")
 }
 
 func checkBootstrapRequest(clusterID uint64, req *pdpb.BootstrapRequest) error {

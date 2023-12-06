@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -24,7 +25,6 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
 	"github.com/tikv/pd/server/config"
@@ -113,7 +113,7 @@ func NewSingleServer(ctx context.Context, simConfig *simulator.SimConfig) (*serv
 		log.Fatal("setup logger error", zap.Error(err))
 	}
 
-	err = logutil.InitLogger(&simConfig.ServerConfig.Log)
+	simConfig.ServerConfig.SetupLogger()
 	if err != nil {
 		log.Fatal("initialize logger error", zap.Error(err))
 	}

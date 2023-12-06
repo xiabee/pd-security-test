@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -103,7 +104,10 @@ func RemoveEtcdMember(client *clientv3.Client, id uint64) (*clientv3.MemberRemov
 	ctx, cancel := context.WithTimeout(client.Ctx(), DefaultRequestTimeout)
 	rmResp, err := client.MemberRemove(ctx, id)
 	cancel()
-	return rmResp, errors.WithStack(err)
+	if err != nil {
+		return rmResp, errs.ErrEtcdMemberRemove.Wrap(err).GenWithStackByCause()
+	}
+	return rmResp, nil
 }
 
 // EtcdKVGet returns the etcd GetResponse by given key or key prefix

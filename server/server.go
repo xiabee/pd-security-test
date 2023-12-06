@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -38,10 +39,13 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/sysutil"
+	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/pkg/audit"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/pkg/grpcutil"
 	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/pkg/systimemon"
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/cluster"
@@ -49,12 +53,14 @@ import (
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/encryptionkm"
 	"github.com/tikv/pd/server/id"
-	"github.com/tikv/pd/server/kv"
 	"github.com/tikv/pd/server/member"
 	syncer "github.com/tikv/pd/server/region_syncer"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/hbstream"
 	"github.com/tikv/pd/server/schedule/placement"
+	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/storage/endpoint"
+	"github.com/tikv/pd/server/storage/kv"
 	"github.com/tikv/pd/server/tso"
 	"github.com/tikv/pd/server/versioninfo"
 	"github.com/urfave/negroni"
@@ -83,6 +89,7 @@ var (
 )
 
 // Server is the pd server.
+// nolint
 type Server struct {
 	diagnosticspb.DiagnosticsServer
 
@@ -93,10 +100,12 @@ type Server struct {
 	startTimestamp int64
 
 	// Configs and initial fields.
-	cfg            *config.Config
-	etcdCfg        *embed.Config
-	persistOptions *config.PersistOptions
-	handler        *Handler
+	cfg                             *config.Config
+	serviceMiddlewareCfg            *config.ServiceMiddlewareConfig
+	etcdCfg                         *embed.Config
+	serviceMiddlewarePersistOptions *config.ServiceMiddlewarePersistOptions
+	persistOptions                  *config.PersistOptions
+	handler                         *Handler
 
 	ctx              context.Context
 	serverLoopCtx    context.Context
@@ -120,7 +129,7 @@ type Server struct {
 	// for encryption
 	encryptionKeyManager *encryptionkm.KeyManager
 	// for storage operation.
-	storage *core.Storage
+	storage storage.Storage
 	// for basicCluster operation.
 	basicCluster *core.BasicCluster
 	// for tso.
@@ -138,10 +147,22 @@ type Server struct {
 	closeCallbacks []func()
 
 	// serviceSafePointLock is a lock for UpdateServiceGCSafePoint
-	serviceSafePointLock sync.Mutex
+	serviceSafePointLock syncutil.Mutex
 
+	// hot region history info storeage
+	hotRegionStorage *storage.HotRegionStorage
 	// Store as map[string]*grpc.ClientConn
 	clientConns sync.Map
+	// tsoDispatcher is used to dispatch different TSO requests to
+	// the corresponding forwarding TSO channel.
+	tsoDispatcher sync.Map /* Store as map[string]chan *tsoRequest */
+
+	serviceLabels      map[string][]apiutil.AccessPath
+	apiServiceLabelMap map[apiutil.AccessPath]string
+
+	serviceAuditBackendLabels map[string]*audit.BackendLabels
+
+	auditBackends []audit.Backend
 }
 
 // HandlerBuilder builds a server HTTP handler.
@@ -204,8 +225,6 @@ func combineBuilderServerHTTPService(ctx context.Context, svr *Server, serviceBu
 				// Deprecated
 				router.Path("/pd/health").Handler(handler)
 				// Deprecated
-				router.Path("/pd/diagnose").Handler(handler)
-				// Deprecated
 				router.Path("/pd/ping").Handler(handler)
 			}
 		}
@@ -220,17 +239,28 @@ func combineBuilderServerHTTPService(ctx context.Context, svr *Server, serviceBu
 func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...HandlerBuilder) (*Server, error) {
 	log.Info("PD Config", zap.Reflect("config", cfg))
 	rand.Seed(time.Now().UnixNano())
+	serviceMiddlewareCfg := config.NewServiceMiddlewareConfig()
 
 	s := &Server{
-		cfg:               cfg,
-		persistOptions:    config.NewPersistOptions(cfg),
-		member:            &member.Member{},
-		ctx:               ctx,
-		startTimestamp:    time.Now().Unix(),
-		DiagnosticsServer: sysutil.NewDiagnosticsServer(cfg.Log.File.Filename),
+		cfg:                             cfg,
+		persistOptions:                  config.NewPersistOptions(cfg),
+		serviceMiddlewareCfg:            serviceMiddlewareCfg,
+		serviceMiddlewarePersistOptions: config.NewServiceMiddlewarePersistOptions(serviceMiddlewareCfg),
+		member:                          &member.Member{},
+		ctx:                             ctx,
+		startTimestamp:                  time.Now().Unix(),
+		DiagnosticsServer:               sysutil.NewDiagnosticsServer(cfg.Log.File.Filename),
 	}
-
 	s.handler = newHandler(s)
+
+	// create audit backend
+	s.auditBackends = []audit.Backend{
+		audit.NewLocalLogBackend(true),
+		audit.NewPrometheusHistogramBackend(serviceAuditHistogram, false),
+	}
+	s.serviceAuditBackendLabels = make(map[string]*audit.BackendLabels)
+	s.serviceLabels = make(map[string][]apiutil.AccessPath)
+	s.apiServiceLabelMap = make(map[apiutil.AccessPath]string)
 
 	// Adjust etcd config.
 	etcdCfg, err := s.cfg.GenEmbedEtcdConfig()
@@ -245,7 +275,7 @@ func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...Ha
 		etcdCfg.UserHandlers = userHandlers
 	}
 	etcdCfg.ServiceRegister = func(gs *grpc.Server) {
-		pdpb.RegisterPDServer(gs, s)
+		pdpb.RegisterPDServer(gs, &GrpcServer{Server: s})
 		diagnosticspb.RegisterDiagnosticsServer(gs, s)
 	}
 	s.etcdCfg = etcdCfg
@@ -370,27 +400,25 @@ func (s *Server) startServer(ctx context.Context) error {
 			return err
 		}
 	}
-	encryptionKeyManager, err := encryptionkm.NewKeyManager(s.client, &s.cfg.Security.Encryption)
+	s.encryptionKeyManager, err = encryptionkm.NewKeyManager(s.client, &s.cfg.Security.Encryption)
 	if err != nil {
 		return err
 	}
-	s.encryptionKeyManager = encryptionKeyManager
-	kvBase := kv.NewEtcdKVBase(s.client, s.rootPath)
-	path := filepath.Join(s.cfg.DataDir, "region-meta")
-	regionStorage, err := core.NewRegionStorage(ctx, path, encryptionKeyManager)
+	regionStorage, err := storage.NewStorageWithLevelDBBackend(ctx, filepath.Join(s.cfg.DataDir, "region-meta"), s.encryptionKeyManager)
 	if err != nil {
 		return err
 	}
-
-	s.storage = core.NewStorage(
-		kvBase,
-		core.WithRegionStorage(regionStorage),
-		core.WithEncryptionKeyManager(encryptionKeyManager),
-	)
+	defaultStorage := storage.NewStorageWithEtcdBackend(s.client, s.rootPath)
+	s.storage = storage.NewCoreStorage(defaultStorage, regionStorage)
 	s.basicCluster = core.NewBasicCluster()
-	s.cluster = cluster.NewRaftCluster(ctx, s.GetClusterRootPath(), s.clusterID, syncer.NewRegionSyncer(s), s.client, s.httpClient)
+	s.cluster = cluster.NewRaftCluster(ctx, s.clusterID, syncer.NewRegionSyncer(s), s.client, s.httpClient)
 	s.hbStreams = hbstream.NewHeartbeatStreams(ctx, s.clusterID, s.cluster)
-
+	// initial hot_region_storage in here.
+	s.hotRegionStorage, err = storage.NewHotRegionsStorage(
+		ctx, filepath.Join(s.cfg.DataDir, "hot-region"), s.encryptionKeyManager, s.handler)
+	if err != nil {
+		return err
+	}
 	// Run callbacks
 	for _, cb := range s.startCallbacks {
 		cb()
@@ -454,6 +482,10 @@ func (s *Server) Close() {
 		log.Error("close storage meet error", errs.ZapError(err))
 	}
 
+	if err := s.hotRegionStorage.Close(); err != nil {
+		log.Error("close hot region storage meet error", errs.ZapError(err))
+	}
+
 	// Run callbacks
 	for _, cb := range s.closeCallbacks {
 		cb()
@@ -483,6 +515,16 @@ func (s *Server) Run() error {
 	s.startServerLoop(s.ctx)
 
 	return nil
+}
+
+// SetServiceAuditBackendForHTTP is used to register service audit config for HTTP.
+func (s *Server) SetServiceAuditBackendForHTTP(route *mux.Route, labels ...string) {
+	if len(route.GetName()) == 0 {
+		return
+	}
+	if len(labels) > 0 {
+		s.SetServiceAuditBackendLabels(route.GetName(), labels)
+	}
 }
 
 // Context returns the context of server.
@@ -576,13 +618,15 @@ func (s *Server) bootstrapCluster(req *pdpb.BootstrapRequest) (*pdpb.BootstrapRe
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	clusterRootPath := s.GetClusterRootPath()
+	clusterRootPath := endpoint.ClusterRootPath(s.rootPath)
 
 	var ops []clientv3.Op
 	ops = append(ops, clientv3.OpPut(clusterRootPath, string(clusterValue)))
 
 	// Set bootstrap time
-	bootstrapKey := makeBootstrapTimeKey(clusterRootPath)
+	// Because we will write the cluster meta into etcd directly,
+	// so we need to handle the root key path manually here.
+	bootstrapKey := endpoint.AppendToRootPath(s.rootPath, endpoint.ClusterBootstrapTimeKey())
 	nano := time.Now().UnixNano()
 
 	timeData := typeutil.Uint64ToBytes(uint64(nano))
@@ -590,7 +634,7 @@ func (s *Server) bootstrapCluster(req *pdpb.BootstrapRequest) (*pdpb.BootstrapRe
 
 	// Set store meta
 	storeMeta := req.GetStore()
-	storePath := makeStoreKey(clusterRootPath, storeMeta.GetId())
+	storePath := endpoint.AppendToRootPath(s.rootPath, endpoint.StorePath(storeMeta.GetId()))
 	storeValue, err := storeMeta.Marshal()
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -603,7 +647,7 @@ func (s *Server) bootstrapCluster(req *pdpb.BootstrapRequest) (*pdpb.BootstrapRe
 	}
 
 	// Set region meta with region id.
-	regionPath := makeRegionKey(clusterRootPath, req.GetRegion().GetId())
+	regionPath := endpoint.AppendToRootPath(s.rootPath, endpoint.RegionPath(req.GetRegion().GetId()))
 	ops = append(ops, clientv3.OpPut(regionPath, string(regionValue)))
 
 	// TODO: we must figure out a better way to handle bootstrap failed, maybe intervene manually.
@@ -698,13 +742,18 @@ func (s *Server) GetMember() *member.Member {
 }
 
 // GetStorage returns the backend storage of server.
-func (s *Server) GetStorage() *core.Storage {
+func (s *Server) GetStorage() storage.Storage {
 	return s.storage
+}
+
+// GetHistoryHotRegionStorage returns the backend storage of historyHotRegion.
+func (s *Server) GetHistoryHotRegionStorage() *storage.HotRegionStorage {
+	return s.hotRegionStorage
 }
 
 // SetStorage changes the storage only for test purpose.
 // When we use it, we should prevent calling GetStorage, otherwise, it may cause a data race problem.
-func (s *Server) SetStorage(storage *core.Storage) {
+func (s *Server) SetStorage(storage storage.Storage) {
 	s.storage = storage
 }
 
@@ -716,6 +765,11 @@ func (s *Server) GetBasicCluster() *core.BasicCluster {
 // GetPersistOptions returns the schedule option.
 func (s *Server) GetPersistOptions() *config.PersistOptions {
 	return s.persistOptions
+}
+
+// GetServiceMiddlewarePersistOptions returns the service middleware persist option.
+func (s *Server) GetServiceMiddlewarePersistOptions() *config.ServiceMiddlewarePersistOptions {
+	return s.serviceMiddlewarePersistOptions
 }
 
 // GetHBStreams returns the heartbeat streams.
@@ -748,6 +802,22 @@ func (s *Server) StartTimestamp() int64 {
 	return s.startTimestamp
 }
 
+// GetMembers returns PD server list.
+func (s *Server) GetMembers() ([]*pdpb.Member, error) {
+	if s.IsClosed() {
+		return nil, errs.ErrServerNotStarted.FastGenByArgs()
+	}
+	members, err := cluster.GetMembers(s.GetClient())
+	return members, err
+}
+
+// GetServiceMiddlewareConfig gets the service middleware config information.
+func (s *Server) GetServiceMiddlewareConfig() *config.ServiceMiddlewareConfig {
+	cfg := s.serviceMiddlewareCfg.Clone()
+	cfg.AuditConfig = *s.serviceMiddlewarePersistOptions.GetAuditConfig()
+	return cfg
+}
+
 // GetConfig gets the config information.
 func (s *Server) GetConfig() *config.Config {
 	cfg := s.cfg.Clone()
@@ -757,11 +827,10 @@ func (s *Server) GetConfig() *config.Config {
 	cfg.ReplicationMode = *s.persistOptions.GetReplicationModeConfig()
 	cfg.LabelProperty = s.persistOptions.GetLabelPropertyConfig().Clone()
 	cfg.ClusterVersion = *s.persistOptions.GetClusterVersion()
-	storage := s.GetStorage()
-	if storage == nil {
+	if s.storage == nil {
 		return cfg
 	}
-	sches, configs, err := storage.LoadAllScheduleConfig()
+	sches, configs, err := s.storage.LoadAllScheduleConfig()
 	if err != nil {
 		return cfg
 	}
@@ -822,19 +891,19 @@ func (s *Server) SetReplicationConfig(cfg config.ReplicationConfig) error {
 	}
 	old := s.persistOptions.GetReplicationConfig()
 	if cfg.EnablePlacementRules != old.EnablePlacementRules {
-		raftCluster := s.GetRaftCluster()
-		if raftCluster == nil {
+		rc := s.GetRaftCluster()
+		if rc == nil {
 			return errs.ErrNotBootstrapped.GenWithStackByArgs()
 		}
 		if cfg.EnablePlacementRules {
 			// initialize rule manager.
-			if err := raftCluster.GetRuleManager().Initialize(int(cfg.MaxReplicas), cfg.LocationLabels); err != nil {
+			if err := rc.GetRuleManager().Initialize(int(cfg.MaxReplicas), cfg.LocationLabels); err != nil {
 				return err
 			}
 		} else {
 			// NOTE: can be removed after placement rules feature is enabled by default.
-			for _, s := range raftCluster.GetStores() {
-				if !s.IsTombstone() && core.IsTiFlashStore(s.GetMeta()) {
+			for _, s := range rc.GetStores() {
+				if !s.IsRemoved() && s.IsTiFlash() {
 					return errors.New("cannot disable placement rules with TiFlash nodes")
 				}
 			}
@@ -843,8 +912,12 @@ func (s *Server) SetReplicationConfig(cfg config.ReplicationConfig) error {
 
 	var rule *placement.Rule
 	if cfg.EnablePlacementRules {
+		rc := s.GetRaftCluster()
+		if rc == nil {
+			return errs.ErrNotBootstrapped.GenWithStackByArgs()
+		}
 		// replication.MaxReplicas won't work when placement rule is enabled and not only have one default rule.
-		defaultRule := s.GetRaftCluster().GetRuleManager().GetRule("pd", "default")
+		defaultRule := rc.GetRuleManager().GetRule("pd", "default")
 
 		CheckInDefaultRule := func() error {
 			// replication config  won't work when placement rule is enabled and exceeds one default rule
@@ -870,7 +943,11 @@ func (s *Server) SetReplicationConfig(cfg config.ReplicationConfig) error {
 	if rule != nil {
 		rule.Count = int(cfg.MaxReplicas)
 		rule.LocationLabels = cfg.LocationLabels
-		if err := s.GetRaftCluster().GetRuleManager().SetRule(rule); err != nil {
+		rc := s.GetRaftCluster()
+		if rc == nil {
+			return errs.ErrNotBootstrapped.GenWithStackByArgs()
+		}
+		if err := rc.GetRuleManager().SetRule(rule); err != nil {
 			log.Error("failed to update rule count",
 				errs.ZapError(err))
 			return err
@@ -882,7 +959,11 @@ func (s *Server) SetReplicationConfig(cfg config.ReplicationConfig) error {
 		s.persistOptions.SetReplicationConfig(old)
 		if rule != nil {
 			rule.Count = int(old.MaxReplicas)
-			if e := s.GetRaftCluster().GetRuleManager().SetRule(rule); e != nil {
+			rc := s.GetRaftCluster()
+			if rc == nil {
+				return errs.ErrNotBootstrapped.GenWithStackByArgs()
+			}
+			if e := rc.GetRuleManager().SetRule(rule); e != nil {
 				log.Error("failed to roll back count of rule when update replication config", errs.ZapError(e))
 			}
 		}
@@ -893,6 +974,27 @@ func (s *Server) SetReplicationConfig(cfg config.ReplicationConfig) error {
 		return err
 	}
 	log.Info("replication config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
+	return nil
+}
+
+// GetAuditConfig gets the audit config information.
+func (s *Server) GetAuditConfig() *config.AuditConfig {
+	return s.serviceMiddlewarePersistOptions.GetAuditConfig().Clone()
+}
+
+// SetAuditConfig sets the audit config.
+func (s *Server) SetAuditConfig(cfg config.AuditConfig) error {
+	old := s.serviceMiddlewarePersistOptions.GetAuditConfig()
+	s.serviceMiddlewarePersistOptions.SetAuditConfig(&cfg)
+	if err := s.serviceMiddlewarePersistOptions.Persist(s.storage); err != nil {
+		s.serviceMiddlewarePersistOptions.SetAuditConfig(old)
+		log.Error("failed to update Audit config",
+			zap.Reflect("new", cfg),
+			zap.Reflect("old", old),
+			errs.ZapError(err))
+		return err
+	}
+	log.Info("Audit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
 	return nil
 }
 
@@ -1022,16 +1124,6 @@ func (s *Server) GetTLSConfig() *grpcutil.TLSConfig {
 	return &s.cfg.Security.TLSConfig
 }
 
-// GetServerRootPath returns the server root path.
-func (s *Server) GetServerRootPath() string {
-	return s.rootPath
-}
-
-// GetClusterRootPath returns the cluster root path.
-func (s *Server) GetClusterRootPath() string {
-	return path.Join(s.rootPath, "raft")
-}
-
 // GetRaftCluster gets Raft cluster.
 // If cluster has not been bootstrapped, return nil.
 func (s *Server) GetRaftCluster() *cluster.RaftCluster {
@@ -1056,20 +1148,71 @@ func (s *Server) GetServerOption() *config.PersistOptions {
 
 // GetMetaRegions gets meta regions from cluster.
 func (s *Server) GetMetaRegions() []*metapb.Region {
-	cluster := s.GetRaftCluster()
-	if cluster != nil {
-		return cluster.GetMetaRegions()
+	rc := s.GetRaftCluster()
+	if rc != nil {
+		return rc.GetMetaRegions()
 	}
 	return nil
 }
 
 // GetRegions gets regions from cluster.
 func (s *Server) GetRegions() []*core.RegionInfo {
-	cluster := s.GetRaftCluster()
-	if cluster != nil {
-		return cluster.GetRegions()
+	rc := s.GetRaftCluster()
+	if rc != nil {
+		return rc.GetRegions()
 	}
 	return nil
+}
+
+// GetServiceLabels returns ApiAccessPaths by given service label
+// TODO: this function will be used for updating api rate limit config
+func (s *Server) GetServiceLabels(serviceLabel string) []apiutil.AccessPath {
+	if apis, ok := s.serviceLabels[serviceLabel]; ok {
+		return apis
+	}
+	return nil
+}
+
+// GetAPIAccessServiceLabel returns service label by given access path
+// TODO: this function will be used for updating api rate limit config
+func (s *Server) GetAPIAccessServiceLabel(accessPath apiutil.AccessPath) string {
+	if servicelabel, ok := s.apiServiceLabelMap[accessPath]; ok {
+		return servicelabel
+	}
+	accessPathNoMethod := apiutil.NewAccessPath(accessPath.Path, "")
+	if servicelabel, ok := s.apiServiceLabelMap[accessPathNoMethod]; ok {
+		return servicelabel
+	}
+	return ""
+}
+
+// AddServiceLabel is used to add the relationship between service label and api access path
+// TODO: this function will be used for updating api rate limit config
+func (s *Server) AddServiceLabel(serviceLabel string, accessPath apiutil.AccessPath) {
+	if slice, ok := s.serviceLabels[serviceLabel]; ok {
+		slice = append(slice, accessPath)
+		s.serviceLabels[serviceLabel] = slice
+	} else {
+		slice = []apiutil.AccessPath{accessPath}
+		s.serviceLabels[serviceLabel] = slice
+	}
+
+	s.apiServiceLabelMap[accessPath] = serviceLabel
+}
+
+// GetAuditBackend returns audit backends
+func (s *Server) GetAuditBackend() []audit.Backend {
+	return s.auditBackends
+}
+
+// GetServiceAuditBackendLabels returns audit backend labels by serviceLabel
+func (s *Server) GetServiceAuditBackendLabels(serviceLabel string) *audit.BackendLabels {
+	return s.serviceAuditBackendLabels[serviceLabel]
+}
+
+// SetServiceAuditBackendLabels is used to add audit backend labels for service by service label
+func (s *Server) SetServiceAuditBackendLabels(serviceLabel string, labels []string) {
+	s.serviceAuditBackendLabels[serviceLabel] = &audit.BackendLabels{Labels: labels}
 }
 
 // GetClusterStatus gets cluster status.
@@ -1101,7 +1244,7 @@ func isLevelLegal(level string) bool {
 
 // GetReplicationModeConfig returns the replication mode config.
 func (s *Server) GetReplicationModeConfig() *config.ReplicationModeConfig {
-	return s.persistOptions.GetReplicationModeConfig()
+	return s.persistOptions.GetReplicationModeConfig().Clone()
 }
 
 // SetReplicationModeConfig sets the replication mode.
@@ -1122,9 +1265,9 @@ func (s *Server) SetReplicationModeConfig(cfg config.ReplicationModeConfig) erro
 	}
 	log.Info("replication mode config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
 
-	cluster := s.GetRaftCluster()
-	if cluster != nil {
-		err := cluster.GetReplicationMode().UpdateConfig(cfg)
+	rc := s.GetRaftCluster()
+	if rc != nil {
+		err := rc.GetReplicationMode().UpdateConfig(cfg)
 		if err != nil {
 			log.Warn("failed to update replication mode", errs.ZapError(err))
 			// revert to old config
@@ -1217,7 +1360,7 @@ func (s *Server) campaignLeader() {
 	})
 
 	// maintain the PD leadership, after this, TSO can be service.
-	go s.member.KeepLeader(ctx)
+	s.member.KeepLeader(ctx)
 	log.Info("campaign pd leader ok", zap.String("campaign-pd-leader-name", s.Name()))
 
 	alllocator, err := s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
@@ -1323,51 +1466,57 @@ func (s *Server) reloadConfigFromKV() error {
 	if err != nil {
 		return err
 	}
+	err = s.serviceMiddlewarePersistOptions.Reload(s.storage)
+	if err != nil {
+		return err
+	}
+	switchableStorage, ok := s.storage.(interface {
+		SwitchToRegionStorage()
+		SwitchToDefaultStorage()
+	})
+	if !ok {
+		return nil
+	}
 	if s.persistOptions.IsUseRegionStorage() {
-		s.storage.SwitchToRegionStorage()
+		switchableStorage.SwitchToRegionStorage()
 		log.Info("server enable region storage")
 	} else {
-		s.storage.SwitchToDefaultStorage()
+		switchableStorage.SwitchToDefaultStorage()
 		log.Info("server disable region storage")
 	}
 	return nil
 }
 
-// ReplicateFileToAllMembers is used to synchronize state among all members.
+// ReplicateFileToMember is used to synchronize state to a member.
 // Each member will write `data` to a local file named `name`.
 // For security reason, data should be in JSON format.
-func (s *Server) ReplicateFileToAllMembers(ctx context.Context, name string, data []byte) error {
-	resp, err := s.GetMembers(ctx, nil)
-	if err != nil {
-		return err
+func (s *Server) ReplicateFileToMember(ctx context.Context, member *pdpb.Member, name string, data []byte) error {
+	clientUrls := member.GetClientUrls()
+	if len(clientUrls) == 0 {
+		log.Warn("failed to replicate file", zap.String("name", name), zap.String("member", member.GetName()))
+		return errs.ErrClientURLEmpty.FastGenByArgs()
 	}
-	for _, member := range resp.Members {
-		clientUrls := member.GetClientUrls()
-		if len(clientUrls) == 0 {
-			log.Warn("failed to replicate file", zap.String("name", name), zap.String("member", member.GetName()), errs.ZapError(err))
-			return errs.ErrClientURLEmpty.FastGenByArgs()
-		}
-		url := clientUrls[0] + filepath.Join("/pd/api/v1/admin/persist-file", name)
-		req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(data))
-		req.Header.Set("PD-Allow-follower-handle", "true")
-		res, err := s.httpClient.Do(req)
-		if err != nil {
-			log.Warn("failed to replicate file", zap.String("name", name), zap.String("member", member.GetName()), errs.ZapError(err))
-			return errs.ErrSendRequest.Wrap(err).GenWithStackByCause()
-		}
-		// Since we don't read the body, we can close it immediately.
-		res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			log.Warn("failed to replicate file", zap.String("name", name), zap.String("member", member.GetName()), zap.Int("status-code", res.StatusCode))
-			return errs.ErrSendRequest.FastGenByArgs()
-		}
+	url := clientUrls[0] + filepath.Join("/pd/api/v1/admin/persist-file", name)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(data))
+	req.Header.Set("PD-Allow-follower-handle", "true")
+	res, err := s.httpClient.Do(req)
+	if err != nil {
+		log.Warn("failed to replicate file", zap.String("name", name), zap.String("member", member.GetName()), errs.ZapError(err))
+		return errs.ErrSendRequest.Wrap(err).GenWithStackByCause()
+	}
+	// Since we don't read the body, we can close it immediately.
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		log.Warn("failed to replicate file", zap.String("name", name), zap.String("member", member.GetName()), zap.Int("status-code", res.StatusCode))
+		return errs.ErrSendRequest.FastGenByArgs()
 	}
 	return nil
 }
 
 // PersistFile saves a file in DataDir.
 func (s *Server) PersistFile(name string, data []byte) error {
-	return os.WriteFile(filepath.Join(s.GetConfig().DataDir, name), data, 0644)
+	log.Info("persist file", zap.String("name", name), zap.Binary("data", data))
+	return os.WriteFile(filepath.Join(s.GetConfig().DataDir, name), data, 0644) // #nosec
 }
 
 // SaveTTLConfig save ttl config
@@ -1383,4 +1532,20 @@ func (s *Server) SaveTTLConfig(data map[string]interface{}, ttl time.Duration) e
 		}
 	}
 	return nil
+}
+
+// IsTTLConfigExist returns true if the ttl config is existed for a given config.
+func (s *Server) IsTTLConfigExist(key string) bool {
+	if config.IsSupportedTTLConfig(key) {
+		if _, ok := s.persistOptions.GetTTLData(key); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// SetClient sets the etcd client.
+// Notes: it is only used for test.
+func (s *Server) SetClient(client *clientv3.Client) {
+	s.client = client
 }

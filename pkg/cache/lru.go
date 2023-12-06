@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -85,11 +86,10 @@ func (c *LRU) contains(key uint64) bool {
 
 // Remove eliminates an item from cache.
 func (c *LRU) Remove(key uint64) {
-	c.remove(key)
+	c.removeIfExist(key)
 }
 
-// revive:disable-next-line:confusing-naming
-func (c *LRU) remove(key uint64) bool {
+func (c *LRU) removeIfExist(key uint64) bool {
 	if ele, ok := c.cache[key]; ok {
 		c.removeElement(ele)
 		return ok

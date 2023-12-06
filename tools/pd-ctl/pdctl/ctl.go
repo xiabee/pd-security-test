@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -61,7 +62,9 @@ func GetRootCmd() *cobra.Command {
 		command.NewLogCommand(),
 		command.NewPluginCommand(),
 		command.NewServiceGCSafepointCommand(),
+		command.NewMinResolvedTSCommand(),
 		command.NewCompletionCommand(),
+		command.NewUnsafeCommand(),
 	)
 
 	rootCmd.Flags().ParseErrorsWhitelist.UnknownFlags = true
@@ -195,4 +198,16 @@ func genCompleter(cmd *cobra.Command) []readline.PrefixCompleterInterface {
 		}
 	}
 	return pc
+}
+
+// ReadStdin convert stdin to string array
+func ReadStdin(r io.Reader) (input []string, err error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	if s := strings.TrimSpace(string(b)); len(s) > 0 {
+		input = strings.Split(s, " ")
+	}
+	return input, nil
 }

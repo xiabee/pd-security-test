@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -22,7 +23,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/storage/endpoint"
 )
 
 var _ = Suite(&testServiceGCSafepointSuite{})
@@ -41,19 +42,19 @@ func (s *testServiceGCSafepointSuite) SetUpSuite(c *C) {
 	s.urlPrefix = fmt.Sprintf("%s%s/api/v1", addr, apiPrefix)
 
 	mustBootstrapCluster(c, s.svr)
-	mustPutStore(c, s.svr, 1, metapb.StoreState_Up, nil)
+	mustPutStore(c, s.svr, 1, metapb.StoreState_Up, metapb.NodeState_Serving, nil)
 }
 
 func (s *testServiceGCSafepointSuite) TearDownSuite(c *C) {
 	s.cleanup()
 }
 
-func (s *testServiceGCSafepointSuite) TestRegionStats(c *C) {
+func (s *testServiceGCSafepointSuite) TestServiceGCSafepoint(c *C) {
 	sspURL := s.urlPrefix + "/gc/safepoint"
 
 	storage := s.svr.GetStorage()
 	list := &listServiceGCSafepoint{
-		ServiceGCSafepoints: []*core.ServiceSafePoint{
+		ServiceGCSafepoints: []*endpoint.ServiceSafePoint{
 			{
 				ServiceID: "a",
 				ExpiredAt: time.Now().Unix() + 10,
@@ -80,16 +81,17 @@ func (s *testServiceGCSafepointSuite) TestRegionStats(c *C) {
 
 	res, err := testDialClient.Get(sspURL)
 	c.Assert(err, IsNil)
+	defer res.Body.Close()
 	listResp := &listServiceGCSafepoint{}
 	err = apiutil.ReadJSON(res.Body, listResp)
 	c.Assert(err, IsNil)
 	c.Assert(listResp, DeepEquals, list)
 
-	res, err = doDelete(testDialClient, sspURL+"/a")
+	statusCode, err := apiutil.DoDelete(testDialClient, sspURL+"/a")
 	c.Assert(err, IsNil)
-	c.Assert(res.StatusCode, Equals, http.StatusOK)
+	c.Assert(statusCode, Equals, http.StatusOK)
 
-	left, err := storage.GetAllServiceGCSafePoints()
+	left, err := storage.LoadAllServiceGCSafePoints()
 	c.Assert(err, IsNil)
 	c.Assert(left, DeepEquals, list.ServiceGCSafepoints[1:])
 }

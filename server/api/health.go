@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,6 +28,7 @@ type healthHandler struct {
 }
 
 // Health reflects the cluster's health.
+// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type Health struct {
 	Name       string   `json:"name"`
 	MemberID   uint64   `json:"member_id"`
@@ -41,12 +43,12 @@ func newHealthHandler(svr *server.Server, rd *render.Render) *healthHandler {
 	}
 }
 
-// @Summary Health status of PD servers.
-// @Produce json
-// @Success 200 {array} Health
-// @Failure 500 {string} string "PD server failed to proceed the request."
-// @Router /health [get]
-func (h *healthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// @Summary  Health status of PD servers.
+// @Produce  json
+// @Success  200  {array}   Health
+// @Failure  500  {string}  string  "PD server failed to proceed the request."
+// @Router   /health [get]
+func (h *healthHandler) GetHealthStatus(w http.ResponseWriter, r *http.Request) {
 	client := h.svr.GetClient()
 	members, err := cluster.GetMembers(client)
 	if err != nil {
@@ -70,3 +72,7 @@ func (h *healthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.rd.JSON(w, http.StatusOK, healths)
 }
+
+// @Summary  Ping PD servers.
+// @Router   /ping [get]
+func (h *healthHandler) Ping(w http.ResponseWriter, r *http.Request) {}

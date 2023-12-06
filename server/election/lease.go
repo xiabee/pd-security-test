@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -21,6 +22,8 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
@@ -47,6 +50,9 @@ type lease struct {
 
 // Grant uses `lease.Grant` to initialize the lease and expireTime.
 func (l *lease) Grant(leaseTimeout int64) error {
+	if l == nil {
+		return errs.ErrEtcdGrantLease.GenWithStackByCause("lease is nil")
+	}
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(l.client.Ctx(), requestTimeout)
 	leaseResp, err := l.lease.Grant(ctx, leaseTimeout)
@@ -66,8 +72,11 @@ func (l *lease) Grant(leaseTimeout int64) error {
 
 // Close releases the lease.
 func (l *lease) Close() error {
+	if l == nil {
+		return nil
+	}
 	// Reset expire time.
-	l.expireTime.Store(time.Time{})
+	l.expireTime.Store(typeutil.ZeroTime)
 	// Try to revoke lease to make subsequent elections faster.
 	ctx, cancel := context.WithTimeout(l.client.Ctx(), revokeLeaseTimeout)
 	defer cancel()
@@ -78,14 +87,17 @@ func (l *lease) Close() error {
 // IsExpired checks if the lease is expired. If it returns true,
 // current leader should step down and try to re-elect again.
 func (l *lease) IsExpired() bool {
-	if l.expireTime.Load() == nil {
-		return false
+	if l == nil || l.expireTime.Load() == nil {
+		return true
 	}
 	return time.Now().After(l.expireTime.Load().(time.Time))
 }
 
 // KeepAlive auto renews the lease and update expireTime.
 func (l *lease) KeepAlive(ctx context.Context) {
+	if l == nil {
+		return
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	timeCh := l.keepAliveWorker(ctx, l.leaseTimeout/3)
@@ -96,7 +108,13 @@ func (l *lease) KeepAlive(ctx context.Context) {
 		case t := <-timeCh:
 			if t.After(maxExpire) {
 				maxExpire = t
-				l.expireTime.Store(t)
+				// Check again to make sure the `expireTime` still needs to be updated.
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					l.expireTime.Store(t)
+				}
 			}
 		case <-time.After(l.leaseTimeout):
 			log.Info("lease timeout", zap.Time("expire", l.expireTime.Load().(time.Time)), zap.String("purpose", l.Purpose))
@@ -112,6 +130,7 @@ func (l *lease) keepAliveWorker(ctx context.Context, interval time.Duration) <-c
 	ch := make(chan time.Time)
 
 	go func() {
+		defer logutil.LogPanic()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -120,6 +139,7 @@ func (l *lease) keepAliveWorker(ctx context.Context, interval time.Duration) <-c
 
 		for {
 			go func() {
+				defer logutil.LogPanic()
 				start := time.Now()
 				ctx1, cancel := context.WithTimeout(ctx, l.leaseTimeout)
 				defer cancel()

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -19,6 +20,7 @@ import (
 
 	. "github.com/pingcap/check"
 	"github.com/pingcap/log"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 )
 
@@ -48,7 +50,7 @@ func (s *testLogSuite) TestSetLogLevel(c *C) {
 	level := "error"
 	data, err := json.Marshal(level)
 	c.Assert(err, IsNil)
-	err = postJSON(testDialClient, s.urlPrefix+"/log", data)
+	err = tu.CheckPostJSON(testDialClient, s.urlPrefix+"/log", data, tu.StatusOK(c))
 	c.Assert(err, IsNil)
 	c.Assert(log.GetLevel().String(), Equals, level)
 }

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -19,7 +20,7 @@ import (
 	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/kv"
+	"github.com/tikv/pd/server/storage/kv"
 )
 
 var _ = Suite(&testHistoryBuffer{})
@@ -86,9 +87,9 @@ func (t *testHistoryBuffer) TestBufferSize(c *C) {
 	c.Assert(s, Equals, "106")
 
 	histories := h2.RecordsFrom(uint64(1))
-	c.Assert(len(histories), Equals, 0)
+	c.Assert(histories, HasLen, 0)
 	histories = h2.RecordsFrom(h2.firstIndex())
-	c.Assert(len(histories), Equals, 100)
+	c.Assert(histories, HasLen, 100)
 	c.Assert(h2.firstIndex(), Equals, uint64(7))
 	c.Assert(histories, DeepEquals, regions[1:])
 }

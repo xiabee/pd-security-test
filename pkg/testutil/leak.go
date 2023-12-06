@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -34,4 +35,6 @@ var LeakOptions = []goleak.Option{
 	goleak.IgnoreTopFunction("net/http.(*persistConn).writeLoop"),
 	goleak.IgnoreTopFunction("net/http.(*persistConn).readLoop"),
 	goleak.IgnoreTopFunction("runtime.goparkunlock"),
+	// natefinch/lumberjack#56, It's a goroutine leak bug. Another ignore option PR https://github.com/pingcap/tidb/pull/27405/
+	goleak.IgnoreTopFunction("gopkg.in/natefinch/lumberjack%2ev2.(*Logger).millRun"),
 }

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -141,7 +142,7 @@ func changeLeaderPeerUrls(c *C, leader *pdpb.Member, id uint64, urls []string) {
 	data := map[string][]string{"peerURLs": urls}
 	postData, err := json.Marshal(data)
 	c.Assert(err, IsNil)
-	req, err := http.NewRequest("PUT", fmt.Sprintf("%s/v2/members/%s", leader.GetClientUrls()[0], fmt.Sprintf("%x", id)), bytes.NewBuffer(postData))
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/v2/members/%s", leader.GetClientUrls()[0], fmt.Sprintf("%x", id)), bytes.NewBuffer(postData))
 	c.Assert(err, IsNil)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := testDialClient.Do(req)

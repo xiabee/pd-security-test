@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -81,7 +82,7 @@ func (s *watchTestSuite) TestWatcher(c *C) {
 	cluster.WaitLeader()
 	c.Assert(pd2.GetLeader().GetName(), Equals, pd2.GetConfig().Name)
 	failpoint.Disable("github.com/tikv/pd/server/delayWatcher")
-	testutil.WaitUntil(c, func(c *C) bool {
+	testutil.WaitUntil(c, func() bool {
 		return c.Check(pd3.GetLeader().GetName(), Equals, pd2.GetConfig().Name)
 	})
 	c.Succeed()
@@ -106,7 +107,7 @@ func (s *watchTestSuite) TestWatcherCompacted(c *C) {
 	c.Assert(err, IsNil)
 	err = pd2.Run()
 	c.Assert(err, IsNil)
-	testutil.WaitUntil(c, func(c *C) bool {
+	testutil.WaitUntil(c, func() bool {
 		return c.Check(pd2.GetLeader().GetName(), Equals, pd1.GetConfig().Name)
 	})
 	c.Succeed()

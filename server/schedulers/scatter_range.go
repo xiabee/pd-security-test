@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -16,16 +17,16 @@ package schedulers
 import (
 	"fmt"
 	"net/http"
-	"sync"
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
 	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/storage/endpoint"
 	"github.com/unrolled/render"
 )
 
@@ -50,7 +51,7 @@ func init() {
 		}
 	})
 
-	schedule.RegisterScheduler(ScatterRangeType, func(opController *schedule.OperatorController, storage *core.Storage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	schedule.RegisterScheduler(ScatterRangeType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		conf := &scatterRangeSchedulerConfig{
 			storage: storage,
 		}
@@ -73,8 +74,8 @@ const (
 )
 
 type scatterRangeSchedulerConfig struct {
-	mu        sync.RWMutex
-	storage   *core.Storage
+	mu        syncutil.RWMutex
+	storage   endpoint.ConfigStorage
 	RangeName string `json:"range-name"`
 	StartKey  string `json:"start-key"`
 	EndKey    string `json:"end-key"`
@@ -192,11 +193,11 @@ func (l *scatterRangeScheduler) EncodeConfig() ([]byte, error) {
 	return schedule.EncodeConfig(l.config)
 }
 
-func (l *scatterRangeScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
+func (l *scatterRangeScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
 	return l.allowBalanceLeader(cluster) || l.allowBalanceRegion(cluster)
 }
 
-func (l *scatterRangeScheduler) allowBalanceLeader(cluster opt.Cluster) bool {
+func (l *scatterRangeScheduler) allowBalanceLeader(cluster schedule.Cluster) bool {
 	allowed := l.OpController.OperatorCount(operator.OpRange) < cluster.GetOpts().GetLeaderScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(l.GetType(), operator.OpLeader.String()).Inc()
@@ -204,7 +205,7 @@ func (l *scatterRangeScheduler) allowBalanceLeader(cluster opt.Cluster) bool {
 	return allowed
 }
 
-func (l *scatterRangeScheduler) allowBalanceRegion(cluster opt.Cluster) bool {
+func (l *scatterRangeScheduler) allowBalanceRegion(cluster schedule.Cluster) bool {
 	allowed := l.OpController.OperatorCount(operator.OpRange) < cluster.GetOpts().GetRegionScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(l.GetType(), operator.OpRegion.String()).Inc()
@@ -212,7 +213,7 @@ func (l *scatterRangeScheduler) allowBalanceRegion(cluster opt.Cluster) bool {
 	return allowed
 }
 
-func (l *scatterRangeScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
+func (l *scatterRangeScheduler) Schedule(cluster schedule.Cluster) []*operator.Operator {
 	schedulerCounter.WithLabelValues(l.GetName(), "schedule").Inc()
 	// isolate a new cluster according to the key range
 	c := schedule.GenRangeCluster(cluster, l.config.GetStartKey(), l.config.GetEndKey())

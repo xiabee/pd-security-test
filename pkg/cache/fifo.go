@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -15,12 +16,13 @@ package cache
 
 import (
 	"container/list"
-	"sync"
+
+	"github.com/tikv/pd/pkg/syncutil"
 )
 
 // FIFO is 'First-In-First-Out' cache.
 type FIFO struct {
-	sync.RWMutex
+	syncutil.RWMutex
 
 	// maxCount is the maximum number of items.
 	// 0 means no limit.

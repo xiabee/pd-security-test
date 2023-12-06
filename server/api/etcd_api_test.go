@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -15,10 +16,9 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
-	"strings"
 
 	. "github.com/pingcap/check"
+	tu "github.com/tikv/pd/pkg/testutil"
 )
 
 var _ = Suite(&testEtcdAPISuite{})
@@ -32,14 +32,11 @@ func (s *testEtcdAPISuite) TestGRPCGateway(c *C) {
 	addr := svr.GetConfig().ClientUrls + "/v3/kv/put"
 	putKey := map[string]string{"key": "Zm9v", "value": "YmFy"}
 	v, _ := json.Marshal(putKey)
-	err := postJSON(testDialClient, addr, v)
+	err := tu.CheckPostJSON(testDialClient, addr, v, tu.StatusOK(c))
 	c.Assert(err, IsNil)
 	addr = svr.GetConfig().ClientUrls + "/v3/kv/range"
 	getKey := map[string]string{"key": "Zm9v"}
 	v, _ = json.Marshal(getKey)
-	err = postJSON(testDialClient, addr, v, func(res []byte, code int) {
-		c.Assert(strings.Contains(string(res), "Zm9v"), IsTrue)
-		c.Assert(code, Equals, http.StatusOK)
-	})
+	err = tu.CheckPostJSON(testDialClient, addr, v, tu.StatusOK(c), tu.StringContain(c, "Zm9v"))
 	c.Assert(err, IsNil)
 }

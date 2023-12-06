@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -16,6 +17,7 @@ package operator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,7 +28,6 @@ import (
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/core/storelimit"
-	"github.com/tikv/pd/server/schedule/opt"
 )
 
 func Test(t *testing.T) {
@@ -48,7 +49,7 @@ func (s *testOperatorSuite) SetUpTest(c *C) {
 	s.cluster.SetMaxMergeRegionSize(2)
 	s.cluster.SetMaxMergeRegionKeys(2)
 	s.cluster.SetLabelPropertyConfig(config.LabelPropertyConfig{
-		opt.RejectLeader: {{Key: "reject", Value: "leader"}},
+		config.RejectLeader: {{Key: "reject", Value: "leader"}},
 	})
 	stores := map[uint64][]string{
 		1: {}, 2: {}, 3: {}, 4: {}, 5: {}, 6: {},
@@ -95,13 +96,13 @@ func (s *testOperatorSuite) TestOperatorStep(c *C) {
 }
 
 func (s *testOperatorSuite) newTestOperator(regionID uint64, kind OpKind, steps ...OpStep) *Operator {
-	return NewOperator("test", "test", regionID, &metapb.RegionEpoch{}, kind, steps...)
+	return NewTestOperator(regionID, &metapb.RegionEpoch{}, kind, steps...)
 }
 
 func (s *testOperatorSuite) checkSteps(c *C, op *Operator, steps []OpStep) {
 	c.Assert(op.Len(), Equals, len(steps))
 	for i := range steps {
-		c.Assert(op.Step(i), Equals, steps[i])
+		c.Assert(op.Step(i), DeepEquals, steps[i])
 	}
 }
 
@@ -119,9 +120,8 @@ func (s *testOperatorSuite) TestOperator(c *C) {
 	op.Start()
 	c.Assert(op.Check(region), IsNil)
 	c.Assert(op.Status(), Equals, SUCCESS)
-	SetOperatorStatusReachTime(op, STARTED, time.Now().Add(-SlowOperatorWaitTime-time.Second))
+	SetOperatorStatusReachTime(op, STARTED, time.Now().Add(-SlowStepWaitTime-time.Second))
 	c.Assert(op.CheckTimeout(), IsFalse)
-
 	// addPeer1, transferLeader1, removePeer2
 	steps = []OpStep{
 		AddPeer{ToStore: 1, PeerID: 1},
@@ -131,12 +131,12 @@ func (s *testOperatorSuite) TestOperator(c *C) {
 	op = s.newTestOperator(1, OpLeader|OpRegion, steps...)
 	s.checkSteps(c, op, steps)
 	op.Start()
-	c.Assert(op.Check(region), Equals, RemovePeer{FromStore: 2})
-	c.Assert(atomic.LoadInt32(&op.currentStep), Equals, int32(2))
+	c.Assert(RemovePeer{FromStore: 2}, Equals, op.Check(region))
+	c.Assert(int32(2), Equals, atomic.LoadInt32(&op.currentStep))
 	c.Assert(op.CheckTimeout(), IsFalse)
-	SetOperatorStatusReachTime(op, STARTED, op.GetStartTime().Add(-FastOperatorWaitTime-time.Second))
+	SetOperatorStatusReachTime(op, STARTED, op.GetStartTime().Add(-FastStepWaitTime-2*FastStepWaitTime+time.Second))
 	c.Assert(op.CheckTimeout(), IsFalse)
-	SetOperatorStatusReachTime(op, STARTED, op.GetStartTime().Add(-SlowOperatorWaitTime-time.Second))
+	SetOperatorStatusReachTime(op, STARTED, op.GetStartTime().Add(-SlowStepWaitTime-2*FastStepWaitTime-time.Second))
 	c.Assert(op.CheckTimeout(), IsTrue)
 	res, err := json.Marshal(op)
 	c.Assert(err, IsNil)
@@ -146,8 +146,18 @@ func (s *testOperatorSuite) TestOperator(c *C) {
 	steps = []OpStep{TransferLeader{FromStore: 2, ToStore: 1}}
 	op = s.newTestOperator(1, OpLeader, steps...)
 	op.Start()
+
 	c.Assert(op.CheckTimeout(), IsFalse)
-	SetOperatorStatusReachTime(op, STARTED, op.GetStartTime().Add(-FastOperatorWaitTime-time.Second))
+	SetOperatorStatusReachTime(op, STARTED, op.GetStartTime().Add(-FastStepWaitTime-time.Second))
+	c.Assert(op.CheckTimeout(), IsTrue)
+
+	// case2: check timeout operator will return false not panic.
+	op = NewTestOperator(1, &metapb.RegionEpoch{}, OpRegion, TransferLeader{ToStore: 1, FromStore: 4})
+	op.currentStep = 1
+
+	c.Assert(op.status.To(STARTED), IsTrue)
+	c.Assert(op.status.To(TIMEOUT), IsTrue)
+	c.Assert(op.CheckSuccess(), IsFalse)
 	c.Assert(op.CheckTimeout(), IsTrue)
 }
 
@@ -300,7 +310,7 @@ func (s *testOperatorSuite) TestCheckTimeout(c *C) {
 		c.Assert(op.Status(), Equals, CREATED)
 		c.Assert(op.Start(), IsTrue)
 		op.currentStep = int32(len(op.steps))
-		SetOperatorStatusReachTime(op, STARTED, time.Now().Add(-SlowOperatorWaitTime))
+		SetOperatorStatusReachTime(op, STARTED, time.Now().Add(-SlowStepWaitTime))
 		c.Assert(op.CheckTimeout(), IsFalse)
 		c.Assert(op.Status(), Equals, SUCCESS)
 	}
@@ -336,13 +346,13 @@ func (s *testOperatorSuite) TestCheckExpired(c *C) {
 
 func (s *testOperatorSuite) TestCheck(c *C) {
 	{
-		region := s.newTestRegion(1, 1, [2]uint64{1, 1}, [2]uint64{2, 2})
+		region := s.newTestRegion(2, 2, [2]uint64{1, 1}, [2]uint64{2, 2})
 		steps := []OpStep{
 			AddPeer{ToStore: 1, PeerID: 1},
 			TransferLeader{FromStore: 2, ToStore: 1},
 			RemovePeer{FromStore: 2},
 		}
-		op := s.newTestOperator(1, OpLeader|OpRegion, steps...)
+		op := s.newTestOperator(2, OpLeader|OpRegion, steps...)
 		c.Assert(op.Start(), IsTrue)
 		c.Assert(op.Check(region), NotNil)
 		c.Assert(op.Status(), Equals, STARTED)
@@ -361,7 +371,7 @@ func (s *testOperatorSuite) TestCheck(c *C) {
 		c.Assert(op.Start(), IsTrue)
 		c.Assert(op.Check(region), NotNil)
 		c.Assert(op.Status(), Equals, STARTED)
-		op.status.setTime(STARTED, time.Now().Add(-SlowOperatorWaitTime))
+		SetOperatorStatusReachTime(op, STARTED, time.Now().Add(-SlowStepWaitTime-2*FastStepWaitTime))
 		c.Assert(op.Check(region), NotNil)
 		c.Assert(op.Status(), Equals, TIMEOUT)
 	}
@@ -376,7 +386,7 @@ func (s *testOperatorSuite) TestCheck(c *C) {
 		c.Assert(op.Start(), IsTrue)
 		c.Assert(op.Check(region), NotNil)
 		c.Assert(op.Status(), Equals, STARTED)
-		op.status.setTime(STARTED, time.Now().Add(-SlowOperatorWaitTime))
+		op.status.setTime(STARTED, time.Now().Add(-SlowStepWaitTime))
 		region = s.newTestRegion(1, 1, [2]uint64{1, 1})
 		c.Assert(op.Check(region), IsNil)
 		c.Assert(op.Status(), Equals, SUCCESS)
@@ -391,8 +401,7 @@ func (s *testOperatorSuite) TestSchedulerKind(c *C) {
 		{
 			op:     s.newTestOperator(1, OpAdmin|OpMerge|OpRegion),
 			expect: OpAdmin,
-		},
-		{
+		}, {
 			op:     s.newTestOperator(1, OpMerge|OpLeader|OpRegion),
 			expect: OpMerge,
 		}, {
@@ -418,4 +427,60 @@ func (s *testOperatorSuite) TestSchedulerKind(c *C) {
 	for _, v := range testdata {
 		c.Assert(v.op.SchedulerKind(), Equals, v.expect)
 	}
+}
+
+func (s *testOperatorSuite) TestOpStepTimeout(c *C) {
+	testdata := []struct {
+		step       []OpStep
+		regionSize int64
+		expect     time.Duration
+	}{
+		{
+			// case1: 10GB region will have 60,000s to executor.
+			step:       []OpStep{AddLearner{}, AddPeer{}},
+			regionSize: 10 * 1000,
+			expect:     time.Second * (6 * 10 * 1000),
+		}, {
+			// case2: 10MB region will have at least SlowStepWaitTime(10min) to executor.
+			step:       []OpStep{AddLearner{}, AddPeer{}},
+			regionSize: 10,
+			expect:     SlowStepWaitTime,
+		}, {
+			// case3:  10GB region will have 1000s to executor for RemovePeer, TransferLeader, SplitRegion, PromoteLearner.
+			step:       []OpStep{RemovePeer{}, TransferLeader{}, SplitRegion{}, PromoteLearner{}},
+			regionSize: 10 * 1000,
+			expect:     time.Second * (10 * 1000 * 0.6),
+		}, {
+			// case4: 10MB will have at lease FastStepWaitTime(10s) to executor for RemovePeer, TransferLeader, SplitRegion, PromoteLearner.
+			step:       []OpStep{RemovePeer{}, TransferLeader{}, SplitRegion{}, PromoteLearner{}},
+			regionSize: 10,
+			expect:     FastStepWaitTime,
+		}, {
+			// case5: 10GB region will have 1000*3 for ChangePeerV2Enter, ChangePeerV2Leave.
+			step: []OpStep{ChangePeerV2Enter{PromoteLearners: []PromoteLearner{{}, {}}},
+				ChangePeerV2Leave{PromoteLearners: []PromoteLearner{{}, {}}}},
+			regionSize: 10 * 1000,
+			expect:     time.Second * (10 * 1000 * 0.6 * 3),
+		}, {
+			//case6: 10GB region will have 1000*10s for ChangePeerV2Enter, ChangePeerV2Leave.
+			step:       []OpStep{MergeRegion{}},
+			regionSize: 10 * 1000,
+			expect:     time.Second * (10 * 1000 * 0.6 * 10),
+		},
+	}
+
+	for i, v := range testdata {
+		fmt.Printf("case:%d\n", i)
+		for _, step := range v.step {
+			c.Assert(v.expect, Equals, step.Timeout(v.regionSize))
+		}
+	}
+}
+func (s *testOperatorSuite) TestRecord(c *C) {
+	operator := s.newTestOperator(1, OpLeader, AddLearner{ToStore: 1, PeerID: 1}, RemovePeer{FromStore: 1, PeerID: 1})
+	now := time.Now()
+	time.Sleep(time.Second)
+	ob := operator.Record(now)
+	c.Assert(ob.FinishTime, Equals, now)
+	c.Assert(ob.duration.Seconds(), Greater, time.Second.Seconds())
 }

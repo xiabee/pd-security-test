@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -80,9 +81,9 @@ func sendPluginCommand(cmd *cobra.Command, action string, args []string) {
 	}
 	switch action {
 	case cluster.PluginLoad:
-		_, err = doRequest(cmd, pluginPrefix, http.MethodPost, WithBody("application/json", bytes.NewBuffer(reqData)))
+		_, err = doRequest(cmd, pluginPrefix, http.MethodPost, http.Header{"Content-Type": {"application/json"}}, WithBody(bytes.NewBuffer(reqData)))
 	case cluster.PluginUnload:
-		_, err = doRequest(cmd, pluginPrefix, http.MethodDelete, WithBody("application/json", bytes.NewBuffer(reqData)))
+		_, err = doRequest(cmd, pluginPrefix, http.MethodDelete, http.Header{"Content-Type": {"application/json"}}, WithBody(bytes.NewBuffer(reqData)))
 	default:
 		cmd.Printf("Unknown action %s\n", action)
 		return

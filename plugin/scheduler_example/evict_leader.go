@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -17,19 +18,19 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"sync"
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/filter"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/schedulers"
+	"github.com/tikv/pd/server/storage/endpoint"
 	"github.com/unrolled/render"
 )
 
@@ -62,11 +63,10 @@ func init() {
 			}
 			conf.StoreIDWitRanges[id] = ranges
 			return nil
-
 		}
 	})
 
-	schedule.RegisterScheduler(EvictLeaderType, func(opController *schedule.OperatorController, storage *core.Storage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	schedule.RegisterScheduler(EvictLeaderType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		conf := &evictLeaderSchedulerConfig{StoreIDWitRanges: make(map[uint64][]core.KeyRange), storage: storage}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -90,10 +90,10 @@ func SchedulerArgs() []string {
 }
 
 type evictLeaderSchedulerConfig struct {
-	mu               sync.RWMutex
-	storage          *core.Storage
+	mu               syncutil.RWMutex
+	storage          endpoint.ConfigStorage
 	StoreIDWitRanges map[uint64][]core.KeyRange `json:"store-id-ranges"`
-	cluster          opt.Cluster
+	cluster          schedule.Cluster
 }
 
 func (conf *evictLeaderSchedulerConfig) BuildWithArgs(args []string) error {
@@ -184,7 +184,7 @@ func (s *evictLeaderScheduler) EncodeConfig() ([]byte, error) {
 	return schedule.EncodeConfig(s.conf)
 }
 
-func (s *evictLeaderScheduler) Prepare(cluster opt.Cluster) error {
+func (s *evictLeaderScheduler) Prepare(cluster schedule.Cluster) error {
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
 	var res error
@@ -196,7 +196,7 @@ func (s *evictLeaderScheduler) Prepare(cluster opt.Cluster) error {
 	return res
 }
 
-func (s *evictLeaderScheduler) Cleanup(cluster opt.Cluster) {
+func (s *evictLeaderScheduler) Cleanup(cluster schedule.Cluster) {
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
 	for id := range s.conf.StoreIDWitRanges {
@@ -204,7 +204,7 @@ func (s *evictLeaderScheduler) Cleanup(cluster opt.Cluster) {
 	}
 }
 
-func (s *evictLeaderScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
+func (s *evictLeaderScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
 	allowed := s.OpController.OperatorCount(operator.OpLeader) < cluster.GetOpts().GetLeaderScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpLeader.String()).Inc()
@@ -212,12 +212,12 @@ func (s *evictLeaderScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 	return allowed
 }
 
-func (s *evictLeaderScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
+func (s *evictLeaderScheduler) Schedule(cluster schedule.Cluster) []*operator.Operator {
 	ops := make([]*operator.Operator, 0, len(s.conf.StoreIDWitRanges))
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
 	for id, ranges := range s.conf.StoreIDWitRanges {
-		region := cluster.RandLeaderRegion(id, ranges, opt.HealthRegion(cluster))
+		region := cluster.RandLeaderRegion(id, ranges, schedule.IsRegionHealthy)
 		if region == nil {
 			continue
 		}
@@ -227,11 +227,10 @@ func (s *evictLeaderScheduler) Schedule(cluster opt.Cluster) []*operator.Operato
 		if target == nil {
 			continue
 		}
-		op, err := operator.CreateTransferLeaderOperator(EvictLeaderType, cluster, region, region.GetLeader().GetStoreId(), target.GetID(), operator.OpLeader)
+		op, err := operator.CreateTransferLeaderOperator(EvictLeaderType, cluster, region, region.GetLeader().GetStoreId(), target.GetID(), []uint64{}, operator.OpLeader)
 		if err != nil {
 			log.Debug("fail to create evict leader operator", errs.ZapError(err))
 			continue
-
 		}
 		op.SetPriorityLevel(core.HighPriority)
 		ops = append(ops, op)

@@ -8,15 +8,14 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package storelimit
 
 import (
-	"time"
-
-	"github.com/juju/ratelimit"
+	"github.com/tikv/pd/pkg/ratelimit"
 )
 
 const (
@@ -67,7 +66,7 @@ func (t Type) String() string {
 
 // StoreLimit limits the operators of a store
 type StoreLimit struct {
-	bucket          *ratelimit.Bucket
+	limiter         *ratelimit.RateLimiter
 	regionInfluence int64
 	ratePerSec      float64
 }
@@ -86,15 +85,16 @@ func NewStoreLimit(ratePerSec float64, regionInfluence int64) *StoreLimit {
 		ratePerSec *= float64(regionInfluence)
 	}
 	return &StoreLimit{
-		bucket:          ratelimit.NewBucketWithRate(ratePerSec, capacity),
+		limiter:         ratelimit.NewRateLimiter(ratePerSec, int(capacity)),
 		regionInfluence: regionInfluence,
 		ratePerSec:      rate,
 	}
 }
 
 // Available returns the number of available tokens
-func (l *StoreLimit) Available() int64 {
-	return l.bucket.Available()
+func (l *StoreLimit) Available(n int64) bool {
+	// Unlimited = 1e8, so can convert int64 to int
+	return l.limiter.Available(int(n))
 }
 
 // Rate returns the fill rate of the bucket, in tokens per second.
@@ -103,6 +103,6 @@ func (l *StoreLimit) Rate() float64 {
 }
 
 // Take takes count tokens from the bucket without blocking.
-func (l *StoreLimit) Take(count int64) time.Duration {
-	return l.bucket.Take(count)
+func (l *StoreLimit) Take(count int64) {
+	l.limiter.AllowN(int(count))
 }

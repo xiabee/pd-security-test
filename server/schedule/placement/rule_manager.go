@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -21,21 +22,23 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/codec"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/syncutil"
+	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/storage/endpoint"
 	"go.uber.org/zap"
 )
 
 // RuleManager is responsible for the lifecycle of all placement Rules.
 // It is thread safe.
 type RuleManager struct {
-	storage *core.Storage
-	sync.RWMutex
+	storage endpoint.RuleStorage
+	syncutil.RWMutex
 	initialized bool
 	ruleConfig  *ruleConfig
 	ruleList    ruleList
@@ -43,14 +46,18 @@ type RuleManager struct {
 	// used for rule validation
 	keyType          string
 	storeSetInformer core.StoreSetInformer
+	cache            *RegionRuleFitCacheManager
+	opt              *config.PersistOptions
 }
 
 // NewRuleManager creates a RuleManager instance.
-func NewRuleManager(storage *core.Storage, storeSetInformer core.StoreSetInformer) *RuleManager {
+func NewRuleManager(storage endpoint.RuleStorage, storeSetInformer core.StoreSetInformer, opt *config.PersistOptions) *RuleManager {
 	return &RuleManager{
 		storage:          storage,
 		storeSetInformer: storeSetInformer,
+		opt:              opt,
 		ruleConfig:       newRuleConfig(),
+		cache:            NewRegionRuleFitCacheManager(),
 	}
 }
 
@@ -255,7 +262,7 @@ func (m *RuleManager) DeleteRule(group, id string) error {
 func (m *RuleManager) GetSplitKeys(start, end []byte) [][]byte {
 	m.RLock()
 	defer m.RUnlock()
-	return m.ruleList.getSplitKeys(start, end)
+	return m.ruleList.rangeList.GetSplitKeys(start, end)
 }
 
 // GetAllRules returns sorted all rules.
@@ -300,13 +307,39 @@ func (m *RuleManager) GetRulesByKey(key []byte) []*Rule {
 func (m *RuleManager) GetRulesForApplyRegion(region *core.RegionInfo) []*Rule {
 	m.RLock()
 	defer m.RUnlock()
-	return m.ruleList.getRulesForApplyRegion(region.GetStartKey(), region.GetEndKey())
+	return m.ruleList.getRulesForApplyRange(region.GetStartKey(), region.GetEndKey())
+}
+
+// GetRulesForApplyRange returns the rules list that should be applied to a range.
+func (m *RuleManager) GetRulesForApplyRange(start, end []byte) []*Rule {
+	m.RLock()
+	defer m.RUnlock()
+	return m.ruleList.getRulesForApplyRange(start, end)
 }
 
 // FitRegion fits a region to the rules it matches.
-func (m *RuleManager) FitRegion(stores StoreSet, region *core.RegionInfo) *RegionFit {
+func (m *RuleManager) FitRegion(storeSet StoreSet, region *core.RegionInfo) *RegionFit {
+	regionStores := getStoresByRegion(storeSet, region)
 	rules := m.GetRulesForApplyRegion(region)
-	return FitRegion(stores, region, rules)
+	if m.opt.IsPlacementRulesCacheEnabled() {
+		if ok, fit := m.cache.CheckAndGetCache(region, rules, regionStores); fit != nil && ok {
+			return fit
+		}
+	}
+	fit := fitRegion(regionStores, region, rules)
+	fit.regionStores = regionStores
+	fit.rules = rules
+	return fit
+}
+
+// SetRegionFitCache sets RegionFitCache
+func (m *RuleManager) SetRegionFitCache(region *core.RegionInfo, fit *RegionFit) {
+	m.cache.SetCache(region, fit)
+}
+
+// InvalidCache invalids the cache.
+func (m *RuleManager) InvalidCache(regionID uint64) {
+	m.cache.Invalid(regionID)
 }
 
 func (m *RuleManager) beginPatch() *ruleConfigPatch {
@@ -399,8 +432,8 @@ const (
 // RuleOp is for batching placement rule actions. The action type is
 // distinguished by the field `Action`.
 type RuleOp struct {
-	*Rule                       // information of the placement rule to add/delete
-	Action           RuleOpType `json:"action"`              // the operation type
+	*Rule                       // information of the placement rule to add/delete the operation type
+	Action           RuleOpType `json:"action"`
 	DeleteByIDPrefix bool       `json:"delete_by_id_prefix"` // if action == delete, delete by the prefix of id
 }
 
@@ -412,8 +445,7 @@ func (r RuleOp) String() string {
 // Batch executes a series of actions at once.
 func (m *RuleManager) Batch(todo []RuleOp) error {
 	for _, t := range todo {
-		switch t.Action {
-		case RuleOpAdd:
+		if t.Action == RuleOpAdd {
 			err := m.adjustRule(t.Rule, "")
 			if err != nil {
 				return err
@@ -675,4 +707,24 @@ func (m *RuleManager) SetKeyType(h string) *RuleManager {
 	defer m.Unlock()
 	m.keyType = h
 	return m
+}
+
+func getStoresByRegion(storeSet StoreSet, region *core.RegionInfo) []*core.StoreInfo {
+	r := make([]*core.StoreInfo, 0, len(region.GetPeers()))
+	for _, peer := range region.GetPeers() {
+		store := storeSet.GetStore(peer.GetStoreId())
+		if store != nil {
+			r = append(r, store)
+		}
+	}
+	return r
+}
+
+func getStoreByID(stores []*core.StoreInfo, id uint64) *core.StoreInfo {
+	for _, store := range stores {
+		if store != nil && store.GetID() == id {
+			return store
+		}
+	}
+	return nil
 }

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -16,18 +17,35 @@ package operator
 import (
 	"bytes"
 	"fmt"
+	"github.com/pingcap/kvproto/pkg/eraftpb"
 	"strings"
+	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/kvproto/pkg/eraftpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/core/storelimit"
-	"github.com/tikv/pd/server/schedule/opt"
 	"go.uber.org/zap"
+)
+
+const (
+	// DefaultSlowExecutorRate is the fast rate of the step executor.
+	// default: 6 s/Mb
+	DefaultSlowExecutorRate = 6
+	// DefaultFastExecutorRate is the slow rate of the step executor.
+	// default:  0.6 s/Mb
+	DefaultFastExecutorRate = 0.6
+	// FastStepWaitTime is the duration that the OpStep may take.
+	// there are some steps that may take a short time, such as transfer leader, remove peer etc.
+	// It should consider the latency of handling region heartbeat especially big cluster.
+	// The update duration of region heartbeat should be less than the region heartbeat interval(default 60s).
+	FastStepWaitTime = 60 * time.Second
+	// SlowStepWaitTime is the duration that the OpStep may take.
+	// there are some steps that may take a long time, such as add peer, merge region etc.
+	SlowStepWaitTime = 10 * time.Minute
 )
 
 // OpStep describes the basic scheduling steps that can not be subdivided.
@@ -35,17 +53,21 @@ type OpStep interface {
 	fmt.Stringer
 	ConfVerChanged(region *core.RegionInfo) uint64
 	IsFinish(region *core.RegionInfo) bool
-	CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error
+	CheckInProgress(ci ClusterInformer, region *core.RegionInfo) error
 	Influence(opInfluence OpInfluence, region *core.RegionInfo)
+	Timeout(regionSize int64) time.Duration
 }
 
 // TransferLeader is an OpStep that transfers a region's leader.
 type TransferLeader struct {
+	// Compatible with old TiKV's TransferLeader.
 	FromStore, ToStore uint64
+	// Multi-target transfer leader.
+	ToStores []uint64
 }
 
 // ConfVerChanged returns the delta value for version increased by this step.
-func (tl TransferLeader) ConfVerChanged(region *core.RegionInfo) uint64 {
+func (tl TransferLeader) ConfVerChanged(_ *core.RegionInfo) uint64 {
 	return 0 // transfer leader never change the conf version
 }
 
@@ -55,19 +77,34 @@ func (tl TransferLeader) String() string {
 
 // IsFinish checks if current step is finished.
 func (tl TransferLeader) IsFinish(region *core.RegionInfo) bool {
+	for _, storeID := range tl.ToStores {
+		if region.GetLeader().GetStoreId() == storeID {
+			return true
+		}
+	}
 	return region.GetLeader().GetStoreId() == tl.ToStore
 }
 
 // CheckInProgress checks if the step is in the progress of advancing.
-func (tl TransferLeader) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
-	peer := region.GetStorePeer(tl.ToStore)
-	if peer == nil {
-		return errors.New("peer does not existed")
+func (tl TransferLeader) CheckInProgress(ci ClusterInformer, region *core.RegionInfo) error {
+	errList := make([]error, 0, len(tl.ToStores)+1)
+	for _, storeID := range append(tl.ToStores, tl.ToStore) {
+		peer := region.GetStorePeer(tl.ToStore)
+		if peer == nil {
+			errList = append(errList, errors.New("peer does not existed"))
+			continue
+		}
+		if core.IsLearner(peer) {
+			errList = append(errList, errors.New("peer already is a learner"))
+			continue
+		}
+		if err := validateStore(ci, storeID); err != nil {
+			errList = append(errList, err)
+			continue
+		}
+		return nil
 	}
-	if core.IsLearner(peer) {
-		return errors.New("peer already is a learner")
-	}
-	return validateStore(cluster, tl.ToStore)
+	return errors.Errorf("%v", errList)
 }
 
 // Influence calculates the store difference that current step makes.
@@ -81,9 +118,15 @@ func (tl TransferLeader) Influence(opInfluence OpInfluence, region *core.RegionI
 	to.LeaderCount++
 }
 
+// Timeout returns duration that current step may take.
+func (tl TransferLeader) Timeout(regionSize int64) time.Duration {
+	return fastStepWaitDuration(regionSize)
+}
+
 // AddPeer is an OpStep that adds a region peer.
 type AddPeer struct {
 	ToStore, PeerID uint64
+	IsLightWeight   bool
 }
 
 // ConfVerChanged returns the delta value for version increased by this step.
@@ -115,24 +158,33 @@ func (ap AddPeer) Influence(opInfluence OpInfluence, region *core.RegionInfo) {
 	regionSize := region.GetApproximateSize()
 	to.RegionSize += regionSize
 	to.RegionCount++
+	if ap.IsLightWeight {
+		return
+	}
 	to.AdjustStepCost(storelimit.AddPeer, regionSize)
 }
 
 // CheckInProgress checks if the step is in the progress of advancing.
-func (ap AddPeer) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
-	if err := validateStore(cluster, ap.ToStore); err != nil {
+func (ap AddPeer) CheckInProgress(ci ClusterInformer, region *core.RegionInfo) error {
+	if err := validateStore(ci, ap.ToStore); err != nil {
 		return err
 	}
 	peer := region.GetStorePeer(ap.ToStore)
 	if peer != nil && peer.GetId() != ap.PeerID {
-		return errors.Errorf("peer %d has already existed in store %d, the operator is trying to add peer %d on the same store", peer.GetId(), ap.ToStore, ap.PeerID)
+		return errors.Errorf("peer %d has already existed in store %d, the timeout is trying to add peer %d on the same store", peer.GetId(), ap.ToStore, ap.PeerID)
 	}
 	return nil
+}
+
+// Timeout returns duration that current step may take.
+func (ap AddPeer) Timeout(regionSize int64) time.Duration {
+	return slowStepWaitDuration(regionSize)
 }
 
 // AddLearner is an OpStep that adds a region learner peer.
 type AddLearner struct {
 	ToStore, PeerID uint64
+	IsLightWeight   bool
 }
 
 // ConfVerChanged returns the delta value for version increased by this step.
@@ -158,8 +210,8 @@ func (al AddLearner) IsFinish(region *core.RegionInfo) bool {
 }
 
 // CheckInProgress checks if the step is in the progress of advancing.
-func (al AddLearner) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
-	if err := validateStore(cluster, al.ToStore); err != nil {
+func (al AddLearner) CheckInProgress(ci ClusterInformer, region *core.RegionInfo) error {
+	if err := validateStore(ci, al.ToStore); err != nil {
 		return err
 	}
 	peer := region.GetStorePeer(al.ToStore)
@@ -167,7 +219,7 @@ func (al AddLearner) CheckInProgress(cluster opt.Cluster, region *core.RegionInf
 		return nil
 	}
 	if peer.GetId() != al.PeerID {
-		return errors.Errorf("peer %d has already existed in store %d, the operator is trying to add peer %d on the same store", peer.GetId(), al.ToStore, al.PeerID)
+		return errors.Errorf("peer %d has already existed in store %d, the timeout is trying to add peer %d on the same store", peer.GetId(), al.ToStore, al.PeerID)
 	}
 	if !core.IsLearner(peer) {
 		return errors.New("peer already is a voter")
@@ -182,7 +234,15 @@ func (al AddLearner) Influence(opInfluence OpInfluence, region *core.RegionInfo)
 	regionSize := region.GetApproximateSize()
 	to.RegionSize += regionSize
 	to.RegionCount++
+	if al.IsLightWeight {
+		return
+	}
 	to.AdjustStepCost(storelimit.AddPeer, regionSize)
+}
+
+// Timeout returns duration that current step may take.
+func (al AddLearner) Timeout(regionSize int64) time.Duration {
+	return slowStepWaitDuration(regionSize)
 }
 
 // PromoteLearner is an OpStep that promotes a region learner peer to normal voter.
@@ -212,7 +272,7 @@ func (pl PromoteLearner) IsFinish(region *core.RegionInfo) bool {
 }
 
 // CheckInProgress checks if the step is in the progress of advancing.
-func (pl PromoteLearner) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
+func (pl PromoteLearner) CheckInProgress(_ ClusterInformer, region *core.RegionInfo) error {
 	peer := region.GetStorePeer(pl.ToStore)
 	if peer.GetId() != pl.PeerID {
 		return errors.New("peer does not exist")
@@ -221,7 +281,12 @@ func (pl PromoteLearner) CheckInProgress(cluster opt.Cluster, region *core.Regio
 }
 
 // Influence calculates the store difference that current step makes.
-func (pl PromoteLearner) Influence(opInfluence OpInfluence, region *core.RegionInfo) {}
+func (pl PromoteLearner) Influence(_ OpInfluence, _ *core.RegionInfo) {}
+
+// Timeout returns duration that current step may take.
+func (pl PromoteLearner) Timeout(regionSize int64) time.Duration {
+	return fastStepWaitDuration(regionSize)
+}
 
 // RemovePeer is an OpStep that removes a region peer.
 type RemovePeer struct {
@@ -253,7 +318,7 @@ func (rp RemovePeer) IsFinish(region *core.RegionInfo) bool {
 }
 
 // CheckInProgress checks if the step is in the progress of advancing.
-func (rp RemovePeer) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
+func (rp RemovePeer) CheckInProgress(_ ClusterInformer, region *core.RegionInfo) error {
 	if rp.FromStore == region.GetLeader().GetStoreId() {
 		return errors.New("cannot remove leader peer")
 	}
@@ -267,11 +332,16 @@ func (rp RemovePeer) Influence(opInfluence OpInfluence, region *core.RegionInfo)
 	regionSize := region.GetApproximateSize()
 	from.RegionSize -= regionSize
 	from.RegionCount--
-	if rp.IsDownStore {
-		from.AdjustStepCost(storelimit.RemovePeer, storelimit.SmallRegionThreshold)
-		return
+
+	if rp.IsDownStore && regionSize > storelimit.SmallRegionThreshold {
+		regionSize = storelimit.SmallRegionThreshold
 	}
 	from.AdjustStepCost(storelimit.RemovePeer, regionSize)
+}
+
+// Timeout returns duration that current step may take.
+func (rp RemovePeer) Timeout(regionSize int64) time.Duration {
+	return fastStepWaitDuration(regionSize)
 }
 
 // MergeRegion is an OpStep that merge two regions.
@@ -288,7 +358,7 @@ type MergeRegion struct {
 }
 
 // ConfVerChanged returns the delta value for version increased by this step.
-func (mr MergeRegion) ConfVerChanged(region *core.RegionInfo) uint64 {
+func (mr MergeRegion) ConfVerChanged(_ *core.RegionInfo) uint64 {
 	return 0
 }
 
@@ -305,7 +375,7 @@ func (mr MergeRegion) IsFinish(region *core.RegionInfo) bool {
 }
 
 // CheckInProgress checks if the step is in the progress of advancing.
-func (mr MergeRegion) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
+func (mr MergeRegion) CheckInProgress(_ ClusterInformer, _ *core.RegionInfo) error {
 	return nil
 }
 
@@ -322,6 +392,12 @@ func (mr MergeRegion) Influence(opInfluence OpInfluence, region *core.RegionInfo
 	}
 }
 
+// Timeout returns duration that current step may take.
+// The merge step need more time to finish but less than slow step.
+func (mr MergeRegion) Timeout(regionSize int64) time.Duration {
+	return fastStepWaitDuration(regionSize) * 10
+}
+
 // SplitRegion is an OpStep that splits a region.
 type SplitRegion struct {
 	StartKey, EndKey []byte
@@ -330,7 +406,7 @@ type SplitRegion struct {
 }
 
 // ConfVerChanged returns the delta value for version increased by this step.
-func (sr SplitRegion) ConfVerChanged(region *core.RegionInfo) uint64 {
+func (sr SplitRegion) ConfVerChanged(_ *core.RegionInfo) uint64 {
 	return 0
 }
 
@@ -355,150 +431,14 @@ func (sr SplitRegion) Influence(opInfluence OpInfluence, region *core.RegionInfo
 }
 
 // CheckInProgress checks if the step is in the progress of advancing.
-func (sr SplitRegion) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
+func (sr SplitRegion) CheckInProgress(_ ClusterInformer, _ *core.RegionInfo) error {
 	return nil
 }
 
-// AddLightPeer is an OpStep that adds a region peer without considering the influence.
-type AddLightPeer struct {
-	ToStore, PeerID uint64
+// Timeout returns duration that current step may take.
+func (sr SplitRegion) Timeout(regionSize int64) time.Duration {
+	return fastStepWaitDuration(regionSize)
 }
-
-// ConfVerChanged returns the delta value for version increased by this step.
-func (ap AddLightPeer) ConfVerChanged(region *core.RegionInfo) uint64 {
-	peer := region.GetStoreVoter(ap.ToStore)
-	return typeutil.BoolToUint64(peer.GetId() == ap.PeerID)
-}
-
-func (ap AddLightPeer) String() string {
-	return fmt.Sprintf("add peer %v on store %v", ap.PeerID, ap.ToStore)
-}
-
-// IsFinish checks if current step is finished.
-func (ap AddLightPeer) IsFinish(region *core.RegionInfo) bool {
-	if peer := region.GetStoreVoter(ap.ToStore); peer != nil {
-		if peer.GetId() != ap.PeerID {
-			log.Warn("obtain unexpected peer", zap.String("expect", ap.String()), zap.Uint64("obtain-voter", peer.GetId()))
-			return false
-		}
-		return region.GetPendingVoter(peer.GetId()) == nil
-	}
-	return false
-}
-
-// CheckInProgress checks if the step meets the safety properties.
-func (ap AddLightPeer) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
-	if err := validateStore(cluster, ap.ToStore); err != nil {
-		return err
-	}
-	peer := region.GetStorePeer(ap.ToStore)
-	if peer != nil && peer.GetId() != ap.PeerID {
-		return errors.Errorf("peer %d has already existed in store %d, the operator is trying to add peer %d on the same store", peer.GetId(), ap.ToStore, ap.PeerID)
-	}
-	return nil
-}
-
-// Influence calculates the store difference that current step makes.
-func (ap AddLightPeer) Influence(opInfluence OpInfluence, region *core.RegionInfo) {
-	to := opInfluence.GetStoreInfluence(ap.ToStore)
-
-	to.RegionSize += region.GetApproximateSize()
-	to.RegionCount++
-}
-
-// AddLightLearner is an OpStep that adds a region learner peer without considering the influence.
-type AddLightLearner struct {
-	ToStore, PeerID uint64
-}
-
-// ConfVerChanged returns the delta value for version increased by this step.
-func (al AddLightLearner) ConfVerChanged(region *core.RegionInfo) uint64 {
-	peer := region.GetStorePeer(al.ToStore)
-	return typeutil.BoolToUint64(peer.GetId() == al.PeerID)
-}
-
-func (al AddLightLearner) String() string {
-	return fmt.Sprintf("add learner peer %v on store %v", al.PeerID, al.ToStore)
-}
-
-// IsFinish checks if current step is finished.
-func (al AddLightLearner) IsFinish(region *core.RegionInfo) bool {
-	if peer := region.GetStoreLearner(al.ToStore); peer != nil {
-		if peer.GetId() != al.PeerID {
-			log.Warn("obtain unexpected peer", zap.String("expect", al.String()), zap.Uint64("obtain-learner", peer.GetId()))
-			return false
-		}
-		return region.GetPendingLearner(peer.GetId()) == nil
-	}
-	return false
-}
-
-// CheckInProgress checks if the step meets the safety properties.
-func (al AddLightLearner) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
-	if err := validateStore(cluster, al.ToStore); err != nil {
-		return err
-	}
-	peer := region.GetStorePeer(al.ToStore)
-	if peer == nil {
-		return nil
-	}
-	if peer.GetId() != al.PeerID {
-		return errors.Errorf("peer %d has already existed in store %d, the operator is trying to add peer %d on the same store", peer.GetId(), al.ToStore, al.PeerID)
-	}
-	if !core.IsLearner(peer) {
-		return errors.New("peer already is a voter")
-	}
-	return nil
-}
-
-// Influence calculates the store difference that current step makes.
-func (al AddLightLearner) Influence(opInfluence OpInfluence, region *core.RegionInfo) {
-	to := opInfluence.GetStoreInfluence(al.ToStore)
-
-	to.RegionSize += region.GetApproximateSize()
-	to.RegionCount++
-}
-
-// DemoteFollower is an OpStep that demotes a region follower peer to learner.
-type DemoteFollower struct {
-	ToStore, PeerID uint64
-}
-
-func (df DemoteFollower) String() string {
-	return fmt.Sprintf("demote follower peer %v on store %v to learner", df.PeerID, df.ToStore)
-}
-
-// ConfVerChanged returns the delta value for version increased by this step.
-func (df DemoteFollower) ConfVerChanged(region *core.RegionInfo) uint64 {
-	peer := region.GetStoreLearner(df.ToStore)
-	return typeutil.BoolToUint64(peer.GetId() == df.PeerID)
-}
-
-// IsFinish checks if current step is finished.
-func (df DemoteFollower) IsFinish(region *core.RegionInfo) bool {
-	if peer := region.GetStoreLearner(df.ToStore); peer != nil {
-		if peer.GetId() != df.PeerID {
-			log.Warn("obtain unexpected peer", zap.String("expect", df.String()), zap.Uint64("obtain-learner", peer.GetId()))
-		}
-		return peer.GetId() == df.PeerID
-	}
-	return false
-}
-
-// CheckInProgress checks if the step is in the progress of advancing.
-func (df DemoteFollower) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
-	peer := region.GetStorePeer(df.ToStore)
-	if peer.GetId() != df.PeerID {
-		return errors.New("peer does not exist")
-	}
-	if peer.GetId() == region.GetLeader().GetId() {
-		return errors.New("cannot demote leader peer")
-	}
-	return nil
-}
-
-// Influence calculates the store difference that current step makes.
-func (df DemoteFollower) Influence(opInfluence OpInfluence, region *core.RegionInfo) {}
 
 // DemoteVoter is very similar to DemoteFollower. But it allows Demote Leader.
 // Note: It is not an OpStep, only a sub step in ChangePeerV2Enter and ChangePeerV2Leave.
@@ -525,6 +465,11 @@ func (dv DemoteVoter) IsFinish(region *core.RegionInfo) bool {
 		return peer.GetId() == dv.PeerID
 	}
 	return false
+}
+
+// Timeout returns duration that current step may take.
+func (dv DemoteVoter) Timeout(regionSize int64) time.Duration {
+	return fastStepWaitDuration(regionSize)
 }
 
 // ChangePeerV2Enter is an OpStep that uses joint consensus to request all PromoteLearner and DemoteVoter.
@@ -586,7 +531,7 @@ func (cpe ChangePeerV2Enter) IsFinish(region *core.RegionInfo) bool {
 }
 
 // CheckInProgress checks if the step is in the progress of advancing.
-func (cpe ChangePeerV2Enter) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
+func (cpe ChangePeerV2Enter) CheckInProgress(_ ClusterInformer, region *core.RegionInfo) error {
 	inJointState, notInJointState := false, false
 	for _, pl := range cpe.PromoteLearners {
 		peer := region.GetStorePeer(pl.ToStore)
@@ -638,7 +583,7 @@ func (cpe ChangePeerV2Enter) CheckInProgress(cluster opt.Cluster, region *core.R
 }
 
 // Influence calculates the store difference that current step makes.
-func (cpe ChangePeerV2Enter) Influence(opInfluence OpInfluence, region *core.RegionInfo) {}
+func (cpe ChangePeerV2Enter) Influence(_ OpInfluence, _ *core.RegionInfo) {}
 
 // GetRequest get the ChangePeerV2 request
 func (cpe ChangePeerV2Enter) GetRequest() *pdpb.ChangePeerV2 {
@@ -666,6 +611,12 @@ func (cpe ChangePeerV2Enter) GetRequest() *pdpb.ChangePeerV2 {
 	return &pdpb.ChangePeerV2{
 		Changes: changes,
 	}
+}
+
+// Timeout returns duration that current step may take.
+func (cpe ChangePeerV2Enter) Timeout(regionSize int64) time.Duration {
+	count := uint64(len(cpe.PromoteLearners)+len(cpe.DemoteVoters)) + 1
+	return fastStepWaitDuration(regionSize) * time.Duration(count)
 }
 
 // ChangePeerV2Leave is an OpStep that leaves the joint state.
@@ -726,7 +677,7 @@ func (cpl ChangePeerV2Leave) IsFinish(region *core.RegionInfo) bool {
 }
 
 // CheckInProgress checks if the step is in the progress of advancing.
-func (cpl ChangePeerV2Leave) CheckInProgress(cluster opt.Cluster, region *core.RegionInfo) error {
+func (cpl ChangePeerV2Leave) CheckInProgress(_ ClusterInformer, region *core.RegionInfo) error {
 	inJointState, notInJointState, demoteLeader := false, false, false
 	leaderStoreID := region.GetLeader().GetStoreId()
 
@@ -785,15 +736,39 @@ func (cpl ChangePeerV2Leave) CheckInProgress(cluster opt.Cluster, region *core.R
 }
 
 // Influence calculates the store difference that current step makes.
-func (cpl ChangePeerV2Leave) Influence(opInfluence OpInfluence, region *core.RegionInfo) {}
+func (cpl ChangePeerV2Leave) Influence(_ OpInfluence, _ *core.RegionInfo) {}
 
-func validateStore(cluster opt.Cluster, id uint64) error {
-	store := cluster.GetStore(id)
+// Timeout returns duration that current step may take.
+func (cpl ChangePeerV2Leave) Timeout(regionSize int64) time.Duration {
+	count := uint64(len(cpl.PromoteLearners)+len(cpl.DemoteVoters)) + 1
+	return fastStepWaitDuration(regionSize) * time.Duration(count)
+}
+
+func validateStore(ci ClusterInformer, id uint64) error {
+	store := ci.GetBasicCluster().GetStore(id)
 	if store == nil {
 		return errors.New("target store does not exist")
 	}
-	if store.DownTime() > cluster.GetOpts().GetMaxStoreDownTime() {
+	if store.DownTime() > ci.GetOpts().GetMaxStoreDownTime() {
 		return errors.New("target store is down")
 	}
 	return nil
+}
+
+func slowStepWaitDuration(regionSize int64) time.Duration {
+	seconds := DefaultSlowExecutorRate * regionSize
+	wait := time.Duration(seconds) * time.Second
+	if wait < SlowStepWaitTime {
+		wait = SlowStepWaitTime
+	}
+	return wait
+}
+
+func fastStepWaitDuration(regionSize int64) time.Duration {
+	seconds := int64(DefaultFastExecutorRate * float64(regionSize))
+	wait := time.Duration(seconds) * time.Second
+	if wait < FastStepWaitTime {
+		wait = FastStepWaitTime
+	}
+	return wait
 }

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -20,20 +21,21 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/codec"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/kv"
+	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/storage/endpoint"
 )
 
 var _ = Suite(&testManagerSuite{})
 
 type testManagerSuite struct {
-	store   *core.Storage
+	store   endpoint.RuleStorage
 	manager *RuleManager
 }
 
 func (s *testManagerSuite) SetUpTest(c *C) {
-	s.store = core.NewStorage(kv.NewMemoryKV())
+	s.store = storage.NewStorageWithMemoryBackend()
 	var err error
-	s.manager = NewRuleManager(s.store, nil)
+	s.manager = NewRuleManager(s.store, nil, nil)
 	err = s.manager.Initialize(3, []string{"zone", "rack", "host"})
 	c.Assert(err, IsNil)
 }
@@ -110,7 +112,7 @@ func (s *testManagerSuite) TestSaveLoad(c *C) {
 		c.Assert(s.manager.SetRule(r.Clone()), IsNil)
 	}
 
-	m2 := NewRuleManager(s.store, nil)
+	m2 := NewRuleManager(s.store, nil, nil)
 	err := m2.Initialize(3, []string{"no", "labels"})
 	c.Assert(err, IsNil)
 	c.Assert(m2.GetAllRules(), HasLen, 3)
@@ -125,7 +127,7 @@ func (s *testManagerSuite) TestSetAfterGet(c *C) {
 	rule.Count = 1
 	s.manager.SetRule(rule)
 
-	m2 := NewRuleManager(s.store, nil)
+	m2 := NewRuleManager(s.store, nil, nil)
 	err := m2.Initialize(100, []string{})
 	c.Assert(err, IsNil)
 	rule = m2.GetRule("pd", "default")
@@ -301,6 +303,33 @@ func (s *testManagerSuite) TestGroupConfig(c *C) {
 	err = s.manager.DeleteRule("pd", "default")
 	c.Assert(err, IsNil)
 	c.Assert(s.manager.GetRuleGroups(), DeepEquals, []*RuleGroup{g2})
+}
+
+func (s *testManagerSuite) TestRuleVersion(c *C) {
+	// default rule
+	rule1 := s.manager.GetRule("pd", "default")
+	c.Assert(rule1.Version, Equals, uint64(0))
+	// create new rule
+	newRule := &Rule{GroupID: "g1", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 3}
+	err := s.manager.SetRule(newRule)
+	c.Assert(err, IsNil)
+	newRule = s.manager.GetRule("g1", "id")
+	c.Assert(newRule.Version, Equals, uint64(0))
+	// update rule
+	newRule = &Rule{GroupID: "g1", ID: "id", StartKeyHex: "123abc", EndKeyHex: "123abf", Role: "voter", Count: 2}
+	err = s.manager.SetRule(newRule)
+	c.Assert(err, IsNil)
+	newRule = s.manager.GetRule("g1", "id")
+	c.Assert(newRule.Version, Equals, uint64(1))
+	// delete rule
+	err = s.manager.DeleteRule("g1", "id")
+	c.Assert(err, IsNil)
+	// recreate new rule
+	err = s.manager.SetRule(newRule)
+	c.Assert(err, IsNil)
+	// assert version should be 0 again
+	newRule = s.manager.GetRule("g1", "id")
+	c.Assert(newRule.Version, Equals, uint64(0))
 }
 
 func (s *testManagerSuite) TestCheckApplyRules(c *C) {

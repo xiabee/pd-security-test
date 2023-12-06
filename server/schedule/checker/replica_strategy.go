@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -16,8 +17,8 @@ package checker
 import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/filter"
-	"github.com/tikv/pd/server/schedule/opt"
 	"go.uber.org/zap"
 )
 
@@ -25,7 +26,7 @@ import (
 // exists to allow replica_checker and rule_checker to reuse common logics.
 type ReplicaStrategy struct {
 	checkerName    string // replica-checker / rule-checker
-	cluster        opt.Cluster
+	cluster        schedule.Cluster
 	locationLabels []string
 	isolationLevel string
 	region         *core.RegionInfo

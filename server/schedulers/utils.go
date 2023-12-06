@@ -8,25 +8,22 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package schedulers
 
 import (
-	"math"
 	"net/url"
 	"strconv"
 	"time"
 
-	"github.com/montanaflynn/stats"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/statistics"
 	"go.uber.org/zap"
 )
@@ -36,13 +33,14 @@ const (
 	adjustRatio                  float64 = 0.005
 	leaderTolerantSizeRatio      float64 = 5.0
 	minTolerantSizeRatio         float64 = 1.0
+	influenceAmp                 int64   = 5
 	defaultMinRetryLimit                 = 1
 	defaultRetryQuotaAttenuation         = 2
 )
 
 type balancePlan struct {
+	schedule.Cluster
 	kind              core.ScheduleKind
-	cluster           opt.Cluster
 	opInfluence       operator.OpInfluence
 	tolerantSizeRatio float64
 
@@ -54,10 +52,10 @@ type balancePlan struct {
 	targetScore float64
 }
 
-func newBalancePlan(kind core.ScheduleKind, cluster opt.Cluster, opInfluence operator.OpInfluence) *balancePlan {
+func newBalancePlan(kind core.ScheduleKind, cluster schedule.Cluster, opInfluence operator.OpInfluence) *balancePlan {
 	return &balancePlan{
+		Cluster:           cluster,
 		kind:              kind,
-		cluster:           cluster,
 		opInfluence:       opInfluence,
 		tolerantSizeRatio: adjustTolerantRatio(cluster, kind),
 	}
@@ -90,17 +88,31 @@ func (p *balancePlan) shouldBalance(scheduleName string) bool {
 	sourceID := p.source.GetID()
 	targetID := p.target.GetID()
 	tolerantResource := p.getTolerantResource()
+	// to avoid schedule too much, if A's core greater than B and C a little
+	// we want that A should be moved out one region not two
 	sourceInfluence := p.GetOpInfluence(sourceID)
+	// A->B, B's influence is positive , so B can become source schedule, it will move region from B to C
+	if sourceInfluence > 0 {
+		sourceInfluence = -sourceInfluence
+	}
+	// to avoid schedule too much, if A's score less than B and C in small range,
+	// we want that A can be moved in one region not two
 	targetInfluence := p.GetOpInfluence(targetID)
-	sourceDelta, targetDelta := sourceInfluence-tolerantResource, targetInfluence+tolerantResource
-	opts := p.cluster.GetOpts()
+	// to avoid schedule call back
+	// A->B, A's influence is negative, so A will be target, C may move region to A
+	if targetInfluence < 0 {
+		targetInfluence = -targetInfluence
+	}
+	opts := p.GetOpts()
 	switch p.kind.Resource {
 	case core.LeaderKind:
+		sourceDelta, targetDelta := sourceInfluence-tolerantResource, targetInfluence+tolerantResource
 		p.sourceScore = p.source.LeaderScore(p.kind.Policy, sourceDelta)
 		p.targetScore = p.target.LeaderScore(p.kind.Policy, targetDelta)
 	case core.RegionKind:
-		p.sourceScore = p.source.RegionScore(opts.GetRegionScoreFormulaVersion(), opts.GetHighSpaceRatio(), opts.GetLowSpaceRatio(), sourceDelta, -1)
-		p.targetScore = p.target.RegionScore(opts.GetRegionScoreFormulaVersion(), opts.GetHighSpaceRatio(), opts.GetLowSpaceRatio(), targetDelta, 1)
+		sourceDelta, targetDelta := sourceInfluence*influenceAmp-tolerantResource, targetInfluence*influenceAmp+tolerantResource
+		p.sourceScore = p.source.RegionScore(opts.GetRegionScoreFormulaVersion(), opts.GetHighSpaceRatio(), opts.GetLowSpaceRatio(), sourceDelta)
+		p.targetScore = p.target.RegionScore(opts.GetRegionScoreFormulaVersion(), opts.GetHighSpaceRatio(), opts.GetLowSpaceRatio(), targetDelta)
 	}
 	if opts.IsDebugMetricsEnabled() {
 		opInfluenceStatus.WithLabelValues(scheduleName, strconv.FormatUint(sourceID, 10), "source").Set(float64(sourceInfluence))
@@ -117,7 +129,7 @@ func (p *balancePlan) shouldBalance(scheduleName string) bool {
 			zap.Int64("source-influence", sourceInfluence),
 			zap.Int64("target-size", p.target.GetRegionSize()), zap.Float64("target-score", p.targetScore),
 			zap.Int64("target-influence", targetInfluence),
-			zap.Int64("average-region-size", p.cluster.GetAverageRegionSize()),
+			zap.Int64("average-region-size", p.GetAverageRegionSize()),
 			zap.Int64("tolerant-resource", tolerantResource))
 	}
 	return shouldBalance
@@ -128,13 +140,13 @@ func (p *balancePlan) getTolerantResource() int64 {
 		return int64(p.tolerantSizeRatio)
 	}
 	regionSize := p.region.GetApproximateSize()
-	if regionSize < p.cluster.GetAverageRegionSize() {
-		regionSize = p.cluster.GetAverageRegionSize()
+	if regionSize < p.GetAverageRegionSize() {
+		regionSize = p.GetAverageRegionSize()
 	}
 	return int64(float64(regionSize) * p.tolerantSizeRatio)
 }
 
-func adjustTolerantRatio(cluster opt.Cluster, kind core.ScheduleKind) float64 {
+func adjustTolerantRatio(cluster schedule.Cluster, kind core.ScheduleKind) float64 {
 	var tolerantSizeRatio float64
 	switch c := cluster.(type) {
 	case *schedule.RangeCluster:
@@ -167,18 +179,6 @@ func adjustTolerantRatio(cluster opt.Cluster, kind core.ScheduleKind) float64 {
 	return tolerantSizeRatio
 }
 
-func adjustBalanceLimit(cluster opt.Cluster, kind core.ResourceKind) uint64 {
-	stores := cluster.GetStores()
-	counts := make([]float64, 0, len(stores))
-	for _, s := range stores {
-		if s.IsUp() {
-			counts = append(counts, float64(s.ResourceCount(kind)))
-		}
-	}
-	limit, _ := stats.StandardDeviation(counts)
-	return typeutil.MaxUint64(1, uint64(limit))
-}
-
 func getKeyRanges(args []string) ([]core.KeyRange, error) {
 	var ranges []core.KeyRange
 	for len(args) > 1 {
@@ -199,30 +199,14 @@ func getKeyRanges(args []string) ([]core.KeyRange, error) {
 	return ranges, nil
 }
 
-// Influence records operator influence.
-type Influence struct {
-	Loads []float64
-	Count float64
-}
-
-func (lhs *Influence) add(rhs *Influence, w float64) *Influence {
-	var infl Influence
-	for i := range lhs.Loads {
-		infl.Loads = append(infl.Loads, lhs.Loads[i]+rhs.Loads[i]*w)
-	}
-	infl.Count = infl.Count + rhs.Count*w
-	return &infl
-}
-
-// TODO: merge it into OperatorInfluence.
 type pendingInfluence struct {
 	op                *operator.Operator
 	from, to          uint64
-	origin            Influence
+	origin            statistics.Influence
 	maxZombieDuration time.Duration
 }
 
-func newPendingInfluence(op *operator.Operator, from, to uint64, infl Influence, maxZombieDur time.Duration) *pendingInfluence {
+func newPendingInfluence(op *operator.Operator, from, to uint64, infl statistics.Influence, maxZombieDur time.Duration) *pendingInfluence {
 	return &pendingInfluence{
 		op:                op,
 		from:              from,
@@ -232,55 +216,26 @@ func newPendingInfluence(op *operator.Operator, from, to uint64, infl Influence,
 	}
 }
 
-type storeLoad struct {
-	Loads []float64
-	Count float64
-}
-
-func (load storeLoad) ToLoadPred(rwTy rwType, infl *Influence) *storeLoadPred {
-	future := storeLoad{
-		Loads: append(load.Loads[:0:0], load.Loads...),
-		Count: load.Count,
-	}
-	if infl != nil {
-		switch rwTy {
-		case read:
-			future.Loads[statistics.ByteDim] += infl.Loads[statistics.RegionReadBytes]
-			future.Loads[statistics.KeyDim] += infl.Loads[statistics.RegionReadKeys]
-		case write:
-			future.Loads[statistics.ByteDim] += infl.Loads[statistics.RegionWriteBytes]
-			future.Loads[statistics.KeyDim] += infl.Loads[statistics.RegionWriteKeys]
-		}
-		future.Count += infl.Count
-	}
-	return &storeLoadPred{
-		Current: load,
-		Future:  future,
+func stLdRate(dim int) func(ld *statistics.StoreLoad) float64 {
+	return func(ld *statistics.StoreLoad) float64 {
+		return ld.Loads[dim]
 	}
 }
 
-func stLdByteRate(ld *storeLoad) float64 {
-	return ld.Loads[statistics.ByteDim]
-}
-
-func stLdKeyRate(ld *storeLoad) float64 {
-	return ld.Loads[statistics.KeyDim]
-}
-
-func stLdCount(ld *storeLoad) float64 {
+func stLdCount(ld *statistics.StoreLoad) float64 {
 	return ld.Count
 }
 
-type storeLoadCmp func(ld1, ld2 *storeLoad) int
+type storeLoadCmp func(ld1, ld2 *statistics.StoreLoad) int
 
 func negLoadCmp(cmp storeLoadCmp) storeLoadCmp {
-	return func(ld1, ld2 *storeLoad) int {
+	return func(ld1, ld2 *statistics.StoreLoad) int {
 		return -cmp(ld1, ld2)
 	}
 }
 
 func sliceLoadCmp(cmps ...storeLoadCmp) storeLoadCmp {
-	return func(ld1, ld2 *storeLoad) int {
+	return func(ld1, ld2 *statistics.StoreLoad) int {
 		for _, cmp := range cmps {
 			if r := cmp(ld1, ld2); r != 0 {
 				return r
@@ -290,8 +245,8 @@ func sliceLoadCmp(cmps ...storeLoadCmp) storeLoadCmp {
 	}
 }
 
-func stLdRankCmp(dim func(ld *storeLoad) float64, rank func(value float64) int64) storeLoadCmp {
-	return func(ld1, ld2 *storeLoad) int {
+func stLdRankCmp(dim func(ld *statistics.StoreLoad) float64, rank func(value float64) int64) storeLoadCmp {
+	return func(ld1, ld2 *statistics.StoreLoad) int {
 		return rankCmp(dim(ld1), dim(ld2), rank)
 	}
 }
@@ -306,37 +261,10 @@ func rankCmp(a, b float64, rank func(value float64) int64) int {
 	return 0
 }
 
-// store load prediction
-type storeLoadPred struct {
-	Current storeLoad
-	Future  storeLoad
-	Expect  storeLoad
-}
-
-func (lp *storeLoadPred) min() *storeLoad {
-	return minLoad(&lp.Current, &lp.Future)
-}
-
-func (lp *storeLoadPred) max() *storeLoad {
-	return maxLoad(&lp.Current, &lp.Future)
-}
-
-func (lp *storeLoadPred) diff() *storeLoad {
-	mx, mn := lp.max(), lp.min()
-	loads := make([]float64, len(mx.Loads))
-	for i := range loads {
-		loads[i] = mx.Loads[i] - mn.Loads[i]
-	}
-	return &storeLoad{
-		Loads: loads,
-		Count: mx.Count - mn.Count,
-	}
-}
-
-type storeLPCmp func(lp1, lp2 *storeLoadPred) int
+type storeLPCmp func(lp1, lp2 *statistics.StoreLoadPred) int
 
 func sliceLPCmp(cmps ...storeLPCmp) storeLPCmp {
-	return func(lp1, lp2 *storeLoadPred) int {
+	return func(lp1, lp2 *statistics.StoreLoadPred) int {
 		for _, cmp := range cmps {
 			if r := cmp(lp1, lp2); r != 0 {
 				return r
@@ -347,102 +275,20 @@ func sliceLPCmp(cmps ...storeLPCmp) storeLPCmp {
 }
 
 func minLPCmp(ldCmp storeLoadCmp) storeLPCmp {
-	return func(lp1, lp2 *storeLoadPred) int {
-		return ldCmp(lp1.min(), lp2.min())
+	return func(lp1, lp2 *statistics.StoreLoadPred) int {
+		return ldCmp(lp1.Min(), lp2.Min())
 	}
 }
 
 func maxLPCmp(ldCmp storeLoadCmp) storeLPCmp {
-	return func(lp1, lp2 *storeLoadPred) int {
-		return ldCmp(lp1.max(), lp2.max())
+	return func(lp1, lp2 *statistics.StoreLoadPred) int {
+		return ldCmp(lp1.Max(), lp2.Max())
 	}
 }
 
 func diffCmp(ldCmp storeLoadCmp) storeLPCmp {
-	return func(lp1, lp2 *storeLoadPred) int {
-		return ldCmp(lp1.diff(), lp2.diff())
-	}
-}
-
-func minLoad(a, b *storeLoad) *storeLoad {
-	loads := make([]float64, len(a.Loads))
-	for i := range loads {
-		loads[i] = math.Min(a.Loads[i], b.Loads[i])
-	}
-	return &storeLoad{
-		Loads: loads,
-		Count: math.Min(a.Count, b.Count),
-	}
-}
-
-func maxLoad(a, b *storeLoad) *storeLoad {
-	loads := make([]float64, len(a.Loads))
-	for i := range loads {
-		loads[i] = math.Max(a.Loads[i], b.Loads[i])
-	}
-	return &storeLoad{
-		Loads: loads,
-		Count: math.Max(a.Count, b.Count),
-	}
-}
-
-type storeLoadDetail struct {
-	Store    *core.StoreInfo
-	LoadPred *storeLoadPred
-	HotPeers []*statistics.HotPeerStat
-}
-
-func (li *storeLoadDetail) toHotPeersStat() *statistics.HotPeersStat {
-	totalLoads := make([]float64, statistics.RegionStatCount)
-	if len(li.HotPeers) == 0 {
-		return &statistics.HotPeersStat{
-			TotalLoads:     totalLoads,
-			TotalBytesRate: 0.0,
-			TotalKeysRate:  0.0,
-			Count:          0,
-			Stats:          make([]statistics.HotPeerStatShow, 0),
-		}
-	}
-	kind := write
-	if li.HotPeers[0].Kind == statistics.ReadFlow {
-		kind = read
-	}
-
-	peers := make([]statistics.HotPeerStatShow, 0, len(li.HotPeers))
-	for _, peer := range li.HotPeers {
-		if peer.HotDegree > 0 {
-			peers = append(peers, toHotPeerStatShow(peer, kind))
-			for i := range totalLoads {
-				totalLoads[i] += peer.GetLoad(statistics.RegionStatKind(i))
-			}
-		}
-	}
-
-	b, k := getRegionStatKind(kind, statistics.ByteDim), getRegionStatKind(kind, statistics.KeyDim)
-	byteRate := totalLoads[b]
-	keyRate := totalLoads[k]
-
-	return &statistics.HotPeersStat{
-		TotalLoads:     totalLoads,
-		TotalBytesRate: byteRate,
-		TotalKeysRate:  keyRate,
-		Count:          len(peers),
-		Stats:          peers,
-	}
-}
-
-func toHotPeerStatShow(p *statistics.HotPeerStat, kind rwType) statistics.HotPeerStatShow {
-	b, k := getRegionStatKind(kind, statistics.ByteDim), getRegionStatKind(kind, statistics.KeyDim)
-	byteRate := p.Loads[b]
-	keyRate := p.Loads[k]
-	return statistics.HotPeerStatShow{
-		StoreID:        p.StoreID,
-		RegionID:       p.RegionID,
-		HotDegree:      p.HotDegree,
-		ByteRate:       byteRate,
-		KeyRate:        keyRate,
-		AntiCount:      p.AntiCount,
-		LastUpdateTime: p.LastUpdateTime,
+	return func(lp1, lp2 *statistics.StoreLoadPred) int {
+		return ldCmp(lp1.Diff(), lp2.Diff())
 	}
 }
 

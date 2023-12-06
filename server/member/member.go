@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -32,7 +33,7 @@ import (
 	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/election"
-	"github.com/tikv/pd/server/kv"
+	"github.com/tikv/pd/server/storage/kv"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
 	"go.uber.org/zap"
@@ -172,11 +173,14 @@ func (m *Member) CheckLeader() (*pdpb.Member, int64, bool) {
 			// oh, we are already a PD leader, which indicates we may meet something wrong
 			// in previous CampaignLeader. We should delete the leadership and campaign again.
 			log.Warn("the pd leader has not changed, delete and campaign again", zap.Stringer("old-pd-leader", leader))
-			if err = m.leadership.DeleteLeader(); err != nil {
+			// Delete the leader itself and let others start a new election again.
+			if err = m.leadership.DeleteLeaderKey(); err != nil {
 				log.Error("deleting pd leader key meets error", errs.ZapError(err))
 				time.Sleep(200 * time.Millisecond)
 				return nil, 0, true
 			}
+			// Return nil and false to make sure the campaign will start immediately.
+			return nil, 0, false
 		}
 	}
 	return leader, rev, false
@@ -312,10 +316,11 @@ func (m *Member) SetMemberLeaderPriority(id uint64, priority int) error {
 	key := m.getMemberLeaderPriorityPath(id)
 	res, err := m.leadership.LeaderTxn().Then(clientv3.OpPut(key, strconv.Itoa(priority))).Commit()
 	if err != nil {
-		return errors.WithStack(err)
+		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
 	}
 	if !res.Succeeded {
-		return errors.New("save etcd leader priority failed, maybe not pd leader")
+		log.Error("save etcd leader priority failed, maybe not pd leader")
+		return errs.ErrEtcdTxnConflict.FastGenByArgs()
 	}
 	return nil
 }
@@ -325,10 +330,11 @@ func (m *Member) DeleteMemberLeaderPriority(id uint64) error {
 	key := m.getMemberLeaderPriorityPath(id)
 	res, err := m.leadership.LeaderTxn().Then(clientv3.OpDelete(key)).Commit()
 	if err != nil {
-		return errors.WithStack(err)
+		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
 	}
 	if !res.Succeeded {
-		return errors.New("delete etcd leader priority failed, maybe not pd leader")
+		log.Error("delete etcd leader priority failed, maybe not pd leader")
+		return errs.ErrEtcdTxnConflict.FastGenByArgs()
 	}
 	return nil
 }
@@ -338,10 +344,11 @@ func (m *Member) DeleteMemberDCLocationInfo(id uint64) error {
 	key := m.GetDCLocationPath(id)
 	res, err := m.leadership.LeaderTxn().Then(clientv3.OpDelete(key)).Commit()
 	if err != nil {
-		return errors.WithStack(err)
+		return errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
 	}
 	if !res.Succeeded {
-		return errors.New("delete dc-location info failed, maybe not pd leader")
+		log.Error("delete dc-location info failed, maybe not pd leader")
+		return errs.ErrEtcdTxnConflict.FastGenByArgs()
 	}
 	return nil
 }

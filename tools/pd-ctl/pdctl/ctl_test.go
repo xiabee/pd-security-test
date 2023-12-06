@@ -8,12 +8,15 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package pdctl
 
 import (
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -66,5 +69,31 @@ func TestGenCompleter(t *testing.T) {
 			t.Errorf("%s not in prefix array", cmd)
 		}
 	}
+}
 
+func TestReadStdin(t *testing.T) {
+	s := []struct {
+		in      io.Reader
+		targets []string
+	}{{
+		in:      strings.NewReader(""),
+		targets: []string{},
+	}, {
+		in:      strings.NewReader("a b c"),
+		targets: []string{"a", "b", "c"},
+	}}
+	for _, v := range s {
+		in, err := ReadStdin(v.in)
+		if err != nil {
+			t.Errorf("ReadStdin err:%v", err)
+		}
+		if len(v.targets) != len(in) {
+			t.Errorf("ReadStdin =  %v, want %s, nil", in, v.targets)
+		}
+		for i, target := range v.targets {
+			if target != in[i] {
+				t.Errorf("ReadStdin = %v, want %s, nil", in, v.targets)
+			}
+		}
+	}
 }

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -170,73 +171,6 @@ func (s *testStepSuite) TestAddLearner(c *C) {
 		},
 	}
 	s.check(c, step, "add learner peer 9 on store 9", cases)
-}
-
-func (s *testStepSuite) TestDemoteFollower(c *C) {
-	df := DemoteFollower{ToStore: 2, PeerID: 2}
-	cases := []testCase{
-		{ // before step
-			[]*metapb.Peer{
-				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
-				{Id: 2, StoreId: 2, Role: metapb.PeerRole_Voter},
-				{Id: 3, StoreId: 3, Role: metapb.PeerRole_Voter},
-			},
-			0,
-			false,
-			IsNil,
-		},
-		{ // after step
-			[]*metapb.Peer{
-				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
-				{Id: 2, StoreId: 2, Role: metapb.PeerRole_Learner},
-				{Id: 3, StoreId: 3, Role: metapb.PeerRole_Voter},
-			},
-			1,
-			true,
-			IsNil,
-		},
-		{ // miss peer id
-			[]*metapb.Peer{
-				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
-				{Id: 4, StoreId: 2, Role: metapb.PeerRole_Voter},
-				{Id: 3, StoreId: 3, Role: metapb.PeerRole_Voter},
-			},
-			0,
-			false,
-			NotNil,
-		},
-		{ // miss store id
-			[]*metapb.Peer{
-				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
-				{Id: 2, StoreId: 4, Role: metapb.PeerRole_Voter},
-				{Id: 3, StoreId: 3, Role: metapb.PeerRole_Voter},
-			},
-			0,
-			false,
-			NotNil,
-		},
-		{ // miss peer id
-			[]*metapb.Peer{
-				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
-				{Id: 4, StoreId: 2, Role: metapb.PeerRole_Learner},
-				{Id: 3, StoreId: 3, Role: metapb.PeerRole_Voter},
-			},
-			0,
-			false,
-			NotNil,
-		},
-		{ // demote leader
-			[]*metapb.Peer{
-				{Id: 2, StoreId: 2, Role: metapb.PeerRole_Voter},
-				{Id: 1, StoreId: 1, Role: metapb.PeerRole_Voter},
-				{Id: 3, StoreId: 3, Role: metapb.PeerRole_Voter},
-			},
-			0,
-			false,
-			NotNil,
-		},
-	}
-	s.check(c, df, "demote follower peer 2 on store 2 to learner", cases)
 }
 
 func (s *testStepSuite) TestChangePeerV2Enter(c *C) {

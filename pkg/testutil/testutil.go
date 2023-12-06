@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -30,7 +31,7 @@ const (
 
 // CheckFunc is a condition checker that passed to WaitUntil. Its implementation
 // may call c.Fatal() to abort the test, or c.Log() to add more information.
-type CheckFunc func(c *check.C) bool
+type CheckFunc func() bool
 
 // WaitOp represents available options when execute WaitUntil
 type WaitOp struct {
@@ -62,7 +63,7 @@ func WaitUntil(c *check.C, f CheckFunc, opts ...WaitOption) {
 		opt(option)
 	}
 	for i := 0; i < option.retryTimes; i++ {
-		if f(c) {
+		if f() {
 			return
 		}
 		time.Sleep(option.sleepInterval)

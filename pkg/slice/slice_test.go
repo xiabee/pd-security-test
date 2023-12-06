@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -48,4 +49,18 @@ func (s *testSliceSuite) Test(c *C) {
 		c.Assert(slice.NoneOf(t.a, even), Equals, t.noneOf)
 		c.Assert(slice.AllOf(t.a, even), Equals, t.allOf)
 	}
+}
+
+func (s *testSliceSuite) TestSliceContains(c *C) {
+	ss := []string{"a", "b", "c"}
+	c.Assert(slice.Contains(ss, "a"), IsTrue)
+	c.Assert(slice.Contains(ss, "d"), IsFalse)
+
+	us := []uint64{1, 2, 3}
+	c.Assert(slice.Contains(us, uint64(1)), IsTrue)
+	c.Assert(slice.Contains(us, uint64(4)), IsFalse)
+
+	is := []int64{1, 2, 3}
+	c.Assert(slice.Contains(is, int64(1)), IsTrue)
+	c.Assert(slice.Contains(is, int64(4)), IsFalse)
 }

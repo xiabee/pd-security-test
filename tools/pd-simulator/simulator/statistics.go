@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -16,11 +17,12 @@ package simulator
 import (
 	"fmt"
 	"math"
-	"sync"
+
+	"github.com/tikv/pd/pkg/syncutil"
 )
 
 type taskStatistics struct {
-	sync.RWMutex
+	syncutil.RWMutex
 	addPeer        map[uint64]int
 	removePeer     map[uint64]int
 	addLearner     map[uint64]int
@@ -109,7 +111,7 @@ func (t *taskStatistics) incTransferLeader(fromPeerID, toPeerID uint64) {
 }
 
 type snapshotStatistics struct {
-	sync.RWMutex
+	syncutil.RWMutex
 	receive map[uint64]int
 	send    map[uint64]int
 }

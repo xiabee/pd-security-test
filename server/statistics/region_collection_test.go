@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -21,8 +22,9 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/kv"
 	"github.com/tikv/pd/server/schedule/placement"
+	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/storage/endpoint"
 )
 
 func TestStatistics(t *testing.T) {
@@ -32,14 +34,14 @@ func TestStatistics(t *testing.T) {
 var _ = Suite(&testRegionStatisticsSuite{})
 
 type testRegionStatisticsSuite struct {
-	store   *core.Storage
+	store   endpoint.RuleStorage
 	manager *placement.RuleManager
 }
 
 func (t *testRegionStatisticsSuite) SetUpTest(c *C) {
-	t.store = core.NewStorage(kv.NewMemoryKV())
+	t.store = storage.NewStorageWithMemoryBackend()
 	var err error
-	t.manager = placement.NewRuleManager(t.store, nil)
+	t.manager = placement.NewRuleManager(t.store, nil, nil)
 	err = t.manager.Initialize(3, []string{"zone", "rack", "host"})
 	c.Assert(err, IsNil)
 }
@@ -78,15 +80,14 @@ func (t *testRegionStatisticsSuite) TestRegionStatistics(c *C) {
 	r2 := &metapb.Region{Id: 2, Peers: peers[0:2], StartKey: []byte("cc"), EndKey: []byte("dd")}
 	region1 := core.NewRegionInfo(r1, peers[0])
 	region2 := core.NewRegionInfo(r2, peers[0])
-	regionStats := NewRegionStatistics(opt, t.manager)
+	regionStats := NewRegionStatistics(opt, t.manager, nil)
 	regionStats.Observe(region1, stores)
-	c.Assert(len(regionStats.stats[ExtraPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[LearnerPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[EmptyRegion]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[ExtraPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[LearnerPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[EmptyRegion]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[OfflinePeer]), Equals, 1)
+	c.Assert(regionStats.stats[ExtraPeer], HasLen, 1)
+	c.Assert(regionStats.stats[LearnerPeer], HasLen, 1)
+	c.Assert(regionStats.stats[EmptyRegion], HasLen, 1)
+	c.Assert(regionStats.stats[UndersizedRegion], HasLen, 1)
+	c.Assert(regionStats.offlineStats[ExtraPeer], HasLen, 1)
+	c.Assert(regionStats.offlineStats[LearnerPeer], HasLen, 1)
 
 	region1 = region1.Clone(
 		core.WithDownPeers(downPeers),
@@ -94,52 +95,55 @@ func (t *testRegionStatisticsSuite) TestRegionStatistics(c *C) {
 		core.SetApproximateSize(144),
 	)
 	regionStats.Observe(region1, stores)
-	c.Assert(len(regionStats.stats[ExtraPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[MissPeer]), Equals, 0)
-	c.Assert(len(regionStats.stats[DownPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[PendingPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[LearnerPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[EmptyRegion]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[ExtraPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[MissPeer]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[DownPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[PendingPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[LearnerPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[EmptyRegion]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[OfflinePeer]), Equals, 1)
+	c.Assert(regionStats.stats[ExtraPeer], HasLen, 1)
+	c.Assert(regionStats.stats[MissPeer], HasLen, 0)
+	c.Assert(regionStats.stats[DownPeer], HasLen, 1)
+	c.Assert(regionStats.stats[PendingPeer], HasLen, 1)
+	c.Assert(regionStats.stats[LearnerPeer], HasLen, 1)
+	c.Assert(regionStats.stats[EmptyRegion], HasLen, 0)
+	c.Assert(regionStats.stats[OversizedRegion], HasLen, 1)
+	c.Assert(regionStats.stats[UndersizedRegion], HasLen, 0)
+	c.Assert(regionStats.offlineStats[ExtraPeer], HasLen, 1)
+	c.Assert(regionStats.offlineStats[MissPeer], HasLen, 0)
+	c.Assert(regionStats.offlineStats[DownPeer], HasLen, 1)
+	c.Assert(regionStats.offlineStats[PendingPeer], HasLen, 1)
+	c.Assert(regionStats.offlineStats[LearnerPeer], HasLen, 1)
+	c.Assert(regionStats.offlineStats[OfflinePeer], HasLen, 1)
 
 	region2 = region2.Clone(core.WithDownPeers(downPeers[0:1]))
 	regionStats.Observe(region2, stores[0:2])
-	c.Assert(len(regionStats.stats[ExtraPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[MissPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[DownPeer]), Equals, 2)
-	c.Assert(len(regionStats.stats[PendingPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[LearnerPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[ExtraPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[MissPeer]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[DownPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[PendingPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[LearnerPeer]), Equals, 1)
-	c.Assert(len(regionStats.offlineStats[OfflinePeer]), Equals, 1)
+	c.Assert(regionStats.stats[ExtraPeer], HasLen, 1)
+	c.Assert(regionStats.stats[MissPeer], HasLen, 1)
+	c.Assert(regionStats.stats[DownPeer], HasLen, 2)
+	c.Assert(regionStats.stats[PendingPeer], HasLen, 1)
+	c.Assert(regionStats.stats[LearnerPeer], HasLen, 1)
+	c.Assert(regionStats.stats[OversizedRegion], HasLen, 1)
+	c.Assert(regionStats.stats[UndersizedRegion], HasLen, 1)
+	c.Assert(regionStats.offlineStats[ExtraPeer], HasLen, 1)
+	c.Assert(regionStats.offlineStats[MissPeer], HasLen, 0)
+	c.Assert(regionStats.offlineStats[DownPeer], HasLen, 1)
+	c.Assert(regionStats.offlineStats[PendingPeer], HasLen, 1)
+	c.Assert(regionStats.offlineStats[LearnerPeer], HasLen, 1)
+	c.Assert(regionStats.offlineStats[OfflinePeer], HasLen, 1)
 
 	region1 = region1.Clone(core.WithRemoveStorePeer(7))
 	regionStats.Observe(region1, stores[0:3])
-	c.Assert(len(regionStats.stats[ExtraPeer]), Equals, 0)
-	c.Assert(len(regionStats.stats[MissPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[DownPeer]), Equals, 2)
-	c.Assert(len(regionStats.stats[PendingPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[LearnerPeer]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[ExtraPeer]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[MissPeer]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[DownPeer]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[PendingPeer]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[LearnerPeer]), Equals, 0)
-	c.Assert(len(regionStats.offlineStats[OfflinePeer]), Equals, 0)
+	c.Assert(regionStats.stats[ExtraPeer], HasLen, 0)
+	c.Assert(regionStats.stats[MissPeer], HasLen, 1)
+	c.Assert(regionStats.stats[DownPeer], HasLen, 2)
+	c.Assert(regionStats.stats[PendingPeer], HasLen, 1)
+	c.Assert(regionStats.stats[LearnerPeer], HasLen, 0)
+	c.Assert(regionStats.offlineStats[ExtraPeer], HasLen, 0)
+	c.Assert(regionStats.offlineStats[MissPeer], HasLen, 0)
+	c.Assert(regionStats.offlineStats[DownPeer], HasLen, 0)
+	c.Assert(regionStats.offlineStats[PendingPeer], HasLen, 0)
+	c.Assert(regionStats.offlineStats[LearnerPeer], HasLen, 0)
+	c.Assert(regionStats.offlineStats[OfflinePeer], HasLen, 0)
 
 	store3 = stores[3].Clone(core.UpStore())
 	stores[3] = store3
 	regionStats.Observe(region1, stores)
-	c.Assert(len(regionStats.stats[OfflinePeer]), Equals, 0)
+	c.Assert(regionStats.stats[OfflinePeer], HasLen, 0)
 }
 
 func (t *testRegionStatisticsSuite) TestRegionStatisticsWithPlacementRule(c *C) {
@@ -169,17 +173,17 @@ func (t *testRegionStatisticsSuite) TestRegionStatisticsWithPlacementRule(c *C) 
 	region2 := core.NewRegionInfo(r2, peers[0])
 	region3 := core.NewRegionInfo(r3, peers[0])
 	region4 := core.NewRegionInfo(r4, peers[0])
-	regionStats := NewRegionStatistics(opt, t.manager)
+	regionStats := NewRegionStatistics(opt, t.manager, nil)
 	// r2 didn't match the rules
 	regionStats.Observe(region2, stores)
-	c.Assert(len(regionStats.stats[MissPeer]), Equals, 1)
+	c.Assert(regionStats.stats[MissPeer], HasLen, 1)
 	regionStats.Observe(region3, stores)
 	// r3 didn't match the rules
-	c.Assert(len(regionStats.stats[ExtraPeer]), Equals, 1)
+	c.Assert(regionStats.stats[ExtraPeer], HasLen, 1)
 	regionStats.Observe(region4, stores)
 	// r4 match the rules
-	c.Assert(len(regionStats.stats[MissPeer]), Equals, 1)
-	c.Assert(len(regionStats.stats[ExtraPeer]), Equals, 1)
+	c.Assert(regionStats.stats[MissPeer], HasLen, 1)
+	c.Assert(regionStats.stats[ExtraPeer], HasLen, 1)
 }
 
 func (t *testRegionStatisticsSuite) TestRegionLabelIsolationLevel(c *C) {
@@ -250,7 +254,7 @@ func (t *testRegionStatisticsSuite) TestRegionLabelIsolationLevel(c *C) {
 			stores = append(stores, s)
 		}
 		region := core.NewRegionInfo(&metapb.Region{Id: uint64(regionID)}, nil)
-		label := getRegionLabelIsolation(stores, locationLabels)
+		label := GetRegionLabelIsolation(stores, locationLabels)
 		labelLevelStats.Observe(region, stores, locationLabels)
 		c.Assert(label, Equals, res)
 		regionID++
@@ -263,12 +267,12 @@ func (t *testRegionStatisticsSuite) TestRegionLabelIsolationLevel(c *C) {
 		c.Assert(labelLevelStats.labelCounter[i], Equals, res)
 	}
 
-	label := getRegionLabelIsolation(nil, locationLabels)
+	label := GetRegionLabelIsolation(nil, locationLabels)
 	c.Assert(label, Equals, nonIsolation)
-	label = getRegionLabelIsolation(nil, nil)
+	label = GetRegionLabelIsolation(nil, nil)
 	c.Assert(label, Equals, nonIsolation)
 	store := core.NewStoreInfo(&metapb.Store{Id: 1, Address: "mock://tikv-1"}, core.SetStoreLabels([]*metapb.StoreLabel{{Key: "foo", Value: "bar"}}))
-	label = getRegionLabelIsolation([]*core.StoreInfo{store}, locationLabels)
+	label = GetRegionLabelIsolation([]*core.StoreInfo{store}, locationLabels)
 	c.Assert(label, Equals, "zone")
 
 	regionID = 1

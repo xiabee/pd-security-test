@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -83,7 +84,7 @@ type WriteFlowOnSpot struct {
 func (e *WriteFlowOnSpot) Run(raft *RaftEngine, tickCount int64) bool {
 	res := e.descriptor.Step(tickCount)
 	for key, size := range res {
-		region := raft.SearchRegion([]byte(key))
+		region := raft.GetRegionByKey([]byte(key))
 		simutil.Logger.Debug("search the region", zap.Reflect("region", region.GetMeta()))
 		if region == nil {
 			simutil.Logger.Error("region not found for key", zap.String("key", key))

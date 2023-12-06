@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -89,7 +90,7 @@ func (s *regionTestSuite) TestRegion(c *C) {
 
 	downPeer := &metapb.Peer{Id: 8, StoreId: 3}
 	r1 := pdctl.MustPutRegion(c, cluster, 1, 1, []byte("a"), []byte("b"),
-		core.SetWrittenBytes(1000), core.SetReadBytes(1000), core.SetRegionConfVer(1), core.SetRegionVersion(1), core.SetApproximateSize(10),
+		core.SetWrittenBytes(1000), core.SetReadBytes(1000), core.SetRegionConfVer(1), core.SetRegionVersion(1), core.SetApproximateSize(1),
 		core.SetPeers([]*metapb.Peer{
 			{Id: 1, StoreId: 1},
 			{Id: 5, StoreId: 2},
@@ -97,7 +98,7 @@ func (s *regionTestSuite) TestRegion(c *C) {
 			{Id: 7, StoreId: 4},
 		}))
 	r2 := pdctl.MustPutRegion(c, cluster, 2, 1, []byte("b"), []byte("c"),
-		core.SetWrittenBytes(2000), core.SetReadBytes(0), core.SetRegionConfVer(2), core.SetRegionVersion(3), core.SetApproximateSize(20))
+		core.SetWrittenBytes(2000), core.SetReadBytes(0), core.SetRegionConfVer(2), core.SetRegionVersion(3), core.SetApproximateSize(144))
 	r3 := pdctl.MustPutRegion(c, cluster, 3, 1, []byte("c"), []byte("d"),
 		core.SetWrittenBytes(500), core.SetReadBytes(800), core.SetRegionConfVer(3), core.SetRegionVersion(2), core.SetApproximateSize(30),
 		core.WithDownPeers([]*pdpb.PeerStats{{Peer: downPeer, DownSeconds: 3600}}),
@@ -143,10 +144,26 @@ func (s *regionTestSuite) TestRegion(c *C) {
 		{[]string{"region", "check", "down-peer"}, []*core.RegionInfo{r3}},
 		// region check learner-peer command
 		{[]string{"region", "check", "learner-peer"}, []*core.RegionInfo{r3}},
-		// region startkey --format=raw <key> command
-		{[]string{"region", "startkey", "--format=raw", "b", "2"}, []*core.RegionInfo{r2, r3}},
-		// region startkey --format=hex <key> command
-		{[]string{"region", "startkey", "--format=hex", "63", "2"}, []*core.RegionInfo{r3, r4}},
+		// region check empty-region command
+		{[]string{"region", "check", "empty-region"}, []*core.RegionInfo{r1}},
+		// region check undersized-region command
+		{[]string{"region", "check", "undersized-region"}, []*core.RegionInfo{r1, r4}},
+		// region check oversized-region command
+		{[]string{"region", "check", "oversized-region"}, []*core.RegionInfo{r2}},
+		// region keys --format=raw <start_key> <end_key> <limit> command
+		{[]string{"region", "keys", "--format=raw", "b"}, []*core.RegionInfo{r2, r3, r4}},
+		// region keys --format=raw <start_key> <end_key> <limit> command
+		{[]string{"region", "keys", "--format=raw", "b", "", "2"}, []*core.RegionInfo{r2, r3}},
+		// region keys --format=hex <start_key> <end_key> <limit> command
+		{[]string{"region", "keys", "--format=hex", "63", "", "2"}, []*core.RegionInfo{r3, r4}},
+		// region keys --format=hex <start_key> <end_key> <limit> command
+		{[]string{"region", "keys", "--format=hex", "", "63", "2"}, []*core.RegionInfo{r1, r2}},
+		// region keys --format=raw <start_key> <end_key> <limit> command
+		{[]string{"region", "keys", "--format=raw", "b", "d"}, []*core.RegionInfo{r2, r3}},
+		// region keys --format=hex <start_key> <end_key> <limit> command
+		{[]string{"region", "keys", "--format=hex", "63", "65"}, []*core.RegionInfo{r3, r4}},
+		// region keys --format=hex <start_key> <end_key> <limit> command
+		{[]string{"region", "keys", "--format=hex", "63", "65", "1"}, []*core.RegionInfo{r3}},
 	}
 
 	for _, testCase := range testRegionsCases {
@@ -180,4 +197,16 @@ func (s *regionTestSuite) TestRegion(c *C) {
 		c.Assert(json.Unmarshal(output, region), IsNil)
 		pdctl.CheckRegionInfo(c, region, testCase.expect)
 	}
+
+	// Test region range-holes.
+	r5 := pdctl.MustPutRegion(c, cluster, 5, 1, []byte("x"), []byte("z"))
+	output, e := pdctl.ExecuteCommand(cmd, []string{"-u", pdAddr, "region", "range-holes"}...)
+	c.Assert(e, IsNil)
+	rangeHoles := new([][]string)
+	c.Assert(json.Unmarshal(output, rangeHoles), IsNil)
+	c.Assert(*rangeHoles, DeepEquals, [][]string{
+		{"", core.HexRegionKeyStr(r1.GetStartKey())},
+		{core.HexRegionKeyStr(r4.GetEndKey()), core.HexRegionKeyStr(r5.GetStartKey())},
+		{core.HexRegionKeyStr(r5.GetEndKey()), ""},
+	})
 }

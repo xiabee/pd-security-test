@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -24,6 +25,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/spf13/cobra"
+	"github.com/tikv/pd/pkg/assertutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
 	"github.com/tikv/pd/server/core"
@@ -41,20 +43,28 @@ func ExecuteCommand(root *cobra.Command, args ...string) (output []byte, err err
 }
 
 // CheckStoresInfo is used to check the test results.
-func CheckStoresInfo(c *check.C, stores []*api.StoreInfo, want []*metapb.Store) {
+// CheckStoresInfo will not check Store.State because this feild has been omitted pdctl output
+func CheckStoresInfo(c *check.C, stores []*api.StoreInfo, want []*api.StoreInfo) {
 	c.Assert(len(stores), check.Equals, len(want))
-	mapWant := make(map[uint64]*metapb.Store)
+	mapWant := make(map[uint64]*api.StoreInfo)
 	for _, s := range want {
-		if _, ok := mapWant[s.Id]; !ok {
-			mapWant[s.Id] = s
+		if _, ok := mapWant[s.Store.Id]; !ok {
+			mapWant[s.Store.Id] = s
 		}
 	}
 	for _, s := range stores {
 		obtained := proto.Clone(s.Store.Store).(*metapb.Store)
-		expected := proto.Clone(mapWant[obtained.Id]).(*metapb.Store)
+		expected := proto.Clone(mapWant[obtained.Id].Store.Store).(*metapb.Store)
+		// Ignore state
+		obtained.State, expected.State = 0, 0
+		obtained.NodeState, expected.NodeState = 0, 0
 		// Ignore lastHeartbeat
 		obtained.LastHeartbeat, expected.LastHeartbeat = 0, 0
 		c.Assert(obtained, check.DeepEquals, expected)
+
+		obtainedStateName := s.Store.StateName
+		expectedStateName := mapWant[obtained.Id].Store.StateName
+		c.Assert(obtainedStateName, check.Equals, expectedStateName)
 	}
 }
 
@@ -83,9 +93,11 @@ func CheckRegionsInfo(c *check.C, output *api.RegionsInfo, expected []*core.Regi
 // MustPutStore is used for test purpose.
 func MustPutStore(c *check.C, svr *server.Server, store *metapb.Store) {
 	store.Address = fmt.Sprintf("tikv%d", store.GetId())
-	store.Version = versioninfo.MinSupportedVersion(versioninfo.Version2_0).String()
-
-	_, err := svr.PutStore(context.Background(), &pdpb.PutStoreRequest{
+	if len(store.Version) == 0 {
+		store.Version = versioninfo.MinSupportedVersion(versioninfo.Version2_0).String()
+	}
+	grpcServer := &server.GrpcServer{Server: svr}
+	_, err := grpcServer.PutStore(context.Background(), &pdpb.PutStoreRequest{
 		Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()},
 		Store:  store,
 	})
@@ -109,4 +121,12 @@ func MustPutRegion(c *check.C, cluster *tests.TestCluster, regionID, storeID uin
 	err := cluster.HandleRegionHeartbeat(r)
 	c.Assert(err, check.IsNil)
 	return r
+}
+
+func checkerWithNilAssert(c *check.C) *assertutil.Checker {
+	checker := assertutil.NewChecker(c.FailNow)
+	checker.IsNil = func(obtained interface{}) {
+		c.Assert(obtained, check.IsNil)
+	}
+	return checker
 }

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -30,10 +31,10 @@ const (
 	collectMetricsTaskType
 )
 
-// FlowItemTask indicates the task in flowItem queue
-type FlowItemTask interface {
+// flowItemTask indicates the task in flowItem queue
+type flowItemTask interface {
 	taskType() flowItemTaskKind
-	runTask(flow *hotPeerCache)
+	runTask(cache *hotPeerCache)
 }
 
 type checkPeerTask struct {
@@ -42,7 +43,7 @@ type checkPeerTask struct {
 }
 
 // NewCheckPeerTask creates task to update peerInfo
-func NewCheckPeerTask(peerInfo *core.PeerInfo, regionInfo *core.RegionInfo) FlowItemTask {
+func NewCheckPeerTask(peerInfo *core.PeerInfo, regionInfo *core.RegionInfo) flowItemTask {
 	return &checkPeerTask{
 		peerInfo:   peerInfo,
 		regionInfo: regionInfo,
@@ -53,10 +54,10 @@ func (t *checkPeerTask) taskType() flowItemTaskKind {
 	return checkPeerTaskType
 }
 
-func (t *checkPeerTask) runTask(flow *hotPeerCache) {
-	stat := flow.CheckPeerFlow(t.peerInfo, t.regionInfo)
+func (t *checkPeerTask) runTask(cache *hotPeerCache) {
+	stat := cache.checkPeerFlow(t.peerInfo, t.regionInfo)
 	if stat != nil {
-		update(stat, flow)
+		cache.updateStat(stat)
 	}
 }
 
@@ -65,7 +66,7 @@ type checkExpiredTask struct {
 }
 
 // NewCheckExpiredItemTask creates task to collect expired items
-func NewCheckExpiredItemTask(region *core.RegionInfo) FlowItemTask {
+func NewCheckExpiredItemTask(region *core.RegionInfo) flowItemTask {
 	return &checkExpiredTask{
 		region: region,
 	}
@@ -75,25 +76,25 @@ func (t *checkExpiredTask) taskType() flowItemTaskKind {
 	return checkExpiredTaskType
 }
 
-func (t *checkExpiredTask) runTask(flow *hotPeerCache) {
-	expiredStats := flow.CollectExpiredItems(t.region)
+func (t *checkExpiredTask) runTask(cache *hotPeerCache) {
+	expiredStats := cache.collectExpiredItems(t.region)
 	for _, stat := range expiredStats {
-		update(stat, flow)
+		cache.updateStat(stat)
 	}
 }
 
 type collectUnReportedPeerTask struct {
-	storeID   uint64
-	regionIDs map[uint64]struct{}
-	interval  uint64
+	storeID  uint64
+	regions  map[uint64]*core.RegionInfo
+	interval uint64
 }
 
 // NewCollectUnReportedPeerTask creates task to collect unreported peers
-func NewCollectUnReportedPeerTask(storeID uint64, regionIDs map[uint64]struct{}, interval uint64) FlowItemTask {
+func NewCollectUnReportedPeerTask(storeID uint64, regions map[uint64]*core.RegionInfo, interval uint64) flowItemTask {
 	return &collectUnReportedPeerTask{
-		storeID:   storeID,
-		regionIDs: regionIDs,
-		interval:  interval,
+		storeID:  storeID,
+		regions:  regions,
+		interval: interval,
 	}
 }
 
@@ -101,10 +102,10 @@ func (t *collectUnReportedPeerTask) taskType() flowItemTaskKind {
 	return collectUnReportedPeerTaskType
 }
 
-func (t *collectUnReportedPeerTask) runTask(flow *hotPeerCache) {
-	stats := flow.CheckColdPeer(t.storeID, t.regionIDs, t.interval)
+func (t *collectUnReportedPeerTask) runTask(cache *hotPeerCache) {
+	stats := cache.checkColdPeer(t.storeID, t.regions, t.interval)
 	for _, stat := range stats {
-		update(stat, flow)
+		cache.updateStat(stat)
 	}
 }
 
@@ -124,16 +125,14 @@ func (t *collectRegionStatsTask) taskType() flowItemTaskKind {
 	return collectRegionStatsTaskType
 }
 
-func (t *collectRegionStatsTask) runTask(flow *hotPeerCache) {
-	t.ret <- flow.RegionStats(t.minDegree)
+func (t *collectRegionStatsTask) runTask(cache *hotPeerCache) {
+	t.ret <- cache.RegionStats(t.minDegree)
 }
 
 // TODO: do we need a wait-return timeout?
-func (t *collectRegionStatsTask) waitRet(ctx context.Context, quit <-chan struct{}) map[uint64][]*HotPeerStat {
+func (t *collectRegionStatsTask) waitRet(ctx context.Context) map[uint64][]*HotPeerStat {
 	select {
 	case <-ctx.Done():
-		return nil
-	case <-quit:
 		return nil
 	case ret := <-t.ret:
 		return ret
@@ -158,16 +157,14 @@ func (t *isRegionHotTask) taskType() flowItemTaskKind {
 	return isRegionHotTaskType
 }
 
-func (t *isRegionHotTask) runTask(flow *hotPeerCache) {
-	t.ret <- flow.isRegionHotWithAnyPeers(t.region, t.minHotDegree)
+func (t *isRegionHotTask) runTask(cache *hotPeerCache) {
+	t.ret <- cache.isRegionHotWithAnyPeers(t.region, t.minHotDegree)
 }
 
 // TODO: do we need a wait-return timeout?
-func (t *isRegionHotTask) waitRet(ctx context.Context, quit <-chan struct{}) bool {
+func (t *isRegionHotTask) waitRet(ctx context.Context) bool {
 	select {
 	case <-ctx.Done():
-		return false
-	case <-quit:
 		return false
 	case r := <-t.ret:
 		return r
@@ -188,6 +185,6 @@ func (t *collectMetricsTask) taskType() flowItemTaskKind {
 	return collectMetricsTaskType
 }
 
-func (t *collectMetricsTask) runTask(flow *hotPeerCache) {
-	flow.CollectMetrics(t.typ)
+func (t *collectMetricsTask) runTask(cache *hotPeerCache) {
+	cache.collectMetrics(t.typ)
 }

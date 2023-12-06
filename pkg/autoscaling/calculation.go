@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -20,7 +21,6 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	promClient "github.com/prometheus/client_golang/api"
 	"github.com/tikv/pd/pkg/errs"
@@ -136,7 +136,7 @@ func filterTiKVInstances(informer core.StoreSetInformer) []instance {
 	var instances []instance
 	stores := informer.GetStores()
 	for _, store := range stores {
-		if store.GetState() == metapb.StoreState_Up {
+		if store.IsUp() {
 			instances = append(instances, instance{id: store.GetID(), address: store.GetAddress()})
 		}
 	}

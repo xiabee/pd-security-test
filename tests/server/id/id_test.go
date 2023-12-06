@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -113,6 +114,7 @@ func (s *testAllocIDSuite) TestCommand(c *C) {
 		resp, err := grpcPDClient.AllocID(context.Background(), req)
 		c.Assert(err, IsNil)
 		c.Assert(resp.GetId(), Greater, last)
+		c.Assert(pdpb.ErrorType_OK, Equals, resp.GetHeader().GetError().GetType())
 		last = resp.GetId()
 	}
 }

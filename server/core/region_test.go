@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -35,6 +36,42 @@ func TestCore(t *testing.T) {
 var _ = Suite(&testRegionInfoSuite{})
 
 type testRegionInfoSuite struct{}
+
+func (s *testRegionInfoSuite) TestNeedMerge(c *C) {
+	mererSize, mergeKeys := int64(20), int64(200000)
+	testdata := []struct {
+		size   int64
+		keys   int64
+		expect bool
+	}{{
+		size:   20,
+		keys:   200000,
+		expect: true,
+	}, {
+		size:   20 - 1,
+		keys:   200000 - 1,
+		expect: true,
+	}, {
+		size:   20,
+		keys:   200000 - 1,
+		expect: true,
+	}, {
+		size:   20,
+		keys:   200000 + 1,
+		expect: false,
+	}, {
+		size:   20 + 1,
+		keys:   200000 + 1,
+		expect: false,
+	}}
+	for _, v := range testdata {
+		r := RegionInfo{
+			approximateSize: v.size,
+			approximateKeys: v.keys,
+		}
+		c.Assert(r.NeedMerge(mererSize, mergeKeys), Equals, v.expect)
+	}
+}
 
 func (s *testRegionInfoSuite) TestSortedEqual(c *C) {
 	testcases := []struct {
@@ -156,6 +193,57 @@ func (s *testRegionInfoSuite) TestSortedEqual(c *C) {
 	}
 }
 
+func (s *testRegionInfoSuite) TestInherit(c *C) {
+	// size in MB
+	// case for approximateSize
+	testcases := []struct {
+		originExists bool
+		originSize   uint64
+		size         uint64
+		expect       uint64
+	}{
+		{false, 0, 0, 1},
+		{false, 0, 2, 2},
+		{true, 0, 2, 2},
+		{true, 1, 2, 2},
+		{true, 2, 0, 2},
+	}
+	for _, t := range testcases {
+		var origin *RegionInfo
+		if t.originExists {
+			origin = NewRegionInfo(&metapb.Region{Id: 100}, nil)
+			origin.approximateSize = int64(t.originSize)
+		}
+		r := NewRegionInfo(&metapb.Region{Id: 100}, nil)
+		r.approximateSize = int64(t.size)
+		r.Inherit(origin, false)
+		c.Assert(r.approximateSize, Equals, int64(t.expect))
+	}
+
+	// bucket
+	data := []struct {
+		originBuckets *metapb.Buckets
+		buckets       *metapb.Buckets
+	}{
+		{nil, nil},
+		{nil, &metapb.Buckets{RegionId: 100, Version: 2}},
+		{&metapb.Buckets{RegionId: 100, Version: 2}, &metapb.Buckets{RegionId: 100, Version: 3}},
+		{&metapb.Buckets{RegionId: 100, Version: 2}, nil},
+	}
+	for _, d := range data {
+		origin := NewRegionInfo(&metapb.Region{Id: 100}, nil, SetBuckets(d.originBuckets))
+		r := NewRegionInfo(&metapb.Region{Id: 100}, nil)
+		r.Inherit(origin, true)
+		c.Assert(r.GetBuckets(), DeepEquals, d.originBuckets)
+		// region will not inherit bucket keys.
+		if origin.GetBuckets() != nil {
+			newRegion := NewRegionInfo(&metapb.Region{Id: 100}, nil)
+			newRegion.Inherit(origin, false)
+			c.Assert(newRegion.GetBuckets(), Not(DeepEquals), d.originBuckets)
+		}
+	}
+}
+
 func (s *testRegionInfoSuite) TestRegionRoundingFlow(c *C) {
 	testcases := []struct {
 		flow   uint64
@@ -176,6 +264,31 @@ func (s *testRegionInfoSuite) TestRegionRoundingFlow(c *C) {
 		r.readBytes = t.flow
 		r.writtenBytes = t.flow
 		c.Assert(r.GetRoundBytesRead(), Equals, t.expect)
+	}
+}
+
+func (s *testRegionInfoSuite) TestRegionWriteRate(c *C) {
+	testcases := []struct {
+		bytes           uint64
+		keys            uint64
+		interval        uint64
+		expectBytesRate float64
+		expectKeysRate  float64
+	}{
+		{0, 0, 0, 0, 0},
+		{10, 3, 0, 0, 0},
+		{0, 0, 1, 0, 0},
+		{10, 3, 1, 0, 0},
+		{0, 0, 5, 0, 0},
+		{10, 3, 5, 2, 0.6},
+		{0, 0, 500, 0, 0},
+		{10, 3, 500, 0, 0},
+	}
+	for _, t := range testcases {
+		r := NewRegionInfo(&metapb.Region{Id: 100}, nil, SetWrittenBytes(t.bytes), SetWrittenKeys(t.keys), SetReportInterval(t.interval))
+		bytesRate, keysRate := r.GetWriteRate()
+		c.Assert(bytesRate, Equals, t.expectBytesRate)
+		c.Assert(keysRate, Equals, t.expectKeysRate)
 	}
 }
 
@@ -384,7 +497,7 @@ func (*testRegionKey) TestSetRegion(c *C) {
 	regions.SetRegion(region)
 	checkRegions(c, regions)
 	c.Assert(regions.tree.length(), Equals, 97)
-	c.Assert(len(regions.GetRegions()), Equals, 97)
+	c.Assert(regions.GetRegions(), HasLen, 97)
 
 	regions.SetRegion(region)
 	peer1 = &metapb.Peer{StoreId: uint64(2), Id: uint64(101)}
@@ -401,7 +514,7 @@ func (*testRegionKey) TestSetRegion(c *C) {
 	regions.SetRegion(region)
 	checkRegions(c, regions)
 	c.Assert(regions.tree.length(), Equals, 97)
-	c.Assert(len(regions.GetRegions()), Equals, 97)
+	c.Assert(regions.GetRegions(), HasLen, 97)
 
 	// Test remove overlaps.
 	region = region.Clone(WithStartKey([]byte(fmt.Sprintf("%20d", 175))), WithNewRegionID(201))
@@ -410,25 +523,30 @@ func (*testRegionKey) TestSetRegion(c *C) {
 	regions.SetRegion(region)
 	checkRegions(c, regions)
 	c.Assert(regions.tree.length(), Equals, 96)
-	c.Assert(len(regions.GetRegions()), Equals, 96)
+	c.Assert(regions.GetRegions(), HasLen, 96)
 	c.Assert(regions.GetRegion(201), NotNil)
 	c.Assert(regions.GetRegion(21), IsNil)
 	c.Assert(regions.GetRegion(18), IsNil)
 
 	// Test update keys and size of region.
-	region = region.Clone()
-	region.approximateKeys = 20
-	region.approximateSize = 30
+	region = region.Clone(
+		SetApproximateKeys(20),
+		SetApproximateSize(30),
+		SetWrittenBytes(40),
+		SetWrittenKeys(10),
+		SetReportInterval(5))
 	regions.SetRegion(region)
 	checkRegions(c, regions)
 	c.Assert(regions.tree.length(), Equals, 96)
-	c.Assert(len(regions.GetRegions()), Equals, 96)
+	c.Assert(regions.GetRegions(), HasLen, 96)
 	c.Assert(regions.GetRegion(201), NotNil)
 	c.Assert(regions.tree.TotalSize(), Equals, int64(30))
+	bytesRate, keysRate := regions.tree.TotalWriteRate()
+	c.Assert(bytesRate, Equals, float64(8))
+	c.Assert(keysRate, Equals, float64(2))
 }
 
 func (*testRegionKey) TestShouldRemoveFromSubTree(c *C) {
-	regions := NewRegionsInfo()
 	peer1 := &metapb.Peer{StoreId: uint64(1), Id: uint64(1)}
 	peer2 := &metapb.Peer{StoreId: uint64(2), Id: uint64(2)}
 	peer3 := &metapb.Peer{StoreId: uint64(3), Id: uint64(3)}
@@ -446,25 +564,25 @@ func (*testRegionKey) TestShouldRemoveFromSubTree(c *C) {
 		StartKey: []byte(fmt.Sprintf("%20d", 10)),
 		EndKey:   []byte(fmt.Sprintf("%20d", 20)),
 	}, peer1)
-	c.Assert(regions.shouldRemoveFromSubTree(region, origin), Equals, false)
+	c.Assert(region.peersEqualTo(origin), IsTrue)
 
 	region.leader = peer2
-	c.Assert(regions.shouldRemoveFromSubTree(region, origin), Equals, true)
+	c.Assert(region.peersEqualTo(origin), IsFalse)
 
 	region.leader = peer1
 	region.pendingPeers = append(region.pendingPeers, peer4)
-	c.Assert(regions.shouldRemoveFromSubTree(region, origin), Equals, true)
+	c.Assert(region.peersEqualTo(origin), IsFalse)
 
 	region.pendingPeers = nil
 	region.learners = append(region.learners, peer2)
-	c.Assert(regions.shouldRemoveFromSubTree(region, origin), Equals, true)
+	c.Assert(region.peersEqualTo(origin), IsFalse)
 
 	origin.learners = append(origin.learners, peer2, peer3)
 	region.learners = append(region.learners, peer4)
-	c.Assert(regions.shouldRemoveFromSubTree(region, origin), Equals, false)
+	c.Assert(region.peersEqualTo(origin), IsTrue)
 
 	region.voters[2].StoreId = 4
-	c.Assert(regions.shouldRemoveFromSubTree(region, origin), Equals, true)
+	c.Assert(region.peersEqualTo(origin), IsFalse)
 }
 
 func checkRegions(c *C, regions *RegionsInfo) {
@@ -511,6 +629,18 @@ func checkRegions(c *C, regions *RegionsInfo) {
 	}
 	for key, value := range regions.pendingPeers {
 		c.Assert(value.length(), Equals, int(pendingPeerMap[key]))
+	}
+}
+
+func BenchmarkUpdateBuckets(b *testing.B) {
+	region := NewTestRegionInfo([]byte{}, []byte{})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		buckets := &metapb.Buckets{RegionId: 0, Version: uint64(i)}
+		region.UpdateBuckets(buckets, region.GetBuckets())
+	}
+	if region.GetBuckets().GetVersion() != uint64(b.N-1) {
+		b.Fatal("update buckets failed")
 	}
 }
 

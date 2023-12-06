@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -28,6 +29,7 @@ import (
 const zeroDuration = time.Duration(0)
 
 // MetricConfig is the metric configuration.
+// NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
 type MetricConfig struct {
 	PushJob      string            `toml:"job" json:"job"`
 	PushAddress  string            `toml:"address" json:"address"`

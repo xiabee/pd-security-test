@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -15,13 +16,13 @@ package id
 
 import (
 	"path"
-	"sync"
 
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/syncutil"
 	"github.com/tikv/pd/pkg/typeutil"
-	"github.com/tikv/pd/server/kv"
+	"github.com/tikv/pd/server/storage/kv"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
@@ -40,7 +41,7 @@ const allocStep = uint64(1000)
 
 // allocatorImpl is used to allocate ID.
 type allocatorImpl struct {
-	mu   sync.Mutex
+	mu   syncutil.Mutex
 	base uint64
 	end  uint64
 
@@ -119,7 +120,7 @@ func (alloc *allocatorImpl) rebaseLocked() error {
 	}
 
 	log.Info("idAllocator allocates a new id", zap.Uint64("alloc-id", end))
-	idGauge.WithLabelValues("idalloc").Set(float64(end))
+	idallocGauge.Set(float64(end))
 	alloc.end = end
 	alloc.base = end - allocStep
 	return nil

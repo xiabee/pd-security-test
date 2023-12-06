@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -19,6 +20,7 @@ import (
 
 	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule/operator"
@@ -35,7 +37,7 @@ func (s *testTrendSuite) TestTrend(c *C) {
 
 	mustBootstrapCluster(c, svr)
 	for i := 1; i <= 3; i++ {
-		mustPutStore(c, svr, uint64(i), metapb.StoreState_Up, nil)
+		mustPutStore(c, svr, uint64(i), metapb.StoreState_Up, metapb.NodeState_Serving, nil)
 	}
 
 	// Create 3 regions, all peers on store1 and store2, and the leaders are all on store1.
@@ -74,13 +76,13 @@ func (s *testTrendSuite) TestTrend(c *C) {
 	mustRegionHeartbeat(c, svr, region6)
 
 	var trend Trend
-	err = readJSON(testDialClient, fmt.Sprintf("%s%s/api/v1/trend", svr.GetAddr(), apiPrefix), &trend)
+	err = tu.ReadGetJSON(c, testDialClient, fmt.Sprintf("%s%s/api/v1/trend", svr.GetAddr(), apiPrefix), &trend)
 	c.Assert(err, IsNil)
 
 	// Check store states.
 	expectLeaderCount := map[uint64]int{1: 1, 2: 2, 3: 0}
 	expectRegionCount := map[uint64]int{1: 2, 2: 2, 3: 2}
-	c.Assert(len(trend.Stores), Equals, 3)
+	c.Assert(trend.Stores, HasLen, 3)
 	for _, store := range trend.Stores {
 		c.Assert(store.LeaderCount, Equals, expectLeaderCount[store.ID])
 		c.Assert(store.RegionCount, Equals, expectRegionCount[store.ID])
@@ -92,7 +94,7 @@ func (s *testTrendSuite) TestTrend(c *C) {
 		{From: 1, To: 3, Kind: "region"}: 1,
 		{From: 2, To: 3, Kind: "region"}: 1,
 	}
-	c.Assert(len(trend.History.Entries), Equals, 3)
+	c.Assert(trend.History.Entries, HasLen, 3)
 	for _, history := range trend.History.Entries {
 		c.Assert(history.Count, Equals, expectHistory[trendHistoryEntry{From: history.From, To: history.To, Kind: history.Kind}])
 	}

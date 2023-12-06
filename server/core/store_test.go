@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -110,9 +111,9 @@ func (s *testStoreSuite) TestRegionScore(c *C) {
 		SetStoreStats(stats),
 		SetRegionSize(1),
 	)
-	score := store.RegionScore("v1", 0.7, 0.9, 0, 0)
+	score := store.RegionScore("v1", 0.7, 0.9, 0)
 	// Region score should never be NaN, or /store API would fail.
-	c.Assert(math.IsNaN(score), Equals, false)
+	c.Assert(math.IsNaN(score), IsFalse)
 }
 
 func (s *testStoreSuite) TestLowSpaceRatio(c *C) {
@@ -120,9 +121,9 @@ func (s *testStoreSuite) TestLowSpaceRatio(c *C) {
 	store.rawStats.Capacity = initialMinSpace << 4
 	store.rawStats.Available = store.rawStats.Capacity >> 3
 
-	c.Assert(store.IsLowSpace(0.8), Equals, false)
+	c.Assert(store.IsLowSpace(0.8), IsFalse)
 	store.regionCount = 31
-	c.Assert(store.IsLowSpace(0.8), Equals, true)
+	c.Assert(store.IsLowSpace(0.8), IsTrue)
 	store.rawStats.Available = store.rawStats.Capacity >> 2
 	c.Assert(store.IsLowSpace(0.8), IsFalse)
 }
@@ -131,6 +132,7 @@ func (s *testStoreSuite) TestLowSpaceScoreV2(c *C) {
 	testdata := []struct {
 		bigger *StoreInfo
 		small  *StoreInfo
+		delta  int64
 	}{{
 		// store1 and store2 has same store available ratio and store1 less 50gb
 		bigger: NewStoreInfoWithAvailable(1, 20*gb, 100*gb, 1.4),
@@ -167,10 +169,15 @@ func (s *testStoreSuite) TestLowSpaceScoreV2(c *C) {
 		// store1's capacity is less than store2's capacity, but store2 has more available space,
 		bigger: NewStoreInfoWithAvailable(1, 2*gb, 100*gb, 3),
 		small:  NewStoreInfoWithAvailable(2, 100*gb, 10*1000*gb, 3),
+	}, {
+		// store2 has extra file size (70GB), it can balance region from store1 to store2.
+		// See https://github.com/tikv/pd/issues/5790
+		bigger: NewStoreInfoWithAvailable(1, 2*gb, 100*gb, 3),
+		small:  NewStoreInfoWithAvailable(2, 100*gb, 10*1000*gb, 3),
 	}}
 	for _, v := range testdata {
-		score1 := v.bigger.regionScoreV2(0, 0.0, 0.8)
-		score2 := v.small.regionScoreV2(0, 0.0, 0.8)
+		score1 := v.bigger.regionScoreV2(0, 0.8)
+		score2 := v.small.regionScoreV2(0, 0.8)
 		c.Assert(score1, Greater, score2)
 	}
 }

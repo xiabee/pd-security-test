@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -37,7 +38,7 @@ type testLearnerCheckerSuite struct {
 func (s *testLearnerCheckerSuite) SetUpTest(c *C) {
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.cluster = mockcluster.NewCluster(s.ctx, config.NewTestOptions())
-	s.cluster.DisableFeature(versioninfo.JointConsensus)
+	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	s.lc = NewLearnerChecker(s.cluster)
 	for id := uint64(1); id <= 10; id++ {
 		s.cluster.PutStoreWithLabels(id)

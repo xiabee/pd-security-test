@@ -54,7 +54,8 @@ package btree
 
 import (
 	"sort"
-	"sync"
+
+	"github.com/tikv/pd/pkg/syncutil"
 )
 
 // Item represents a single object in the tree.
@@ -82,7 +83,7 @@ var (
 // FreeList.
 // Two Btrees using the same freelist are safe for concurrent write access.
 type FreeList struct {
-	mu       sync.Mutex
+	mu       syncutil.Mutex
 	freelist []*node
 }
 
@@ -330,7 +331,7 @@ type node struct {
 }
 
 func (n *node) length() int {
-	if len(n.indices) <= 0 {
+	if len(n.indices) == 0 {
 		return len(n.items)
 	}
 	return n.indices[len(n.indices)-1]
@@ -705,7 +706,7 @@ func (n *node) iterate(dir direction, start, stop Item, includeStart bool, hit b
 		if start != nil {
 			index, found = n.items.find(start)
 			if !found {
-				index = index - 1
+				index--
 			}
 		} else {
 			index = len(n.items) - 1

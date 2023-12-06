@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -26,7 +27,6 @@ import (
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
 	"github.com/tikv/pd/server/versioninfo"
 )
 
@@ -55,7 +55,7 @@ func (s *testReplicaCheckerSuite) TearDownTest(c *C) {
 func (s *testReplicaCheckerSuite) SetUpTest(c *C) {
 	cfg := config.NewTestOptions()
 	s.cluster = mockcluster.NewCluster(s.ctx, cfg)
-	s.cluster.DisableFeature(versioninfo.JointConsensus)
+	s.cluster.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	s.rc = NewReplicaChecker(s.cluster, cache.NewDefaultCache(10))
 	stats := &pdpb.StoreStats{
 		Capacity:  100,
@@ -64,8 +64,9 @@ func (s *testReplicaCheckerSuite) SetUpTest(c *C) {
 	stores := []*core.StoreInfo{
 		core.NewStoreInfo(
 			&metapb.Store{
-				Id:    1,
-				State: metapb.StoreState_Offline,
+				Id:        1,
+				State:     metapb.StoreState_Offline,
+				NodeState: metapb.NodeState_Removing,
 			},
 			core.SetStoreStats(stats),
 			core.SetLastHeartbeatTS(time.Now()),
@@ -118,7 +119,7 @@ func (s *testReplicaCheckerSuite) TestReplacePendingPeer(c *C) {
 
 func (s *testReplicaCheckerSuite) TestReplaceOfflinePeer(c *C) {
 	s.cluster.SetLabelPropertyConfig(config.LabelPropertyConfig{
-		opt.RejectLeader: {{Key: "noleader", Value: "true"}},
+		config.RejectLeader: {{Key: "noleader", Value: "true"}},
 	})
 	peers := []*metapb.Peer{
 		{
@@ -201,7 +202,7 @@ func (s *testReplicaCheckerSuite) downPeerAndCheck(c *C, aliveRole metapb.PeerRo
 		DownSeconds: 24 * 60 * 60,
 	}
 	r = r.Clone(core.WithDownPeers(append(r.GetDownPeers(), downPeer)))
-	c.Assert(len(r.GetDownPeers()), Equals, 1)
+	c.Assert(r.GetDownPeers(), HasLen, 1)
 	return s.rc.Check(r)
 }
 
@@ -209,7 +210,7 @@ func (s *testReplicaCheckerSuite) TestBasic(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
 	tc.SetMaxSnapshotCount(2)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 
 	// Add stores 1,2,3,4.
@@ -282,7 +283,7 @@ func (s *testReplicaCheckerSuite) TestLostStore(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
 
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.AddRegionStore(1, 1)
 	tc.AddRegionStore(2, 1)
 
@@ -300,7 +301,7 @@ func (s *testReplicaCheckerSuite) TestLostStore(c *C) {
 func (s *testReplicaCheckerSuite) TestOffline(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.SetMaxReplicas(3)
 	tc.SetLocationLabels([]string{"zone", "rack", "host"})
 
@@ -339,20 +340,20 @@ func (s *testReplicaCheckerSuite) TestOffline(c *C) {
 	// Transfer peer to store 4.
 	testutil.CheckTransferPeer(c, rc.Check(region), operator.OpReplica, 3, 4)
 
-	// Store 5 has a same label score with store 4,but the region score smaller than store 4, we will choose store 5.
+	// Store 5 has a same label score with store 4, but the region score smaller than store 4, we will choose store 5.
 	tc.AddLabelsStore(5, 3, map[string]string{"zone": "z4", "rack": "r1", "host": "h1"})
 	testutil.CheckTransferPeer(c, rc.Check(region), operator.OpReplica, 3, 5)
 	// Store 5 has too many snapshots, choose store 4
-	tc.UpdateSnapshotCount(5, 10)
+	tc.UpdateSnapshotCount(5, 100)
 	testutil.CheckTransferPeer(c, rc.Check(region), operator.OpReplica, 3, 4)
-	tc.UpdatePendingPeerCount(4, 30)
+	tc.UpdatePendingPeerCount(4, 100)
 	c.Assert(rc.Check(region), IsNil)
 }
 
 func (s *testReplicaCheckerSuite) TestDistinctScore(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.SetMaxReplicas(3)
 	tc.SetLocationLabels([]string{"zone", "rack", "host"})
 
@@ -431,7 +432,7 @@ func (s *testReplicaCheckerSuite) TestDistinctScore(c *C) {
 func (s *testReplicaCheckerSuite) TestDistinctScore2(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.SetMaxReplicas(5)
 	tc.SetLocationLabels([]string{"zone", "host"})
 
@@ -462,7 +463,7 @@ func (s *testReplicaCheckerSuite) TestStorageThreshold(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
 	tc.SetLocationLabels([]string{"zone"})
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 
 	tc.AddLabelsStore(1, 1, map[string]string{"zone": "z1"})
@@ -497,7 +498,7 @@ func (s *testReplicaCheckerSuite) TestStorageThreshold(c *C) {
 func (s *testReplicaCheckerSuite) TestOpts(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 
 	tc.AddRegionStore(1, 100)
@@ -528,7 +529,7 @@ func (s *testReplicaCheckerSuite) TestOpts(c *C) {
 func (s *testReplicaCheckerSuite) TestFixDownPeer(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.SetLocationLabels([]string{"zone"})
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 
@@ -559,7 +560,7 @@ func (s *testReplicaCheckerSuite) TestFixDownPeer(c *C) {
 func (s *testReplicaCheckerSuite) TestFixOfflinePeer(c *C) {
 	opt := config.NewTestOptions()
 	tc := mockcluster.NewCluster(s.ctx, opt)
-	tc.DisableFeature(versioninfo.JointConsensus)
+	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
 	tc.SetLocationLabels([]string{"zone"})
 	rc := NewReplicaChecker(tc, cache.NewDefaultCache(10))
 

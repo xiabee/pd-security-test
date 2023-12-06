@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -23,9 +24,8 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/schedule/operator"
-	"github.com/tikv/pd/server/schedule/opt"
+	"github.com/tikv/pd/server/storage/endpoint"
 	"go.uber.org/zap"
 )
 
@@ -38,10 +38,10 @@ type Scheduler interface {
 	EncodeConfig() ([]byte, error)
 	GetMinInterval() time.Duration
 	GetNextInterval(interval time.Duration) time.Duration
-	Prepare(cluster opt.Cluster) error
-	Cleanup(cluster opt.Cluster)
-	Schedule(cluster opt.Cluster) []*operator.Operator
-	IsScheduleAllowed(cluster opt.Cluster) bool
+	Prepare(cluster Cluster) error
+	Cleanup(cluster Cluster)
+	Schedule(cluster Cluster) []*operator.Operator
+	IsScheduleAllowed(cluster Cluster) bool
 }
 
 // EncodeConfig encode the custom config for each scheduler.
@@ -87,7 +87,7 @@ func ConfigSliceDecoder(name string, args []string) ConfigDecoder {
 }
 
 // CreateSchedulerFunc is for creating scheduler.
-type CreateSchedulerFunc func(opController *OperatorController, storage *core.Storage, dec ConfigDecoder) (Scheduler, error)
+type CreateSchedulerFunc func(opController *OperatorController, storage endpoint.ConfigStorage, dec ConfigDecoder) (Scheduler, error)
 
 var schedulerMap = make(map[string]CreateSchedulerFunc)
 var schedulerArgsToDecoder = make(map[string]ConfigSliceDecoderBuilder)
@@ -112,22 +112,21 @@ func RegisterSliceDecoderBuilder(typ string, builder ConfigSliceDecoderBuilder) 
 }
 
 // CreateScheduler creates a scheduler with registered creator func.
-func CreateScheduler(typ string, opController *OperatorController, storage *core.Storage, dec ConfigDecoder) (Scheduler, error) {
+func CreateScheduler(typ string, opController *OperatorController, storage endpoint.ConfigStorage, dec ConfigDecoder) (Scheduler, error) {
 	fn, ok := schedulerMap[typ]
 	if !ok {
 		return nil, errs.ErrSchedulerCreateFuncNotRegistered.FastGenByArgs(typ)
 	}
+	return fn(opController, storage, dec)
+}
 
-	s, err := fn(opController, storage, dec)
-	if err != nil {
-		return nil, err
-	}
+// SaveSchedulerConfig saves the config of the specified scheduler.
+func SaveSchedulerConfig(storage endpoint.ConfigStorage, s Scheduler) error {
 	data, err := s.EncodeConfig()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	err = storage.SaveScheduleConfig(s.GetName(), data)
-	return s, err
+	return storage.SaveScheduleConfig(s.GetName(), data)
 }
 
 // FindSchedulerTypeByName finds the type of the specified name.

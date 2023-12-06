@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -121,7 +122,7 @@ func (n *Node) receiveRegionHeartbeat() {
 // Tick steps node status change.
 func (n *Node) Tick(wg *sync.WaitGroup) {
 	defer wg.Done()
-	if n.GetState() != metapb.StoreState_Up {
+	if n.GetNodeState() != metapb.NodeState_Preparing && n.GetNodeState() != metapb.NodeState_Serving {
 		return
 	}
 	n.stepHeartBeat()
@@ -166,7 +167,7 @@ func (n *Node) stepCompaction() {
 }
 
 func (n *Node) storeHeartBeat() {
-	if n.GetState() != metapb.StoreState_Up {
+	if n.GetNodeState() != metapb.NodeState_Preparing && n.GetNodeState() != metapb.NodeState_Serving {
 		return
 	}
 	ctx, cancel := context.WithTimeout(n.ctx, pdTimeout)
@@ -188,7 +189,7 @@ func (n *Node) compaction() {
 }
 
 func (n *Node) regionHeartBeat() {
-	if n.GetState() != metapb.StoreState_Up {
+	if n.GetNodeState() != metapb.NodeState_Preparing && n.GetNodeState() != metapb.NodeState_Serving {
 		return
 	}
 	regions := n.raftEngine.GetRegions()

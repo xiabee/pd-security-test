@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -23,12 +24,17 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/spf13/cobra"
+	"github.com/tikv/pd/server/api"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 var (
-	storesPrefix      = "pd/api/v1/stores"
-	storesLimitPrefix = "pd/api/v1/stores/limit"
-	storePrefix       = "pd/api/v1/store/%v"
+	storesPrefix       = "pd/api/v1/stores"
+	storesLimitPrefix  = "pd/api/v1/stores/limit"
+	storePrefix        = "pd/api/v1/store/%v"
+	storeUpStatePrefix = "pd/api/v1/store/%v/state?state=Up"
+	maxStoreLimit      = float64(200)
 )
 
 // NewStoreCommand return a stores subcommand of rootCmd
@@ -39,11 +45,13 @@ func NewStoreCommand() *cobra.Command {
 		Run:   showStoreCommandFunc,
 	}
 	s.AddCommand(NewDeleteStoreCommand())
+	s.AddCommand(NewCancelDeleteStoreCommand())
 	s.AddCommand(NewLabelStoreCommand())
 	s.AddCommand(NewSetStoreWeightCommand())
 	s.AddCommand(NewStoreLimitCommand())
 	s.AddCommand(NewRemoveTombStoneCommand())
 	s.AddCommand(NewStoreLimitSceneCommand())
+	s.AddCommand(NewStoreCheckCommand())
 	s.Flags().String("jq", "", "jq query")
 	s.Flags().StringSlice("state", nil, "state filter")
 	return s
@@ -59,7 +67,7 @@ func NewDeleteStoreByAddrCommand() *cobra.Command {
 	return d
 }
 
-// NewDeleteStoreCommand return a  delete subcommand of storeCmd
+// NewDeleteStoreCommand return a delete subcommand of storeCmd
 func NewDeleteStoreCommand() *cobra.Command {
 	d := &cobra.Command{
 		Use:   "delete <store_id>",
@@ -67,6 +75,27 @@ func NewDeleteStoreCommand() *cobra.Command {
 		Run:   deleteStoreCommandFunc,
 	}
 	d.AddCommand(NewDeleteStoreByAddrCommand())
+	return d
+}
+
+// NewCancelDeleteStoreByAddrCommand returns a subcommand of cancel delete
+func NewCancelDeleteStoreByAddrCommand() *cobra.Command {
+	d := &cobra.Command{
+		Use:   "addr <address>",
+		Short: "cancel delete store by its address",
+		Run:   cancelDeleteStoreCommandByAddrFunc,
+	}
+	return d
+}
+
+// NewCancelDeleteStoreCommand return a cancel delete subcommand of storeCmd
+func NewCancelDeleteStoreCommand() *cobra.Command {
+	d := &cobra.Command{
+		Use:   "cancel-delete <store_id>",
+		Short: "cancel delete the store",
+		Run:   cancelDeleteStoreCommandFunc,
+	}
+	d.AddCommand(NewCancelDeleteStoreByAddrCommand())
 	return d
 }
 
@@ -93,12 +122,22 @@ func NewSetStoreWeightCommand() *cobra.Command {
 // NewStoreLimitCommand returns a limit subcommand of storeCmd.
 func NewStoreLimitCommand() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "limit [<type>]|[<store_id>|<all> [<key> <value>]... <limit> <type>]",
+		Use:   "limit [<store_id>|<all> [<key> <value>]... <limit> <type>]",
 		Short: "show or set a store's rate limit",
 		Long:  "show or set a store's rate limit, <type> can be 'add-peer'(default) or 'remove-peer'",
 		Run:   storeLimitCommandFunc,
 	}
 	return c
+}
+
+// NewStoreCheckCommand return a check subcommand of storeCmd
+func NewStoreCheckCommand() *cobra.Command {
+	d := &cobra.Command{
+		Use:   "check [up|offline|tombstone]",
+		Short: "Check all the stores with specified status",
+		Run:   storeCheckCommandFunc,
+	}
+	return d
 }
 
 // NewStoresCommand returns a store subcommand of rootCmd
@@ -201,7 +240,7 @@ func storeLimitSceneCommandFunc(cmd *cobra.Command, args []string) {
 		if len(args) == 1 {
 			prefix += fmt.Sprintf("?type=%v", args[0])
 		}
-		resp, err = doRequest(cmd, prefix, http.MethodGet)
+		resp, err = doRequest(cmd, prefix, http.MethodGet, http.Header{})
 		if err != nil {
 			cmd.Println(err)
 			return
@@ -230,18 +269,55 @@ func storeLimitSceneCommandFunc(cmd *cobra.Command, args []string) {
 	}
 }
 
+func convertToStoreInfo(content string) string {
+	store := &api.StoreInfo{}
+	err := json.Unmarshal([]byte(content), store)
+	if err != nil {
+		return content
+	}
+	// In StoreInfo, users only need to pay attention to StateName.
+	// and State will be omitted when its value equals 0 from kvproto metapb
+	store.Store.State = 0
+	byteArr, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		return content
+	}
+	return string(byteArr)
+}
+
+func convertToStoresInfo(content string) string {
+	stores := &api.StoresInfo{}
+	err := json.Unmarshal([]byte(content), stores)
+	if err != nil {
+		return content
+	}
+	// In StoreInfo, users only need to pay attention to StateName.
+	// and both State and NodeState will be omitted when its value equals 0 from kvproto metapb
+	for _, store := range stores.Stores {
+		store.Store.State = 0
+		store.Store.NodeState = 0
+	}
+	byteArr, err := json.MarshalIndent(stores, "", "  ")
+	if err != nil {
+		return content
+	}
+	return string(byteArr)
+}
+
 func showStoreCommandFunc(cmd *cobra.Command, args []string) {
 	prefix := storesPrefix
 	if len(args) > 1 {
 		cmd.Usage()
 		return
 	}
+	cFunc := convertToStoresInfo
 	if len(args) == 1 {
 		if _, err := strconv.Atoi(args[0]); err != nil {
 			cmd.Println("store_id should be a number")
 			return
 		}
 		prefix = fmt.Sprintf(storePrefix, args[0])
+		cFunc = convertToStoreInfo
 	} else {
 		flags := cmd.Flags()
 		states, err := flags.GetStringSlice("state")
@@ -261,11 +337,12 @@ func showStoreCommandFunc(cmd *cobra.Command, args []string) {
 			prefix = fmt.Sprintf("%v?%v", storesPrefix, strings.Join(stateValues, "&"))
 		}
 	}
-	r, err := doRequest(cmd, prefix, http.MethodGet)
+	r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get store: %s\n", err)
 		return
 	}
+	r = cFunc(r)
 	if flag := cmd.Flag("jq"); flag != nil && flag.Value.String() != "" {
 		printWithJQFilter(r, flag.Value.String())
 		return
@@ -283,7 +360,7 @@ func deleteStoreCommandFunc(cmd *cobra.Command, args []string) {
 		return
 	}
 	prefix := fmt.Sprintf(storePrefix, args[0])
-	_, err := doRequest(cmd, prefix, http.MethodDelete)
+	_, err := doRequest(cmd, prefix, http.MethodDelete, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to delete store %s: %s\n", args[0], err)
 		return
@@ -292,6 +369,78 @@ func deleteStoreCommandFunc(cmd *cobra.Command, args []string) {
 }
 
 func deleteStoreCommandByAddrFunc(cmd *cobra.Command, args []string) {
+	id := getStoreID(cmd, args, false)
+	if id == -1 {
+		return
+	}
+	// delete store by its ID
+	prefix := fmt.Sprintf(storePrefix, id)
+	_, err := doRequest(cmd, prefix, http.MethodDelete, http.Header{})
+	if err != nil {
+		cmd.Printf("Failed to delete store %s: %s\n", args[0], err)
+		return
+	}
+	cmd.Println("Success!")
+}
+
+func cancelDeleteStoreCommandFunc(cmd *cobra.Command, args []string) {
+	if len(args) != 1 {
+		cmd.Usage()
+		return
+	}
+	if _, err := strconv.Atoi(args[0]); err != nil {
+		cmd.Println("store_id should be a number")
+		return
+	}
+
+	prefix := fmt.Sprintf(storePrefix, args[0])
+	r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
+	if err != nil {
+		cmd.Printf("Failed to get store: %s\n", err)
+		return
+	}
+
+	storeInfo := struct {
+		Store struct {
+			State metapb.StoreState `json:"state"`
+		} `json:"store"`
+	}{}
+	if err = json.Unmarshal([]byte(r), &storeInfo); err != nil {
+		cmd.Printf("Failed to parse store info: %s\n", err)
+		return
+	}
+
+	if storeInfo.Store.State != metapb.StoreState_Offline {
+		cmd.Printf("store %v is not offline\n", args[0])
+		return
+	}
+
+	prefix = fmt.Sprintf(storeUpStatePrefix, args[0])
+	_, err = doRequest(cmd, prefix, http.MethodPost, http.Header{})
+	if err != nil {
+		cmd.Printf("Failed to cancel delete store %s: %s\n", args[0], err)
+		return
+	}
+	cmd.Println("Success!")
+}
+
+func cancelDeleteStoreCommandByAddrFunc(cmd *cobra.Command, args []string) {
+	id := getStoreID(cmd, args, true)
+	if id == 0 {
+		return
+	}
+	// cancel delete store by its ID
+	prefix := fmt.Sprintf(storeUpStatePrefix, id)
+	_, err := doRequest(cmd, prefix, http.MethodPost, http.Header{})
+	if err != nil {
+		cmd.Printf("Failed to cancel delete store %s: %s\n", args[0], err)
+		return
+	}
+	cmd.Println("Success!")
+}
+
+func getStoreID(cmd *cobra.Command, args []string, isCancel bool) (id int) {
+	id = -1
 	if len(args) != 1 {
 		cmd.Usage()
 		return
@@ -299,7 +448,7 @@ func deleteStoreCommandByAddrFunc(cmd *cobra.Command, args []string) {
 	addr := args[0]
 
 	// fetch all the stores
-	r, err := doRequest(cmd, storesPrefix, http.MethodGet)
+	r, err := doRequest(cmd, storesPrefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get store: %s\n", err)
 		return
@@ -308,8 +457,9 @@ func deleteStoreCommandByAddrFunc(cmd *cobra.Command, args []string) {
 	storeInfo := struct {
 		Stores []struct {
 			Store struct {
-				ID      int    `json:"id"`
-				Address string `json:"address"`
+				ID      int               `json:"id"`
+				Address string            `json:"address"`
+				State   metapb.StoreState `json:"state"`
 			} `json:"store"`
 		} `json:"stores"`
 	}{}
@@ -319,9 +469,12 @@ func deleteStoreCommandByAddrFunc(cmd *cobra.Command, args []string) {
 	}
 
 	// filter by the addr
-	id := -1
 	for _, store := range storeInfo.Stores {
 		if store.Store.Address == addr {
+			if isCancel && store.Store.State != metapb.StoreState_Offline {
+				cmd.Printf("store is not offline: %s\n", addr)
+				return
+			}
 			id = store.Store.ID
 			break
 		}
@@ -329,17 +482,8 @@ func deleteStoreCommandByAddrFunc(cmd *cobra.Command, args []string) {
 
 	if id == -1 {
 		cmd.Printf("address not found: %s\n", addr)
-		return
 	}
-
-	// delete store by its ID
-	prefix := fmt.Sprintf(storePrefix, id)
-	_, err = doRequest(cmd, prefix, http.MethodDelete)
-	if err != nil {
-		cmd.Printf("Failed to delete store %s: %s\n", args[0], err)
-		return
-	}
-	cmd.Println("Success!")
+	return
 }
 
 func labelStoreCommandFunc(cmd *cobra.Command, args []string) {
@@ -394,7 +538,7 @@ func storeLimitCommandFunc(cmd *cobra.Command, args []string) {
 		if argsCount == 1 {
 			prefix += fmt.Sprintf("?type=%s", args[0])
 		}
-		r, err := doRequest(cmd, prefix, http.MethodGet)
+		r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
 		if err != nil {
 			cmd.Printf("Failed to get store limit: %s\n", err)
 			return
@@ -410,6 +554,10 @@ func storeLimitCommandFunc(cmd *cobra.Command, args []string) {
 		var prefix string
 		if args[0] == "all" {
 			prefix = storesLimitPrefix
+			if rate > maxStoreLimit {
+				cmd.Printf("rate should less than %f for all\n", maxStoreLimit)
+				return
+			}
 		} else {
 			prefix = fmt.Sprintf(path.Join(storePrefix, "limit"), args[0])
 		}
@@ -436,6 +584,10 @@ func storeLimitCommandFunc(cmd *cobra.Command, args []string) {
 				cmd.Println("rate should be a number that > 0.")
 				return
 			}
+			if rate > maxStoreLimit {
+				cmd.Printf("rate should less than %f for all\n", maxStoreLimit)
+				return
+			}
 			postInput["rate"] = rate
 			labels := make(map[string]interface{})
 			for i := 1; i < ratePos; i += 2 {
@@ -447,9 +599,32 @@ func storeLimitCommandFunc(cmd *cobra.Command, args []string) {
 	}
 }
 
+func storeCheckCommandFunc(cmd *cobra.Command, args []string) {
+	if len(args) != 1 {
+		cmd.Usage()
+		return
+	}
+
+	caser := cases.Title(language.Und)
+	state := caser.String(strings.ToLower(args[0]))
+	stateValue, ok := metapb.StoreState_value[state]
+	if !ok {
+		cmd.Println("Unknown state: " + state)
+		return
+	}
+
+	prefix := fmt.Sprintf("%s?state=%d", storesPrefix, stateValue)
+	r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
+	if err != nil {
+		cmd.Printf("Failed to get store: %s\n", err)
+		return
+	}
+	cmd.Println(r)
+}
+
 func showStoresCommandFunc(cmd *cobra.Command, args []string) {
 	prefix := storesPrefix
-	r, err := doRequest(cmd, prefix, http.MethodGet)
+	r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get store: %s\n", err)
 		return
@@ -470,7 +645,7 @@ func showAllStoresLimitCommandFunc(cmd *cobra.Command, args []string) {
 	if len(args) == 1 {
 		prefix += fmt.Sprintf("?type=%s", args[0])
 	}
-	r, err := doRequest(cmd, prefix, http.MethodGet)
+	r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get all stores' limit: %s\n", err)
 		return
@@ -480,7 +655,7 @@ func showAllStoresLimitCommandFunc(cmd *cobra.Command, args []string) {
 
 func removeTombStoneCommandFunc(cmd *cobra.Command, args []string) {
 	prefix := path.Join(storesPrefix, "remove-tombstone")
-	_, err := doRequest(cmd, prefix, http.MethodDelete)
+	_, err := doRequest(cmd, prefix, http.MethodDelete, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to remove tombstone store %s \n", err)
 		return
