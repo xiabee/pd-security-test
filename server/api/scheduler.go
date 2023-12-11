@@ -18,13 +18,14 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
-	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/schedule/schedulers"
+	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/schedulers"
 	"github.com/unrolled/render"
 )
 
@@ -44,6 +45,12 @@ func newSchedulerHandler(svr *server.Server, r *render.Render) *schedulerHandler
 	}
 }
 
+type schedulerPausedPeriod struct {
+	Name     string    `json:"name"`
+	PausedAt time.Time `json:"paused_at"`
+	ResumeAt time.Time `json:"resume_at"`
+}
+
 // @Tags     scheduler
 // @Summary  List all created schedulers by status.
 // @Produce  json
@@ -58,9 +65,11 @@ func (h *schedulerHandler) GetSchedulers(w http.ResponseWriter, r *http.Request)
 	}
 
 	status := r.URL.Query().Get("status")
+	_, tsFlag := r.URL.Query()["timestamp"]
 	switch status {
 	case "paused":
 		var pausedSchedulers []string
+		pausedPeriods := []schedulerPausedPeriod{}
 		for _, scheduler := range schedulers {
 			paused, err := h.Handler.IsSchedulerPaused(scheduler)
 			if err != nil {
@@ -69,10 +78,35 @@ func (h *schedulerHandler) GetSchedulers(w http.ResponseWriter, r *http.Request)
 			}
 
 			if paused {
-				pausedSchedulers = append(pausedSchedulers, scheduler)
+				if tsFlag {
+					s := schedulerPausedPeriod{
+						Name:     scheduler,
+						PausedAt: time.Time{},
+						ResumeAt: time.Time{},
+					}
+					pausedAt, err := h.Handler.GetPausedSchedulerDelayAt(scheduler)
+					if err != nil {
+						h.r.JSON(w, http.StatusInternalServerError, err.Error())
+						return
+					}
+					s.PausedAt = time.Unix(pausedAt, 0)
+					resumeAt, err := h.Handler.GetPausedSchedulerDelayUntil(scheduler)
+					if err != nil {
+						h.r.JSON(w, http.StatusInternalServerError, err.Error())
+						return
+					}
+					s.ResumeAt = time.Unix(resumeAt, 0)
+					pausedPeriods = append(pausedPeriods, s)
+				} else {
+					pausedSchedulers = append(pausedSchedulers, scheduler)
+				}
 			}
 		}
-		h.r.JSON(w, http.StatusOK, pausedSchedulers)
+		if tsFlag {
+			h.r.JSON(w, http.StatusOK, pausedPeriods)
+		} else {
+			h.r.JSON(w, http.StatusOK, pausedSchedulers)
+		}
 		return
 	case "disabled":
 		var disabledSchedulers []string
@@ -121,8 +155,23 @@ func (h *schedulerHandler) CreateScheduler(w http.ResponseWriter, r *http.Reques
 			h.r.JSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+	case schedulers.BalanceWitnessName:
+		if err := h.AddBalanceWitnessScheduler(); err != nil {
+			h.r.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case schedulers.TransferWitnessLeaderName:
+		if err := h.AddTransferWitnessLeaderScheduler(); err != nil {
+			h.r.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	case schedulers.HotRegionName:
 		if err := h.AddBalanceHotRegionScheduler(); err != nil {
+			h.r.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case schedulers.EvictSlowTrendName:
+		if err := h.AddEvictSlowTrendScheduler(); err != nil {
 			h.r.JSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}

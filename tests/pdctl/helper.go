@@ -20,32 +20,32 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/gogo/protobuf/proto"
-	"github.com/pingcap/check"
+	"github.com/docker/go-units"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/spf13/cobra"
-	"github.com/tikv/pd/pkg/assertutil"
+	"github.com/stretchr/testify/require"
+	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/versioninfo"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/versioninfo"
 	"github.com/tikv/pd/tests"
 )
 
 // ExecuteCommand is used for test purpose.
 func ExecuteCommand(root *cobra.Command, args ...string) (output []byte, err error) {
 	buf := new(bytes.Buffer)
-	root.SetOutput(buf)
+	root.SetOut(buf)
 	root.SetArgs(args)
 	err = root.Execute()
 	return buf.Bytes(), err
 }
 
 // CheckStoresInfo is used to check the test results.
-// CheckStoresInfo will not check Store.State because this feild has been omitted pdctl output
-func CheckStoresInfo(c *check.C, stores []*api.StoreInfo, want []*api.StoreInfo) {
-	c.Assert(len(stores), check.Equals, len(want))
+// CheckStoresInfo will not check Store.State because this field has been omitted pd-ctl output
+func CheckStoresInfo(re *require.Assertions, stores []*api.StoreInfo, want []*api.StoreInfo) {
+	re.Len(stores, len(want))
 	mapWant := make(map[uint64]*api.StoreInfo)
 	for _, s := range want {
 		if _, ok := mapWant[s.Store.Id]; !ok {
@@ -53,31 +53,31 @@ func CheckStoresInfo(c *check.C, stores []*api.StoreInfo, want []*api.StoreInfo)
 		}
 	}
 	for _, s := range stores {
-		obtained := proto.Clone(s.Store.Store).(*metapb.Store)
-		expected := proto.Clone(mapWant[obtained.Id].Store.Store).(*metapb.Store)
+		obtained := typeutil.DeepClone(s.Store.Store, core.StoreFactory)
+		expected := typeutil.DeepClone(mapWant[obtained.Id].Store.Store, core.StoreFactory)
 		// Ignore state
 		obtained.State, expected.State = 0, 0
 		obtained.NodeState, expected.NodeState = 0, 0
 		// Ignore lastHeartbeat
 		obtained.LastHeartbeat, expected.LastHeartbeat = 0, 0
-		c.Assert(obtained, check.DeepEquals, expected)
+		re.Equal(expected, obtained)
 
 		obtainedStateName := s.Store.StateName
 		expectedStateName := mapWant[obtained.Id].Store.StateName
-		c.Assert(obtainedStateName, check.Equals, expectedStateName)
+		re.Equal(expectedStateName, obtainedStateName)
 	}
 }
 
 // CheckRegionInfo is used to check the test results.
-func CheckRegionInfo(c *check.C, output *api.RegionInfo, expected *core.RegionInfo) {
-	region := api.NewRegionInfo(expected)
+func CheckRegionInfo(re *require.Assertions, output *api.RegionInfo, expected *core.RegionInfo) {
+	region := api.NewAPIRegionInfo(expected)
 	output.Adjust()
-	c.Assert(output, check.DeepEquals, region)
+	re.Equal(region, output)
 }
 
 // CheckRegionsInfo is used to check the test results.
-func CheckRegionsInfo(c *check.C, output *api.RegionsInfo, expected []*core.RegionInfo) {
-	c.Assert(output.Count, check.Equals, len(expected))
+func CheckRegionsInfo(re *require.Assertions, output *api.RegionsInfo, expected []*core.RegionInfo) {
+	re.Len(expected, output.Count)
 	got := output.Regions
 	sort.Slice(got, func(i, j int) bool {
 		return got[i].ID < got[j].ID
@@ -86,12 +86,12 @@ func CheckRegionsInfo(c *check.C, output *api.RegionsInfo, expected []*core.Regi
 		return expected[i].GetID() < expected[j].GetID()
 	})
 	for i, region := range expected {
-		CheckRegionInfo(c, &got[i], region)
+		CheckRegionInfo(re, &got[i], region)
 	}
 }
 
 // MustPutStore is used for test purpose.
-func MustPutStore(c *check.C, svr *server.Server, store *metapb.Store) {
+func MustPutStore(re *require.Assertions, svr *server.Server, store *metapb.Store) {
 	store.Address = fmt.Sprintf("tikv%d", store.GetId())
 	if len(store.Version) == 0 {
 		store.Version = versioninfo.MinSupportedVersion(versioninfo.Version2_0).String()
@@ -101,11 +101,19 @@ func MustPutStore(c *check.C, svr *server.Server, store *metapb.Store) {
 		Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()},
 		Store:  store,
 	})
-	c.Assert(err, check.IsNil)
+	re.NoError(err)
+
+	storeInfo := grpcServer.GetRaftCluster().GetStore(store.GetId())
+	newStore := storeInfo.Clone(core.SetStoreStats(&pdpb.StoreStats{
+		Capacity:  uint64(10 * units.GiB),
+		UsedSize:  uint64(9 * units.GiB),
+		Available: uint64(1 * units.GiB),
+	}))
+	grpcServer.GetRaftCluster().GetBasicCluster().PutStore(newStore)
 }
 
 // MustPutRegion is used for test purpose.
-func MustPutRegion(c *check.C, cluster *tests.TestCluster, regionID, storeID uint64, start, end []byte, opts ...core.RegionCreateOption) *core.RegionInfo {
+func MustPutRegion(re *require.Assertions, cluster *tests.TestCluster, regionID, storeID uint64, start, end []byte, opts ...core.RegionCreateOption) *core.RegionInfo {
 	leader := &metapb.Peer{
 		Id:      regionID,
 		StoreId: storeID,
@@ -119,14 +127,6 @@ func MustPutRegion(c *check.C, cluster *tests.TestCluster, regionID, storeID uin
 	}
 	r := core.NewRegionInfo(metaRegion, leader, opts...)
 	err := cluster.HandleRegionHeartbeat(r)
-	c.Assert(err, check.IsNil)
+	re.NoError(err)
 	return r
-}
-
-func checkerWithNilAssert(c *check.C) *assertutil.Checker {
-	checker := assertutil.NewChecker(c.FailNow)
-	checker.IsNil = func(obtained interface{}) {
-		c.Assert(obtained, check.IsNil)
-	}
-	return checker
 }

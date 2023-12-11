@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build with_plugin
+// +build with_plugin
+
 package api
 
 import (
@@ -19,7 +22,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/unrolled/render"

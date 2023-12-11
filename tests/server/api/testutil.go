@@ -21,7 +21,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/pingcap/check"
+	"github.com/stretchr/testify/require"
 )
 
 const schedulersPrefix = "/pd/api/v1/schedulers"
@@ -35,7 +35,7 @@ var dialClient = &http.Client{
 
 // MustAddScheduler adds a scheduler with HTTP API.
 func MustAddScheduler(
-	c *check.C, serverAddr string,
+	re *require.Assertions, serverAddr string,
 	schedulerName string, args map[string]interface{},
 ) {
 	request := map[string]interface{}{
@@ -45,15 +45,14 @@ func MustAddScheduler(
 		request[arg] = val
 	}
 	data, err := json.Marshal(request)
-	c.Assert(err, check.IsNil)
-
+	re.NoError(err)
 	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s%s", serverAddr, schedulersPrefix), bytes.NewBuffer(data))
-	c.Assert(err, check.IsNil)
+	re.NoError(err)
 	// Send request.
 	resp, err := dialClient.Do(httpReq)
-	c.Assert(err, check.IsNil)
+	re.NoError(err)
 	defer resp.Body.Close()
-	_, err = io.ReadAll(resp.Body)
-	c.Assert(err, check.IsNil)
-	c.Assert(resp.StatusCode, check.Equals, http.StatusOK)
+	data, err = io.ReadAll(resp.Body)
+	re.NoError(err)
+	re.Equal(http.StatusOK, resp.StatusCode, string(data))
 }

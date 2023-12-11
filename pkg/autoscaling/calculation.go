@@ -23,12 +23,12 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	promClient "github.com/prometheus/client_golang/api"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/pkg/schedule/filter"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule/filter"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
@@ -45,7 +45,7 @@ var (
 	// MetricsTimeDuration is used to get the metrics of a certain time period.
 	// This must be long enough to cover at least 2 scrape intervals
 	// Or you will get nothing when querying CPU usage
-	MetricsTimeDuration = 60 * time.Second
+	MetricsTimeDuration = time.Minute
 	// MaxScaleOutStep is used to indicate the maximum number of instance for scaling out operations at once.
 	MaxScaleOutStep uint64 = 1
 	// MaxScaleInStep is used to indicate the maximum number of instance for scaling in operations at once.

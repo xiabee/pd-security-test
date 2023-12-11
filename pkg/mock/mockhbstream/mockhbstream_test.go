@@ -18,41 +18,25 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gogo/protobuf/proto"
-	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/eraftpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
+	"github.com/stretchr/testify/require"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
-	"github.com/tikv/pd/pkg/testutil"
-	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/schedule/hbstream"
+	"github.com/tikv/pd/pkg/mock/mockconfig"
+	"github.com/tikv/pd/pkg/schedule/hbstream"
+	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 )
 
-func TestHeaertbeatStreams(t *testing.T) {
-	TestingT(t)
-}
-
-var _ = Suite(&testHeartbeatStreamSuite{})
-
-type testHeartbeatStreamSuite struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-}
-
-func (s *testHeartbeatStreamSuite) SetUpSuite(c *C) {
-	s.ctx, s.cancel = context.WithCancel(context.Background())
-}
-
-func (s *testHeartbeatStreamSuite) TearDownTest(c *C) {
-	s.cancel()
-}
-
-func (s *testHeartbeatStreamSuite) TestActivity(c *C) {
+func TestActivity(t *testing.T) {
+	t.Parallel()
+	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cluster := mockcluster.NewCluster(s.ctx, config.NewTestOptions())
+	cluster := mockcluster.NewCluster(ctx, mockconfig.NewTestOptions())
 	cluster.AddRegionStore(1, 1)
 	cluster.AddRegionStore(2, 0)
 	cluster.AddLeaderRegion(1, 1)
@@ -66,25 +50,28 @@ func (s *testHeartbeatStreamSuite) TestActivity(c *C) {
 
 	// Active stream is stream1.
 	hbs.BindStream(1, stream1)
-	testutil.WaitUntil(c, func() bool {
-		hbs.SendMsg(region, proto.Clone(msg).(*pdpb.RegionHeartbeatResponse))
+	testutil.Eventually(re, func() bool {
+		newMsg := typeutil.DeepClone(msg, core.RegionHeartbeatResponseFactory)
+		hbs.SendMsg(region, newMsg)
 		return stream1.Recv() != nil && stream2.Recv() == nil
 	})
 	// Rebind to stream2.
 	hbs.BindStream(1, stream2)
-	testutil.WaitUntil(c, func() bool {
-		hbs.SendMsg(region, proto.Clone(msg).(*pdpb.RegionHeartbeatResponse))
+	testutil.Eventually(re, func() bool {
+		newMsg := typeutil.DeepClone(msg, core.RegionHeartbeatResponseFactory)
+		hbs.SendMsg(region, newMsg)
 		return stream1.Recv() == nil && stream2.Recv() != nil
 	})
 	// SendErr to stream2.
 	hbs.SendErr(pdpb.ErrorType_UNKNOWN, "test error", &metapb.Peer{Id: 1, StoreId: 1})
 	res := stream2.Recv()
-	c.Assert(res, NotNil)
-	c.Assert(res.GetHeader().GetError(), NotNil)
+	re.NotNil(res)
+	re.NotNil(res.GetHeader().GetError())
 	// Switch back to 1 again.
 	hbs.BindStream(1, stream1)
-	testutil.WaitUntil(c, func() bool {
-		hbs.SendMsg(region, proto.Clone(msg).(*pdpb.RegionHeartbeatResponse))
+	testutil.Eventually(re, func() bool {
+		newMsg := typeutil.DeepClone(msg, core.RegionHeartbeatResponseFactory)
+		hbs.SendMsg(region, newMsg)
 		return stream1.Recv() != nil && stream2.Recv() == nil
 	})
 }
