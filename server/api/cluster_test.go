@@ -21,7 +21,7 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
@@ -30,7 +30,7 @@ import (
 type clusterTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 

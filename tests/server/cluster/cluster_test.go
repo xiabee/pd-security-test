@@ -30,22 +30,22 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/replication_modepb"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/core/storelimit"
 	"github.com/tikv/pd/pkg/dashboard"
-	"github.com/tikv/pd/pkg/id"
 	"github.com/tikv/pd/pkg/mock/mockid"
-	"github.com/tikv/pd/pkg/schedule/operator"
-	"github.com/tikv/pd/pkg/schedule/schedulers"
-	"github.com/tikv/pd/pkg/storage"
-	"github.com/tikv/pd/pkg/tso"
-	"github.com/tikv/pd/pkg/utils/testutil"
-	"github.com/tikv/pd/pkg/utils/tsoutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/tsoutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/core/storelimit"
+	"github.com/tikv/pd/server/id"
 	syncer "github.com/tikv/pd/server/region_syncer"
+	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedulers"
+	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/tso"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/server/api"
 	"google.golang.org/grpc/codes"
@@ -775,7 +775,7 @@ func TestSetScheduleOpt(t *testing.T) {
 	re.Empty(persistOptions.GetLabelPropertyConfig()[typ])
 
 	// PUT GET failed
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/storage/kv/etcdSaveFailed", `return(true)`))
+	re.NoError(failpoint.Enable("github.com/tikv/pd/server/storage/kv/etcdSaveFailed", `return(true)`))
 	replicationCfg.MaxReplicas = 7
 	scheduleCfg.MaxSnapshotCount = 20
 	pdServerCfg.UseRegionStorage = false
@@ -789,13 +789,13 @@ func TestSetScheduleOpt(t *testing.T) {
 	re.Empty(persistOptions.GetLabelPropertyConfig()[typ])
 
 	// DELETE failed
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/storage/kv/etcdSaveFailed"))
+	re.NoError(failpoint.Disable("github.com/tikv/pd/server/storage/kv/etcdSaveFailed"))
 	re.NoError(svr.SetReplicationConfig(*replicationCfg))
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/storage/kv/etcdSaveFailed", `return(true)`))
+	re.NoError(failpoint.Enable("github.com/tikv/pd/server/storage/kv/etcdSaveFailed", `return(true)`))
 	re.Error(svr.DeleteLabelProperty(typ, labelKey, labelValue))
 	re.Equal("testKey", persistOptions.GetLabelPropertyConfig()[typ][0].Key)
 	re.Equal("testValue", persistOptions.GetLabelPropertyConfig()[typ][0].Value)
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/storage/kv/etcdSaveFailed"))
+	re.NoError(failpoint.Disable("github.com/tikv/pd/server/storage/kv/etcdSaveFailed"))
 }
 
 func TestLoadClusterInfo(t *testing.T) {
@@ -815,13 +815,14 @@ func TestLoadClusterInfo(t *testing.T) {
 	rc := cluster.NewRaftCluster(ctx, svr.ClusterID(), syncer.NewRegionSyncer(svr), svr.GetClient(), svr.GetHTTPClient())
 
 	// Cluster is not bootstrapped.
-	rc.InitCluster(svr.GetAllocator(), svr.GetPersistOptions(), svr.GetStorage(), svr.GetBasicCluster(), svr.GetKeyspaceGroupManager())
+	rc.InitCluster(svr.GetAllocator(), svr.GetPersistOptions(), svr.GetStorage(), svr.GetBasicCluster())
 	raftCluster, err := rc.LoadClusterInfo()
 	re.NoError(err)
 	re.Nil(raftCluster)
 
 	testStorage := rc.GetStorage()
 	basicCluster := rc.GetBasicCluster()
+	opt := rc.GetOpts()
 	// Save meta, stores and regions.
 	n := 10
 	meta := &metapb.Cluster{Id: 123}
@@ -853,7 +854,7 @@ func TestLoadClusterInfo(t *testing.T) {
 	re.NoError(testStorage.Flush())
 
 	raftCluster = cluster.NewRaftCluster(ctx, svr.ClusterID(), syncer.NewRegionSyncer(svr), svr.GetClient(), svr.GetHTTPClient())
-	raftCluster.InitCluster(mockid.NewIDAllocator(), svr.GetPersistOptions(), testStorage, basicCluster, svr.GetKeyspaceGroupManager())
+	raftCluster.InitCluster(mockid.NewIDAllocator(), opt, testStorage, basicCluster)
 	raftCluster, err = raftCluster.LoadClusterInfo()
 	re.NoError(err)
 	re.NotNil(raftCluster)
@@ -1172,7 +1173,8 @@ func TestUpgradeStoreLimit(t *testing.T) {
 
 	// restart PD
 	// Here we use an empty storelimit to simulate the upgrade progress.
-	scheduleCfg := rc.GetScheduleConfig().Clone()
+	opt := rc.GetOpts()
+	scheduleCfg := opt.GetScheduleConfig().Clone()
 	scheduleCfg.StoreLimit = map[uint64]config.StoreLimitConfig{}
 	re.NoError(leaderServer.GetServer().SetScheduleConfig(*scheduleCfg))
 	err = leaderServer.Stop()
@@ -1322,7 +1324,7 @@ func TestTransferLeaderForScheduler(t *testing.T) {
 		"store_id": 2,
 	})
 	// Check scheduler updated.
-	re.Len(rc.GetSchedulers(), 6)
+	re.Len(rc.GetSchedulers(), 5)
 	checkEvictLeaderSchedulerExist(re, rc, true)
 	checkEvictLeaderStoreIDs(re, rc, []uint64{1, 2})
 
@@ -1341,7 +1343,7 @@ func TestTransferLeaderForScheduler(t *testing.T) {
 	time.Sleep(time.Second)
 	re.True(leaderServer.GetRaftCluster().IsPrepared())
 	// Check scheduler updated.
-	re.Len(rc1.GetSchedulers(), 6)
+	re.Len(rc1.GetSchedulers(), 5)
 	checkEvictLeaderSchedulerExist(re, rc, true)
 	checkEvictLeaderStoreIDs(re, rc, []uint64{1, 2})
 
@@ -1359,7 +1361,7 @@ func TestTransferLeaderForScheduler(t *testing.T) {
 	time.Sleep(time.Second)
 	re.True(leaderServer.GetRaftCluster().IsPrepared())
 	// Check scheduler updated
-	re.Len(rc.GetSchedulers(), 6)
+	re.Len(rc.GetSchedulers(), 5)
 	checkEvictLeaderSchedulerExist(re, rc, true)
 	checkEvictLeaderStoreIDs(re, rc, []uint64{1, 2})
 
@@ -1378,7 +1380,10 @@ func checkEvictLeaderSchedulerExist(re *require.Assertions, rc *cluster.RaftClus
 	}
 
 	testutil.Eventually(re, func() bool {
-		return isExistScheduler(rc, schedulers.EvictLeaderName) == exist
+		if !exist {
+			return !isExistScheduler(rc, schedulers.EvictLeaderName)
+		}
+		return isExistScheduler(rc, schedulers.EvictLeaderName)
 	})
 }
 
@@ -1432,7 +1437,7 @@ func checkMinResolvedTSFromStorage(re *require.Assertions, rc *cluster.RaftClust
 }
 
 func setMinResolvedTSPersistenceInterval(re *require.Assertions, rc *cluster.RaftCluster, svr *server.Server, interval time.Duration) {
-	cfg := rc.GetPDServerConfig().Clone()
+	cfg := rc.GetOpts().GetPDServerConfig().Clone()
 	cfg.MinResolvedTSPersistenceInterval = typeutil.NewDuration(interval)
 	err := svr.SetPDServerConfig(*cfg)
 	re.NoError(err)
@@ -1484,9 +1489,9 @@ func TestMinResolvedTS(t *testing.T) {
 	}
 
 	// default run job
-	re.NotEqual(rc.GetPDServerConfig().MinResolvedTSPersistenceInterval.Duration, 0)
+	re.NotEqual(rc.GetOpts().GetMinResolvedTSPersistenceInterval(), 0)
 	setMinResolvedTSPersistenceInterval(re, rc, svr, 0)
-	re.Equal(time.Duration(0), rc.GetPDServerConfig().MinResolvedTSPersistenceInterval.Duration)
+	re.Equal(time.Duration(0), rc.GetOpts().GetMinResolvedTSPersistenceInterval())
 
 	// case1: cluster is no initialized
 	// min resolved ts should be not available
@@ -1557,7 +1562,7 @@ func TestTransferLeaderBack(t *testing.T) {
 	leaderServer := tc.GetServer(tc.GetLeader())
 	svr := leaderServer.GetServer()
 	rc := cluster.NewRaftCluster(ctx, svr.ClusterID(), syncer.NewRegionSyncer(svr), svr.GetClient(), svr.GetHTTPClient())
-	rc.InitCluster(svr.GetAllocator(), svr.GetPersistOptions(), svr.GetStorage(), svr.GetBasicCluster(), svr.GetKeyspaceGroupManager())
+	rc.InitCluster(svr.GetAllocator(), svr.GetPersistOptions(), svr.GetStorage(), svr.GetBasicCluster())
 	storage := rc.GetStorage()
 	meta := &metapb.Cluster{Id: 123}
 	re.NoError(storage.SaveMeta(meta))

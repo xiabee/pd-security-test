@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/utils/syncutil"
+	"github.com/tikv/pd/pkg/syncutil"
+	"github.com/tikv/pd/server/core"
 	"go.uber.org/zap"
 )
 

@@ -48,30 +48,14 @@ func TestSliceContains(t *testing.T) {
 	t.Parallel()
 	re := require.New(t)
 	ss := []string{"a", "b", "c"}
-	re.True(slice.Contains(ss, "a"))
-	re.False(slice.Contains(ss, "d"))
+	re.Contains(ss, "a")
+	re.NotContains(ss, "d")
 
 	us := []uint64{1, 2, 3}
-	re.True(slice.Contains(us, uint64(1)))
-	re.False(slice.Contains(us, uint64(4)))
+	re.Contains(us, uint64(1))
+	re.NotContains(us, uint64(4))
 
 	is := []int64{1, 2, 3}
-	re.True(slice.Contains(is, int64(1)))
-	re.False(slice.Contains(is, int64(4)))
-}
-
-func TestSliceRemove(t *testing.T) {
-	t.Parallel()
-	re := require.New(t)
-	ss := []string{"a", "b", "c"}
-	ss = slice.Remove(ss, "a")
-	re.Equal([]string{"b", "c"}, ss)
-
-	us := []uint64{1, 2, 3}
-	us = slice.Remove(us, 1)
-	re.Equal([]uint64{2, 3}, us)
-
-	is := []int64{1, 2, 3}
-	is = slice.Remove(is, 1)
-	re.Equal([]int64{2, 3}, is)
+	re.Contains(is, int64(1))
+	re.NotContains(is, int64(4))
 }

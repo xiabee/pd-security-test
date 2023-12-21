@@ -21,13 +21,13 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/schedule"
-	"github.com/tikv/pd/pkg/statistics/buckets"
-	"github.com/tikv/pd/pkg/utils/logutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
-	"github.com/tikv/pd/pkg/versioninfo"
+	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/statistics/buckets"
+	"github.com/tikv/pd/server/versioninfo"
 	"go.uber.org/zap"
 )
 
@@ -43,8 +43,8 @@ func (c *RaftCluster) HandleRegionHeartbeat(region *core.RegionInfo) error {
 
 // HandleAskSplit handles the split request.
 func (c *RaftCluster) HandleAskSplit(request *pdpb.AskSplitRequest) (*pdpb.AskSplitResponse, error) {
-	if c.GetUnsafeRecoveryController().IsRunning() {
-		return nil, errs.ErrUnsafeRecoveryIsRunning.FastGenByArgs()
+	if allowed, err := c.CheckSchedulingAllowance(); !allowed {
+		return nil, err
 	}
 	if !c.opt.IsTikvRegionSplitEnabled() {
 		return nil, errs.ErrSchedulerTiKVSplitDisabled.FastGenByArgs()
@@ -105,8 +105,8 @@ func (c *RaftCluster) ValidRequestRegion(reqRegion *metapb.Region) error {
 
 // HandleAskBatchSplit handles the batch split request.
 func (c *RaftCluster) HandleAskBatchSplit(request *pdpb.AskBatchSplitRequest) (*pdpb.AskBatchSplitResponse, error) {
-	if c.GetUnsafeRecoveryController().IsRunning() {
-		return nil, errs.ErrUnsafeRecoveryIsRunning.FastGenByArgs()
+	if allowed, err := c.CheckSchedulingAllowance(); !allowed {
+		return nil, err
 	}
 	if !c.opt.IsTikvRegionSplitEnabled() {
 		return nil, errs.ErrSchedulerTiKVSplitDisabled.FastGenByArgs()

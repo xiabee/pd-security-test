@@ -29,9 +29,9 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/utils/assertutil"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/assertutil"
+	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/tests"
@@ -331,7 +331,7 @@ func TestGetLeader(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	done := make(chan bool)
-	svr, err := server.CreateServer(ctx, cfg, nil, server.CreateMockHandler(re, "127.0.0.1"))
+	svr, err := server.CreateServer(ctx, cfg)
 	re.NoError(err)
 	defer svr.Close()
 	re.NoError(svr.Run())

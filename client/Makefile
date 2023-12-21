@@ -31,12 +31,9 @@ install-tools:
 	cd .. && $(MAKE) install-tools
 
 static: install-tools
-	@ echo "gofmt ..."
 	@ gofmt -s -l -d . 2>&1 | awk '{ print } END { if (NR > 0) { exit 1 } }'
-	@ echo "golangci-lint ..."
-	@ golangci-lint run -c ../.golangci.yml --verbose ./...
-	@ echo "revive ..."
-	@ revive -formatter friendly -config ../revive.toml ./...
+	@ golangci-lint run -c ../.golangci.yml ./...
+	@ revive -formatter friendly -config ../revive.toml .
 
 tidy:
 	@ go mod tidy

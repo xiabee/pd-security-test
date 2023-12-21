@@ -24,10 +24,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/storage"
-	"github.com/tikv/pd/pkg/utils/configutil"
+	"github.com/tikv/pd/server/storage"
 )
 
 func TestSecurity(t *testing.T) {
@@ -53,6 +51,8 @@ func TestBadFormatJoinAddr(t *testing.T) {
 
 func TestReloadConfig(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
+	RegisterScheduler("shuffle-leader")
 	opt, err := newTestScheduleOption()
 	re.NoError(err)
 	storage := storage.NewStorageWithMemoryBackend()
@@ -62,10 +62,22 @@ func TestReloadConfig(t *testing.T) {
 	opt.GetPDServerConfig().UseRegionStorage = true
 	re.NoError(opt.Persist(storage))
 
+	// Add a new default enable scheduler "shuffle-leader"
+	DefaultSchedulers = append(DefaultSchedulers, SchedulerConfig{Type: "shuffle-leader"})
+	defer func() {
+		DefaultSchedulers = DefaultSchedulers[:len(DefaultSchedulers)-1]
+	}()
+
 	newOpt, err := newTestScheduleOption()
 	re.NoError(err)
 	re.NoError(newOpt.Reload(storage))
-
+	schedulers := newOpt.GetSchedulers()
+	re.Len(schedulers, len(DefaultSchedulers))
+	re.True(newOpt.IsUseRegionStorage())
+	for i, s := range schedulers {
+		re.Equal(DefaultSchedulers[i].Type, s.Type)
+		re.False(s.Disable)
+	}
 	re.Equal(5, newOpt.GetMaxReplicas())
 	re.Equal(uint64(10), newOpt.GetMaxSnapshotCount())
 	re.Equal(int64(512), newOpt.GetMaxMovableHotPeerSize())
@@ -73,6 +85,7 @@ func TestReloadConfig(t *testing.T) {
 
 func TestReloadUpgrade(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
 	opt, err := newTestScheduleOption()
 	re.NoError(err)
 
@@ -96,6 +109,7 @@ func TestReloadUpgrade(t *testing.T) {
 
 func TestReloadUpgrade2(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
 	opt, err := newTestScheduleOption()
 	re.NoError(err)
 
@@ -117,6 +131,7 @@ func TestReloadUpgrade2(t *testing.T) {
 
 func TestValidation(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
 	cfg := NewConfig()
 	re.NoError(cfg.Adjust(nil, false))
 
@@ -146,6 +161,8 @@ func TestValidation(t *testing.T) {
 
 func TestAdjust(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
+	RegisterScheduler("random-merge")
 	cfgData := `
 name = ""
 lease = 0
@@ -159,13 +176,7 @@ max-merge-region-size = 0
 enable-one-way-merge = true
 leader-schedule-limit = 0
 `
-
-	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
-	flagSet.StringP("log-level", "L", "info", "log level: debug, info, warn, error, fatal (default 'info')")
-	flagSet.Parse(nil)
 	cfg := NewConfig()
-	err := cfg.Parse(flagSet)
-	re.NoError(err)
 	meta, err := toml.Decode(cfgData, &cfg)
 	re.NoError(err)
 	err = cfg.Adjust(&meta, false)
@@ -188,7 +199,7 @@ leader-schedule-limit = 0
 	re.Equal(uint64(0), cfg.Schedule.MaxMergeRegionKeys)
 	re.Equal("http://127.0.0.1:9090", cfg.PDServerCfg.MetricStorage)
 
-	re.Equal(defaultTSOUpdatePhysicalInterval, cfg.TSOUpdatePhysicalInterval.Duration)
+	re.Equal(DefaultTSOUpdatePhysicalInterval, cfg.TSOUpdatePhysicalInterval.Duration)
 
 	// Check undefined config fields
 	cfgData = `
@@ -207,6 +218,32 @@ max-merge-region-keys = 400000
 	re.NoError(err)
 	re.Contains(cfg.WarningMsgs[0], "Config contains undefined item")
 	re.Equal(40*10000, int(cfg.Schedule.GetMaxMergeRegionKeys()))
+	// Check misspelled schedulers name
+	cfgData = `
+name = ""
+lease = 0
+
+[[schedule.schedulers]]
+type = "random-merge-schedulers"
+`
+	cfg = NewConfig()
+	meta, err = toml.Decode(cfgData, &cfg)
+	re.NoError(err)
+	err = cfg.Adjust(&meta, false)
+	re.Error(err)
+	// Check correct schedulers name
+	cfgData = `
+name = ""
+lease = 0
+
+[[schedule.schedulers]]
+type = "random-merge"
+`
+	cfg = NewConfig()
+	meta, err = toml.Decode(cfgData, &cfg)
+	re.NoError(err)
+	err = cfg.Adjust(&meta, false)
+	re.NoError(err)
 
 	cfgData = `
 [metric]
@@ -248,6 +285,7 @@ tso-update-physical-interval = "15s"
 
 func TestMigrateFlags(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
 	load := func(s string) (*Config, error) {
 		cfg := NewConfig()
 		meta, err := toml.Decode(s, &cfg)
@@ -285,6 +323,7 @@ disable-make-up-replica = false
 
 func TestPDServerConfig(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
 	tests := []struct {
 		cfgData          string
 		hasErr           bool
@@ -351,6 +390,7 @@ dashboard-address = "foo"
 
 func TestDashboardConfig(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
 	cfgData := `
 [dashboard]
 tidb-cacert-path = "/path/ca.pem"
@@ -390,6 +430,7 @@ tidb-cert-path = "/path/client.pem"
 
 func TestReplicationMode(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
 	cfgData := `
 [replication-mode]
 replication-mode = "dr-auto-sync"
@@ -425,6 +466,7 @@ wait-store-timeout = "120s"
 
 func TestHotHistoryRegionConfig(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
 	cfgData := `
 [schedule]
 hot-regions-reserved-days= 30
@@ -447,11 +489,12 @@ hot-regions-write-interval= "30m"
 
 func TestConfigClone(t *testing.T) {
 	re := require.New(t)
+	registerDefaultSchedulers()
 	cfg := &Config{}
 	cfg.Adjust(nil, false)
 	re.Equal(cfg, cfg.Clone())
 
-	emptyConfigMetaData := configutil.NewConfigMetadata(nil)
+	emptyConfigMetaData := newConfigMetadata(nil)
 
 	schedule := &ScheduleConfig{}
 	schedule.adjust(emptyConfigMetaData, false)
@@ -477,4 +520,10 @@ func newTestScheduleOption() (*PersistOptions, error) {
 	}
 	opt := NewPersistOptions(cfg)
 	return opt, nil
+}
+
+func registerDefaultSchedulers() {
+	for _, d := range DefaultSchedulers {
+		RegisterScheduler(d.Type)
+	}
 }

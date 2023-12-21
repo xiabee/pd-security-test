@@ -21,14 +21,14 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/suite"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 )
 
 type logTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 

@@ -22,16 +22,17 @@ import (
 
 	"github.com/stretchr/testify/suite"
 	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/tikv/pd/pkg/storage"
-	"github.com/tikv/pd/pkg/storage/kv"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
+	_ "github.com/tikv/pd/server/schedulers"
+	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/storage/kv"
 )
 
 type hotStatusTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
