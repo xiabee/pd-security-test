@@ -82,14 +82,6 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 13),
 		})
 
-	tsoProxyForwardTimeoutCounter = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: "pd",
-			Subsystem: "server",
-			Name:      "tso_proxy_forward_timeout_total",
-			Help:      "Counter of timeouts when tso proxy forwarding tso requests to tso service.",
-		})
-
 	tsoHandleDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: "pd",
@@ -126,7 +118,6 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(0.0001, 2, 29), // 0.1ms ~ 7hours
 		}, []string{"address", "store"})
 
-	// TODO: pre-allocate gauge metrics
 	storeHeartbeatHandleDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "pd",
@@ -151,22 +142,7 @@ var (
 			Name:      "audit_handling_seconds",
 			Help:      "PD server service handling audit",
 			Buckets:   prometheus.DefBuckets,
-		}, []string{"service", "method", "caller_id", "ip"})
-	serverMaxProcs = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "service",
-			Name:      "maxprocs",
-			Help:      "The value of GOMAXPROCS.",
-		})
-
-	forwardFailCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "pd",
-			Subsystem: "server",
-			Name:      "forward_fail_total",
-			Help:      "Counter of forward fail.",
-		}, []string{"request", "type"})
+		}, []string{"service", "method", "component", "ip"})
 )
 
 func init() {
@@ -177,7 +153,6 @@ func init() {
 	prometheus.MustRegister(etcdStateGauge)
 	prometheus.MustRegister(tsoProxyHandleDuration)
 	prometheus.MustRegister(tsoProxyBatchSize)
-	prometheus.MustRegister(tsoProxyForwardTimeoutCounter)
 	prometheus.MustRegister(tsoHandleDuration)
 	prometheus.MustRegister(regionHeartbeatHandleDuration)
 	prometheus.MustRegister(storeHeartbeatHandleDuration)
@@ -186,6 +161,4 @@ func init() {
 	prometheus.MustRegister(bucketReportLatency)
 	prometheus.MustRegister(serviceAuditHistogram)
 	prometheus.MustRegister(bucketReportInterval)
-	prometheus.MustRegister(serverMaxProcs)
-	prometheus.MustRegister(forwardFailCounter)
 }

@@ -16,20 +16,15 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/gorilla/mux"
-	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/mcs/utils"
-	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
-	"go.uber.org/zap"
 )
 
 type adminHandler struct {
@@ -61,51 +56,7 @@ func (h *adminHandler) DeleteRegionCache(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	rc.DropCacheRegion(regionID)
-	if h.svr.IsServiceIndependent(utils.SchedulingServiceName) {
-		err = h.DeleteRegionCacheInSchedulingServer(regionID)
-	}
-	msg := "The region is removed from server cache."
-	h.rd.JSON(w, http.StatusOK, h.buildMsg(msg, err))
-}
-
-// @Tags     admin
-// @Summary  Remove target region from region cache and storage.
-// @Param    id  path  integer  true  "Region Id"
-// @Produce  json
-// @Success  200  {string}  string  "The region is removed from server storage."
-// @Failure  400  {string}  string  "The input is invalid."
-// @Router   /admin/storage/region/{id} [delete]
-func (h *adminHandler) DeleteRegionStorage(w http.ResponseWriter, r *http.Request) {
-	rc := getCluster(r)
-	vars := mux.Vars(r)
-	regionIDStr := vars["id"]
-	regionID, err := strconv.ParseUint(regionIDStr, 10, 64)
-	if err != nil {
-		h.rd.JSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	targetRegion := rc.GetRegion(regionID)
-	if targetRegion == nil {
-		h.rd.JSON(w, http.StatusBadRequest, "failed to get target region from cache")
-		return
-	}
-
-	// Remove region from storage
-	if err = rc.GetStorage().DeleteRegion(targetRegion.GetMeta()); err != nil {
-		log.Error("failed to delete region from storage",
-			zap.Uint64("region-id", targetRegion.GetID()),
-			zap.Stringer("region-meta", core.RegionToHexMeta(targetRegion.GetMeta())),
-			errs.ZapError(err))
-		h.rd.JSON(w, http.StatusOK, "failed to delete region from storage.")
-		return
-	}
-	// Remove region from cache.
-	rc.DropCacheRegion(regionID)
-	if h.svr.IsServiceIndependent(utils.SchedulingServiceName) {
-		err = h.DeleteRegionCacheInSchedulingServer(regionID)
-	}
-	msg := "The region is removed from server cache and region meta storage."
-	h.rd.JSON(w, http.StatusOK, h.buildMsg(msg, err))
+	h.rd.JSON(w, http.StatusOK, "The region is removed from server cache.")
 }
 
 // @Tags     admin
@@ -114,14 +65,71 @@ func (h *adminHandler) DeleteRegionStorage(w http.ResponseWriter, r *http.Reques
 // @Success  200  {string}  string  "All regions are removed from server cache."
 // @Router   /admin/cache/regions [delete]
 func (h *adminHandler) DeleteAllRegionCache(w http.ResponseWriter, r *http.Request) {
-	var err error
 	rc := getCluster(r)
 	rc.DropCacheAllRegion()
-	if h.svr.IsServiceIndependent(utils.SchedulingServiceName) {
-		err = h.DeleteRegionCacheInSchedulingServer()
+	h.rd.JSON(w, http.StatusOK, "All regions are removed from server cache.")
+}
+
+// ResetTS
+// FIXME: details of input json body params
+// @Tags     admin
+// @Summary  Reset the ts.
+// @Accept   json
+// @Param    body  body  object  true  "json params"
+// @Produce  json
+// @Success  200  {string}  string  "Reset ts successfully."
+// @Failure  400  {string}  string  "The input is invalid."
+// @Failure  403  {string}  string  "Reset ts is forbidden."
+// @Failure  500  {string}  string  "PD server failed to proceed the request."
+// @Router   /admin/reset-ts [post]
+// if force-use-larger=true:
+//
+//	reset ts to max(current ts, input ts).
+//
+// else:
+//
+//	reset ts to input ts if it > current ts and < upper bound, error if not in that range
+//
+// during EBS based restore, we call this to make sure ts of pd >= resolved_ts in backup.
+func (h *adminHandler) ResetTS(w http.ResponseWriter, r *http.Request) {
+	handler := h.svr.GetHandler()
+	var input map[string]interface{}
+	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &input); err != nil {
+		return
 	}
-	msg := "All regions are removed from server cache."
-	h.rd.JSON(w, http.StatusOK, h.buildMsg(msg, err))
+	tsValue, ok := input["tso"].(string)
+	if !ok || len(tsValue) == 0 {
+		h.rd.JSON(w, http.StatusBadRequest, "invalid tso value")
+		return
+	}
+	ts, err := strconv.ParseUint(tsValue, 10, 64)
+	if err != nil {
+		h.rd.JSON(w, http.StatusBadRequest, "invalid tso value")
+		return
+	}
+
+	forceUseLarger := false
+	forceUseLargerVal, contains := input["force-use-larger"]
+	if contains {
+		if forceUseLarger, ok = forceUseLargerVal.(bool); !ok {
+			h.rd.JSON(w, http.StatusBadRequest, "invalid force-use-larger value")
+			return
+		}
+	}
+	var ignoreSmaller, skipUpperBoundCheck bool
+	if forceUseLarger {
+		ignoreSmaller, skipUpperBoundCheck = true, true
+	}
+
+	if err = handler.ResetTS(ts, ignoreSmaller, skipUpperBoundCheck); err != nil {
+		if err == server.ErrServerNotStarted {
+			h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+		} else {
+			h.rd.JSON(w, http.StatusForbidden, err.Error())
+		}
+		return
+	}
+	h.rd.JSON(w, http.StatusOK, "Reset ts successfully.")
 }
 
 // Intentionally no swagger mark as it is supposed to be only used in
@@ -213,36 +221,4 @@ func (h *adminHandler) RecoverAllocID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = h.rd.Text(w, http.StatusOK, "")
-}
-
-func (h *adminHandler) DeleteRegionCacheInSchedulingServer(id ...uint64) error {
-	addr, ok := h.svr.GetServicePrimaryAddr(h.svr.Context(), utils.SchedulingServiceName)
-	if !ok {
-		return errs.ErrNotFoundSchedulingAddr.FastGenByArgs()
-	}
-	var idStr string
-	if len(id) > 0 {
-		idStr = strconv.FormatUint(id[0], 10)
-	}
-	url := fmt.Sprintf("%s/scheduling/api/v1/admin/cache/regions/%s", addr, idStr)
-	req, err := http.NewRequest(http.MethodDelete, url, http.NoBody)
-	if err != nil {
-		return err
-	}
-	resp, err := h.svr.GetHTTPClient().Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return errs.ErrSchedulingServer.FastGenByArgs(resp.StatusCode)
-	}
-	return nil
-}
-
-func (h *adminHandler) buildMsg(msg string, err error) string {
-	if h.svr.IsServiceIndependent(utils.SchedulingServiceName) && err != nil {
-		return fmt.Sprintf("This operation was executed in API server but needs to be re-executed on scheduling server due to the following error: %s", err.Error())
-	}
-	return msg
 }

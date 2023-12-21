@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/suite"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 )
@@ -28,7 +28,7 @@ import (
 type tsoTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
@@ -61,5 +61,5 @@ func (suite *tsoTestSuite) TestTransferAllocator() {
 	}, tu.WithWaitFor(15*time.Second), tu.WithTickInterval(3*time.Second))
 	addr := suite.urlPrefix + "/tso/allocator/transfer/pd1?dcLocation=dc-1"
 	err := tu.CheckPostJSON(testDialClient, addr, nil, tu.StatusOK(re))
-	re.NoError(err)
+	suite.NoError(err)
 }

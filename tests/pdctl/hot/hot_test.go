@@ -25,62 +25,28 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
-	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/schedule/handler"
-	"github.com/tikv/pd/pkg/statistics"
-	"github.com/tikv/pd/pkg/statistics/utils"
-	"github.com/tikv/pd/pkg/storage"
-	"github.com/tikv/pd/pkg/utils/testutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
-	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server/api"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/statistics"
+	"github.com/tikv/pd/server/storage"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
 )
 
-type hotTestSuite struct {
-	suite.Suite
-	env *tests.SchedulingTestEnvironment
-}
-
-func TestHotTestSuite(t *testing.T) {
-	suite.Run(t, new(hotTestSuite))
-}
-
-func (suite *hotTestSuite) SetupSuite() {
-	suite.env = tests.NewSchedulingTestEnvironment(suite.T(),
-		func(conf *config.Config, serverName string) {
-			conf.Schedule.MaxStoreDownTime.Duration = time.Hour
-			conf.Schedule.HotRegionCacheHitsThreshold = 0
-		},
-	)
-}
-
-func (suite *hotTestSuite) TearDownSuite() {
-	suite.env.Cleanup()
-}
-
-func (suite *hotTestSuite) TearDownTest() {
-	cleanFunc := func(cluster *tests.TestCluster) {
-		leader := cluster.GetLeaderServer()
-		hotStat := leader.GetRaftCluster().GetHotStat()
-		if sche := cluster.GetSchedulingPrimaryServer(); sche != nil {
-			hotStat = sche.GetCluster().GetHotStat()
-		}
-		hotStat.HotCache.CleanCache()
-	}
-	suite.env.RunFuncInTwoModes(cleanFunc)
-}
-
-func (suite *hotTestSuite) TestHot() {
-	suite.env.RunTestInTwoModes(suite.checkHot)
-}
-
-func (suite *hotTestSuite) checkHot(cluster *tests.TestCluster) {
-	re := suite.Require()
+func TestHot(t *testing.T) {
+	re := require.New(t)
 	statistics.Denoising = false
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cluster, err := tests.NewTestCluster(ctx, 1)
+	re.NoError(err)
+	err = cluster.RunInitialServers()
+	re.NoError(err)
+	cluster.WaitLeader()
 	pdAddr := cluster.GetConfig().GetClientURL()
 	cmd := pdctlCmd.GetRootCmd()
 
@@ -96,13 +62,15 @@ func (suite *hotTestSuite) checkHot(cluster *tests.TestCluster) {
 		Labels:        []*metapb.StoreLabel{{Key: "engine", Value: "tiflash"}},
 	}
 
-	tests.MustPutStore(re, cluster, store1)
-	tests.MustPutStore(re, cluster, store2)
+	leaderServer := cluster.GetServer(cluster.GetLeader())
+	re.NoError(leaderServer.BootstrapCluster())
+	pdctl.MustPutStore(re, leaderServer.GetServer(), store1)
+	pdctl.MustPutStore(re, leaderServer.GetServer(), store2)
+	defer cluster.Destroy()
 
 	// test hot store
-	leaderServer := cluster.GetLeaderServer()
 	ss := leaderServer.GetStore(1)
-	now := time.Now().Unix()
+	now := time.Now().Second()
 
 	newStats := typeutil.DeepClone(ss.GetStoreStats(), core.StoreStatsFactory)
 	bytesWritten := uint64(8 * units.MiB)
@@ -113,39 +81,27 @@ func (suite *hotTestSuite) checkHot(cluster *tests.TestCluster) {
 	newStats.BytesRead = bytesRead
 	newStats.KeysWritten = keysWritten
 	newStats.KeysRead = keysRead
-
 	rc := leaderServer.GetRaftCluster()
-	stats := rc.GetStoresStats()
-	hotStat := rc.GetHotStat()
-	getHotPeerStat := rc.GetHotPeerStat
-	if sche := cluster.GetSchedulingPrimaryServer(); sche != nil {
-		stats = sche.GetCluster().GetStoresStats()
-		hotStat = sche.GetCluster().GetHotStat()
-		getHotPeerStat = sche.GetCluster().GetHotPeerStat
-	}
-
-	for i := utils.DefaultWriteMfSize; i > 0; i-- {
-		start := uint64(now - utils.StoreHeartBeatReportInterval*int64(i))
-		end := start + utils.StoreHeartBeatReportInterval
+	for i := statistics.DefaultWriteMfSize; i > 0; i-- {
+		start := uint64(now - statistics.StoreHeartBeatReportInterval*i)
+		end := start + statistics.StoreHeartBeatReportInterval
 		newStats.Interval = &pdpb.TimeInterval{StartTimestamp: start, EndTimestamp: end}
-		stats.Observe(ss.GetID(), newStats)
+		rc.GetStoresStats().Observe(ss.GetID(), newStats)
 	}
 
 	for i := statistics.RegionsStatsRollingWindowsSize; i > 0; i-- {
-		stats.ObserveRegionsStats([]uint64{2},
-			[]float64{float64(bytesWritten)},
-			[]float64{float64(keysWritten)})
+		rc.GetStoresStats().ObserveRegionsStats([]uint64{2}, []float64{float64(bytesWritten)}, []float64{float64(keysWritten)})
 	}
 
 	args := []string{"-u", pdAddr, "hot", "store"}
 	output, err := pdctl.ExecuteCommand(cmd, args...)
 	re.NoError(err)
-	hotStores := handler.HotStoreStats{}
+	hotStores := api.HotStoreStats{}
 	re.NoError(json.Unmarshal(output, &hotStores))
-	re.Equal(float64(bytesWritten)/utils.StoreHeartBeatReportInterval, hotStores.BytesWriteStats[1])
-	re.Equal(float64(bytesRead)/utils.StoreHeartBeatReportInterval, hotStores.BytesReadStats[1])
-	re.Equal(float64(keysWritten)/utils.StoreHeartBeatReportInterval, hotStores.KeysWriteStats[1])
-	re.Equal(float64(keysRead)/utils.StoreHeartBeatReportInterval, hotStores.KeysReadStats[1])
+	re.Equal(float64(bytesWritten)/statistics.StoreHeartBeatReportInterval, hotStores.BytesWriteStats[1])
+	re.Equal(float64(bytesRead)/statistics.StoreHeartBeatReportInterval, hotStores.BytesReadStats[1])
+	re.Equal(float64(keysWritten)/statistics.StoreHeartBeatReportInterval, hotStores.KeysWriteStats[1])
+	re.Equal(float64(keysRead)/statistics.StoreHeartBeatReportInterval, hotStores.KeysReadStats[1])
 	re.Equal(float64(bytesWritten), hotStores.BytesWriteStats[2])
 	re.Equal(float64(keysWritten), hotStores.KeysWriteStats[2])
 
@@ -177,12 +133,12 @@ func (suite *hotTestSuite) checkHot(cluster *tests.TestCluster) {
 			switch hotType {
 			case "read":
 				loads := []float64{
-					utils.RegionReadBytes:     float64(1000000000 * reportInterval),
-					utils.RegionReadKeys:      float64(1000000000 * reportInterval),
-					utils.RegionReadQueryNum:  float64(1000000000 * reportInterval),
-					utils.RegionWriteBytes:    0,
-					utils.RegionWriteKeys:     0,
-					utils.RegionWriteQueryNum: 0,
+					statistics.RegionReadBytes:     float64(1000000000 * reportInterval),
+					statistics.RegionReadKeys:      float64(1000000000 * reportInterval),
+					statistics.RegionReadQueryNum:  float64(1000000000 * reportInterval),
+					statistics.RegionWriteBytes:    0,
+					statistics.RegionWriteKeys:     0,
+					statistics.RegionWriteQueryNum: 0,
 				}
 				leader := &metapb.Peer{
 					Id:      100 + regionIDCounter,
@@ -192,26 +148,26 @@ func (suite *hotTestSuite) checkHot(cluster *tests.TestCluster) {
 				region := core.NewRegionInfo(&metapb.Region{
 					Id: hotRegionID,
 				}, leader)
-				hotStat.CheckReadAsync(statistics.NewCheckPeerTask(peerInfo, region))
+				rc.GetHotStat().CheckReadAsync(statistics.NewCheckPeerTask(peerInfo, region))
 				testutil.Eventually(re, func() bool {
-					hotPeerStat := getHotPeerStat(utils.Read, hotRegionID, hotStoreID)
+					hotPeerStat := rc.GetHotPeerStat(statistics.Read, hotRegionID, hotStoreID)
 					return hotPeerStat != nil
 				})
-				if reportInterval >= utils.StoreHeartBeatReportInterval {
+				if reportInterval >= statistics.ReadReportInterval {
 					count++
 				}
 				testHot(hotRegionID, hotStoreID, "read")
 			case "write":
-				tests.MustPutRegion(
+				pdctl.MustPutRegion(
 					re, cluster,
 					hotRegionID, hotStoreID,
 					[]byte("c"), []byte("d"),
 					core.SetWrittenBytes(1000000000*reportInterval), core.SetReportInterval(0, reportInterval))
 				testutil.Eventually(re, func() bool {
-					hotPeerStat := getHotPeerStat(utils.Write, hotRegionID, hotStoreID)
+					hotPeerStat := rc.GetHotPeerStat(statistics.Write, hotRegionID, hotStoreID)
 					return hotPeerStat != nil
 				})
-				if reportInterval >= utils.RegionHeartBeatReportInterval {
+				if reportInterval >= statistics.WriteReportInterval {
 					count++
 				}
 				testHot(hotRegionID, hotStoreID, "write")
@@ -221,34 +177,36 @@ func (suite *hotTestSuite) checkHot(cluster *tests.TestCluster) {
 	reportIntervals := []uint64{
 		statistics.HotRegionReportMinInterval,
 		statistics.HotRegionReportMinInterval + 1,
-		utils.RegionHeartBeatReportInterval,
-		utils.RegionHeartBeatReportInterval + 1,
-		utils.RegionHeartBeatReportInterval * 2,
-		utils.RegionHeartBeatReportInterval*2 + 1,
+		statistics.WriteReportInterval,
+		statistics.WriteReportInterval + 1,
+		statistics.WriteReportInterval * 2,
+		statistics.WriteReportInterval*2 + 1,
 	}
 	testCommand(reportIntervals, "write")
 	count = 0
 	reportIntervals = []uint64{
 		statistics.HotRegionReportMinInterval,
 		statistics.HotRegionReportMinInterval + 1,
-		utils.StoreHeartBeatReportInterval,
-		utils.StoreHeartBeatReportInterval + 1,
-		utils.StoreHeartBeatReportInterval * 2,
-		utils.StoreHeartBeatReportInterval*2 + 1,
+		statistics.ReadReportInterval,
+		statistics.ReadReportInterval + 1,
+		statistics.ReadReportInterval * 2,
+		statistics.ReadReportInterval*2 + 1,
 	}
 	testCommand(reportIntervals, "read")
 }
 
-func (suite *hotTestSuite) TestHotWithStoreID() {
-	suite.env.RunTestInTwoModes(suite.checkHotWithStoreID)
-}
-
-func (suite *hotTestSuite) checkHotWithStoreID(cluster *tests.TestCluster) {
-	re := suite.Require()
+func TestHotWithStoreID(t *testing.T) {
+	re := require.New(t)
 	statistics.Denoising = false
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cluster, err := tests.NewTestCluster(ctx, 1, func(cfg *config.Config, serverName string) { cfg.Schedule.HotRegionCacheHitsThreshold = 0 })
+	re.NoError(err)
+	err = cluster.RunInitialServers()
+	re.NoError(err)
+	cluster.WaitLeader()
 	pdAddr := cluster.GetConfig().GetClientURL()
 	cmd := pdctlCmd.GetRootCmd()
-	leaderServer := cluster.GetLeaderServer()
 
 	stores := []*metapb.Store{
 		{
@@ -263,38 +221,22 @@ func (suite *hotTestSuite) checkHotWithStoreID(cluster *tests.TestCluster) {
 		},
 	}
 
+	leaderServer := cluster.GetServer(cluster.GetLeader())
+	re.NoError(leaderServer.BootstrapCluster())
 	for _, store := range stores {
-		tests.MustPutStore(re, cluster, store)
+		pdctl.MustPutStore(re, leaderServer.GetServer(), store)
 	}
-	s := &server.GrpcServer{Server: leaderServer.GetServer()}
-	for _, store := range stores {
-		resp1, err := s.StoreHeartbeat(
-			context.Background(), &pdpb.StoreHeartbeatRequest{
-				Header: &pdpb.RequestHeader{ClusterId: leaderServer.GetClusterID()},
-				Stats: &pdpb.StoreStats{
-					StoreId:   store.Id,
-					Capacity:  1000 * units.MiB,
-					Available: 1000 * units.MiB,
-				},
-			},
-		)
-		re.NoError(err)
-		re.Empty(resp1.GetHeader().GetError())
-	}
+	defer cluster.Destroy()
 
-	tests.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"), core.SetWrittenBytes(3000000000), core.SetReportInterval(0, utils.RegionHeartBeatReportInterval))
-	tests.MustPutRegion(re, cluster, 2, 2, []byte("c"), []byte("d"), core.SetWrittenBytes(6000000000), core.SetReportInterval(0, utils.RegionHeartBeatReportInterval))
-	tests.MustPutRegion(re, cluster, 3, 1, []byte("e"), []byte("f"), core.SetWrittenBytes(9000000000), core.SetReportInterval(0, utils.RegionHeartBeatReportInterval))
-
-	getHotPeerStat := leaderServer.GetRaftCluster().GetHotPeerStat
-	if sche := cluster.GetSchedulingPrimaryServer(); sche != nil {
-		getHotPeerStat = sche.GetCluster().GetHotPeerStat
-	}
-
+	pdctl.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"), core.SetWrittenBytes(3000000000), core.SetReportInterval(0, statistics.WriteReportInterval))
+	pdctl.MustPutRegion(re, cluster, 2, 2, []byte("c"), []byte("d"), core.SetWrittenBytes(6000000000), core.SetReportInterval(0, statistics.WriteReportInterval))
+	pdctl.MustPutRegion(re, cluster, 3, 1, []byte("e"), []byte("f"), core.SetWrittenBytes(9000000000), core.SetReportInterval(0, statistics.WriteReportInterval))
+	// wait hot scheduler starts
+	rc := leaderServer.GetRaftCluster()
 	testutil.Eventually(re, func() bool {
-		return getHotPeerStat(utils.Write, 1, 1) != nil &&
-			getHotPeerStat(utils.Write, 2, 2) != nil &&
-			getHotPeerStat(utils.Write, 3, 1) != nil
+		return rc.GetHotPeerStat(statistics.Write, 1, 1) != nil &&
+			rc.GetHotPeerStat(statistics.Write, 2, 2) != nil &&
+			rc.GetHotPeerStat(statistics.Write, 3, 1) != nil
 	})
 	args := []string{"-u", pdAddr, "hot", "write", "1"}
 	output, err := pdctl.ExecuteCommand(cmd, args...)
@@ -304,95 +246,20 @@ func (suite *hotTestSuite) checkHotWithStoreID(cluster *tests.TestCluster) {
 	re.Len(hotRegion.AsLeader, 1)
 	re.Equal(2, hotRegion.AsLeader[1].Count)
 	re.Equal(float64(200000000), hotRegion.AsLeader[1].TotalBytesRate)
-}
 
-func (suite *hotTestSuite) TestHotWithoutHotPeer() {
-	suite.env.RunTestInTwoModes(suite.checkHotWithoutHotPeer)
-}
-
-func (suite *hotTestSuite) checkHotWithoutHotPeer(cluster *tests.TestCluster) {
-	re := suite.Require()
-	statistics.Denoising = false
-
-	pdAddr := cluster.GetConfig().GetClientURL()
-	cmd := pdctlCmd.GetRootCmd()
-
-	stores := []*metapb.Store{
-		{
-			Id:            1,
-			State:         metapb.StoreState_Up,
-			LastHeartbeat: time.Now().UnixNano(),
-		},
-		{
-			Id:            2,
-			State:         metapb.StoreState_Up,
-			LastHeartbeat: time.Now().UnixNano(),
-		},
-	}
-
-	leaderServer := cluster.GetLeaderServer()
-	for _, store := range stores {
-		tests.MustPutStore(re, cluster, store)
-	}
-	timestamp := uint64(time.Now().UnixNano())
-	load := 1024.0
-	s := &server.GrpcServer{Server: leaderServer.GetServer()}
-	for _, store := range stores {
-		for i := 0; i < 5; i++ {
-			resp1, err := s.StoreHeartbeat(
-				context.Background(), &pdpb.StoreHeartbeatRequest{
-					Header: &pdpb.RequestHeader{ClusterId: leaderServer.GetClusterID()},
-					Stats: &pdpb.StoreStats{
-						StoreId:      store.Id,
-						BytesRead:    uint64(load * utils.StoreHeartBeatReportInterval),
-						KeysRead:     uint64(load * utils.StoreHeartBeatReportInterval),
-						BytesWritten: uint64(load * utils.StoreHeartBeatReportInterval),
-						KeysWritten:  uint64(load * utils.StoreHeartBeatReportInterval),
-						Capacity:     1000 * units.MiB,
-						Available:    1000 * units.MiB,
-						Interval: &pdpb.TimeInterval{
-							StartTimestamp: timestamp + uint64(i*utils.StoreHeartBeatReportInterval),
-							EndTimestamp:   timestamp + uint64((i+1)*utils.StoreHeartBeatReportInterval)},
-					},
-				},
-			)
-			re.NoError(err)
-			re.Empty(resp1.GetHeader().GetError())
-		}
-	}
-
-	{
-		args := []string{"-u", pdAddr, "hot", "read"}
-		output, err := pdctl.ExecuteCommand(cmd, args...)
-		hotRegion := statistics.StoreHotPeersInfos{}
-		re.NoError(err)
-		re.NoError(json.Unmarshal(output, &hotRegion))
-		re.NotNil(hotRegion.AsPeer[1])
-		re.Zero(hotRegion.AsPeer[1].Count)
-		re.Zero(hotRegion.AsPeer[1].TotalBytesRate)
-		re.Equal(load, hotRegion.AsPeer[1].StoreByteRate)
-		re.Zero(hotRegion.AsLeader[1].Count)
-		re.Zero(hotRegion.AsLeader[1].TotalBytesRate)
-		re.Equal(load, hotRegion.AsLeader[1].StoreByteRate)
-	}
-	{
-		args := []string{"-u", pdAddr, "hot", "write"}
-		output, err := pdctl.ExecuteCommand(cmd, args...)
-		hotRegion := statistics.StoreHotPeersInfos{}
-		re.NoError(err)
-		re.NoError(json.Unmarshal(output, &hotRegion))
-		re.Zero(hotRegion.AsPeer[1].Count)
-		re.Zero(hotRegion.AsPeer[1].TotalBytesRate)
-		re.Equal(load, hotRegion.AsPeer[1].StoreByteRate)
-		re.Zero(hotRegion.AsLeader[1].Count)
-		re.Zero(hotRegion.AsLeader[1].TotalBytesRate)
-		re.Zero(hotRegion.AsLeader[1].StoreByteRate) // write leader sum
-	}
+	args = []string{"-u", pdAddr, "hot", "write", "1", "2"}
+	output, err = pdctl.ExecuteCommand(cmd, args...)
+	re.NoError(err)
+	hotRegion = statistics.StoreHotPeersInfos{}
+	re.NoError(json.Unmarshal(output, &hotRegion))
+	re.Len(hotRegion.AsLeader, 2)
+	re.Equal(2, hotRegion.AsLeader[1].Count)
+	re.Equal(1, hotRegion.AsLeader[2].Count)
+	re.Equal(float64(200000000), hotRegion.AsLeader[1].TotalBytesRate)
+	re.Equal(float64(100000000), hotRegion.AsLeader[2].TotalBytesRate)
 }
 
 func TestHistoryHotRegions(t *testing.T) {
-	// TODO: support history hotspot in scheduling server with stateless in the future.
-	// Ref: https://github.com/tikv/pd/pull/7183
 	re := require.New(t)
 	statistics.Denoising = false
 	ctx, cancel := context.WithCancel(context.Background())
@@ -429,30 +296,30 @@ func TestHistoryHotRegions(t *testing.T) {
 		},
 	}
 
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 	for _, store := range stores {
-		tests.MustPutStore(re, cluster, store)
+		pdctl.MustPutStore(re, leaderServer.GetServer(), store)
 	}
 	defer cluster.Destroy()
-	startTime := time.Now().Unix()
-	tests.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"), core.SetWrittenBytes(3000000000),
-		core.SetReportInterval(uint64(startTime-utils.RegionHeartBeatReportInterval), uint64(startTime)))
-	tests.MustPutRegion(re, cluster, 2, 2, []byte("c"), []byte("d"), core.SetWrittenBytes(6000000000),
-		core.SetReportInterval(uint64(startTime-utils.RegionHeartBeatReportInterval), uint64(startTime)))
-	tests.MustPutRegion(re, cluster, 3, 1, []byte("e"), []byte("f"), core.SetWrittenBytes(9000000000),
-		core.SetReportInterval(uint64(startTime-utils.RegionHeartBeatReportInterval), uint64(startTime)))
-	tests.MustPutRegion(re, cluster, 4, 3, []byte("g"), []byte("h"), core.SetWrittenBytes(9000000000),
-		core.SetReportInterval(uint64(startTime-utils.RegionHeartBeatReportInterval), uint64(startTime)))
+	startTime := time.Now().Second()
+	pdctl.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"), core.SetWrittenBytes(3000000000),
+		core.SetReportInterval(uint64(startTime-statistics.RegionHeartBeatReportInterval), uint64(startTime)))
+	pdctl.MustPutRegion(re, cluster, 2, 2, []byte("c"), []byte("d"), core.SetWrittenBytes(6000000000),
+		core.SetReportInterval(uint64(startTime-statistics.RegionHeartBeatReportInterval), uint64(startTime)))
+	pdctl.MustPutRegion(re, cluster, 3, 1, []byte("e"), []byte("f"), core.SetWrittenBytes(9000000000),
+		core.SetReportInterval(uint64(startTime-statistics.RegionHeartBeatReportInterval), uint64(startTime)))
+	pdctl.MustPutRegion(re, cluster, 4, 3, []byte("g"), []byte("h"), core.SetWrittenBytes(9000000000),
+		core.SetReportInterval(uint64(startTime-statistics.RegionHeartBeatReportInterval), uint64(startTime)))
 	// wait hot scheduler starts
 	testutil.Eventually(re, func() bool {
 		hotRegionStorage := leaderServer.GetServer().GetHistoryHotRegionStorage()
-		iter := hotRegionStorage.NewIterator([]string{utils.Write.String()}, startTime*1000, time.Now().UnixNano()/int64(time.Millisecond))
+		iter := hotRegionStorage.NewIterator([]string{storage.WriteType.String()}, int64(startTime*1000), time.Now().UnixNano()/int64(time.Millisecond))
 		next, err := iter.Next()
 		return err == nil && next != nil
 	})
 	endTime := time.Now().UnixNano() / int64(time.Millisecond)
-	start := strconv.FormatInt(startTime*1000, 10)
+	start := strconv.FormatInt(int64(startTime*1000), 10)
 	end := strconv.FormatInt(endTime, 10)
 	args := []string{"-u", pdAddr, "hot", "history",
 		start, end,
@@ -513,8 +380,7 @@ func TestHistoryHotRegions(t *testing.T) {
 	re.Error(json.Unmarshal(output, &hotRegions))
 }
 
-func TestBuckets(t *testing.T) {
-	// TODO: support forward bucket request in scheduling server in the future.
+func TestHotWithoutHotPeer(t *testing.T) {
 	re := require.New(t)
 	statistics.Denoising = false
 	ctx, cancel := context.WithCancel(context.Background())
@@ -540,47 +406,58 @@ func TestBuckets(t *testing.T) {
 		},
 	}
 
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 	for _, store := range stores {
-		tests.MustPutStore(re, cluster, store)
+		pdctl.MustPutStore(re, leaderServer.GetServer(), store)
+	}
+	timestamp := uint64(time.Now().UnixNano())
+	load := 1024.0
+	for _, store := range stores {
+		for i := 0; i < 5; i++ {
+			err := leaderServer.GetServer().GetRaftCluster().HandleStoreHeartbeat(&pdpb.StoreHeartbeatRequest{
+				Stats: &pdpb.StoreStats{
+					StoreId:      store.Id,
+					BytesRead:    uint64(load * statistics.StoreHeartBeatReportInterval),
+					KeysRead:     uint64(load * statistics.StoreHeartBeatReportInterval),
+					BytesWritten: uint64(load * statistics.StoreHeartBeatReportInterval),
+					KeysWritten:  uint64(load * statistics.StoreHeartBeatReportInterval),
+					Capacity:     1000 * units.MiB,
+					Available:    1000 * units.MiB,
+					Interval: &pdpb.TimeInterval{
+						StartTimestamp: timestamp + uint64(i*statistics.StoreHeartBeatReportInterval),
+						EndTimestamp:   timestamp + uint64((i+1)*statistics.StoreHeartBeatReportInterval)},
+				},
+			}, &pdpb.StoreHeartbeatResponse{})
+			re.NoError(err)
+		}
 	}
 	defer cluster.Destroy()
 
-	tests.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"), core.SetWrittenBytes(3000000000), core.SetReportInterval(0, utils.RegionHeartBeatReportInterval))
-	tests.MustPutRegion(re, cluster, 2, 2, []byte("c"), []byte("d"), core.SetWrittenBytes(6000000000), core.SetReportInterval(0, utils.RegionHeartBeatReportInterval))
-	tests.MustPutRegion(re, cluster, 3, 1, []byte("e"), []byte("f"), core.SetWrittenBytes(9000000000), core.SetReportInterval(0, utils.RegionHeartBeatReportInterval))
-
-	stats := &metapb.BucketStats{
-		ReadBytes:  []uint64{10 * units.MiB},
-		ReadKeys:   []uint64{11 * units.MiB},
-		ReadQps:    []uint64{0},
-		WriteKeys:  []uint64{12 * units.MiB},
-		WriteBytes: []uint64{13 * units.MiB},
-		WriteQps:   []uint64{0},
+	{
+		args := []string{"-u", pdAddr, "hot", "read"}
+		output, err := pdctl.ExecuteCommand(cmd, args...)
+		hotRegion := statistics.StoreHotPeersInfos{}
+		re.NoError(err)
+		re.NoError(json.Unmarshal(output, &hotRegion))
+		re.Equal(hotRegion.AsPeer[1].Count, 0)
+		re.Equal(0.0, hotRegion.AsPeer[1].TotalBytesRate)
+		re.Equal(load, hotRegion.AsPeer[1].StoreByteRate)
+		re.Equal(hotRegion.AsLeader[1].Count, 0)
+		re.Equal(0.0, hotRegion.AsLeader[1].TotalBytesRate)
+		re.Equal(load, hotRegion.AsLeader[1].StoreByteRate)
 	}
-	buckets := tests.MustReportBuckets(re, cluster, 1, []byte("a"), []byte("b"), stats)
-	args := []string{"-u", pdAddr, "hot", "buckets", "1"}
-	output, err := pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
-	hotBuckets := handler.HotBucketsResponse{}
-	re.NoError(json.Unmarshal(output, &hotBuckets))
-	re.Len(hotBuckets, 1)
-	re.Len(hotBuckets[1], 1)
-	item := hotBuckets[1][0]
-	re.Equal(core.HexRegionKeyStr(buckets.GetKeys()[0]), item.StartKey)
-	re.Equal(core.HexRegionKeyStr(buckets.GetKeys()[1]), item.EndKey)
-	re.Equal(1, item.HotDegree)
-	interval := buckets.GetPeriodInMs() / 1000
-	re.Equal(buckets.GetStats().ReadBytes[0]/interval, item.ReadBytes)
-	re.Equal(buckets.GetStats().ReadKeys[0]/interval, item.ReadKeys)
-	re.Equal(buckets.GetStats().WriteBytes[0]/interval, item.WriteBytes)
-	re.Equal(buckets.GetStats().WriteKeys[0]/interval, item.WriteKeys)
-
-	args = []string{"-u", pdAddr, "hot", "buckets", "2"}
-	output, err = pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
-	hotBuckets = handler.HotBucketsResponse{}
-	re.NoError(json.Unmarshal(output, &hotBuckets))
-	re.Nil(hotBuckets[2])
+	{
+		args := []string{"-u", pdAddr, "hot", "write"}
+		output, err := pdctl.ExecuteCommand(cmd, args...)
+		hotRegion := statistics.StoreHotPeersInfos{}
+		re.NoError(err)
+		re.NoError(json.Unmarshal(output, &hotRegion))
+		re.Equal(hotRegion.AsPeer[1].Count, 0)
+		re.Equal(0.0, hotRegion.AsPeer[1].TotalBytesRate)
+		re.Equal(load, hotRegion.AsPeer[1].StoreByteRate)
+		re.Equal(hotRegion.AsLeader[1].Count, 0)
+		re.Equal(0.0, hotRegion.AsLeader[1].TotalBytesRate)
+		re.Equal(0.0, hotRegion.AsLeader[1].StoreByteRate) // write leader sum
+	}
 }

@@ -69,7 +69,6 @@ func (h *tsoHandler) TransferLocalTSOAllocator(w http.ResponseWriter, r *http.Re
 		h.rd.JSON(w, http.StatusNotFound, fmt.Sprintf("not found, pd: %s", name))
 		return
 	}
-	// TODO: support local tso forward in api service mode in the future.
 	err := h.svr.GetTSOAllocatorManager().TransferAllocatorForDCLocation(dcLocation, memberID)
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())

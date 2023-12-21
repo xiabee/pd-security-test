@@ -21,15 +21,15 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/unsaferecovery"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/cluster"
 )
 
 type unsafeOperationTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
@@ -60,29 +60,29 @@ func (suite *unsafeOperationTestSuite) TestRemoveFailedStores() {
 	data, _ := json.Marshal(input)
 	err := tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/remove-failed-stores", data, tu.StatusNotOK(re),
 		tu.StringEqual(re, "\"[PD:unsaferecovery:ErrUnsafeRecoveryInvalidInput]invalid input no store specified\"\n"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	input = map[string]interface{}{"stores": []string{"abc", "def"}}
 	data, _ = json.Marshal(input)
 	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/remove-failed-stores", data, tu.StatusNotOK(re),
 		tu.StringEqual(re, "\"Store ids are invalid\"\n"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	input = map[string]interface{}{"stores": []uint64{1, 2}}
 	data, _ = json.Marshal(input)
 	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/remove-failed-stores", data, tu.StatusNotOK(re),
 		tu.StringEqual(re, "\"[PD:unsaferecovery:ErrUnsafeRecoveryInvalidInput]invalid input store 2 doesn't exist\"\n"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	input = map[string]interface{}{"stores": []uint64{1}}
 	data, _ = json.Marshal(input)
 	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/remove-failed-stores", data, tu.StatusOK(re))
-	re.NoError(err)
+	suite.NoError(err)
 
 	// Test show
-	var output []unsaferecovery.StageOutput
+	var output []cluster.StageOutput
 	err = tu.ReadGetJSON(re, testDialClient, suite.urlPrefix+"/remove-failed-stores/show", &output)
-	re.NoError(err)
+	suite.NoError(err)
 }
 
 func (suite *unsafeOperationTestSuite) TestRemoveFailedStoresAutoDetect() {
@@ -92,10 +92,10 @@ func (suite *unsafeOperationTestSuite) TestRemoveFailedStoresAutoDetect() {
 	data, _ := json.Marshal(input)
 	err := tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/remove-failed-stores", data, tu.StatusNotOK(re),
 		tu.StringEqual(re, "\"Store ids are invalid\"\n"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	input = map[string]interface{}{"auto-detect": true}
 	data, _ = json.Marshal(input)
 	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/remove-failed-stores", data, tu.StatusOK(re))
-	re.NoError(err)
+	suite.NoError(err)
 }

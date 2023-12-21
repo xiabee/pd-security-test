@@ -17,13 +17,12 @@ package server
 import (
 	"bytes"
 	"context"
-	errorspkg "errors"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,7 +30,6 @@ import (
 	"time"
 
 	"github.com/coreos/go-semver/semver"
-	"github.com/gogo/protobuf/proto"
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -39,56 +37,49 @@ import (
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/pingcap/kvproto/pkg/tsopb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/sysutil"
+	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/audit"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/gc"
-	"github.com/tikv/pd/pkg/id"
-	"github.com/tikv/pd/pkg/keyspace"
-	ms_server "github.com/tikv/pd/pkg/mcs/metastorage/server"
-	"github.com/tikv/pd/pkg/mcs/registry"
-	rm_server "github.com/tikv/pd/pkg/mcs/resourcemanager/server"
-	_ "github.com/tikv/pd/pkg/mcs/resourcemanager/server/apis/v1" // init API group
-	_ "github.com/tikv/pd/pkg/mcs/tso/server/apis/v1"             // init tso API group
-	mcs "github.com/tikv/pd/pkg/mcs/utils"
-	"github.com/tikv/pd/pkg/member"
+	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/grpcutil"
+	"github.com/tikv/pd/pkg/jsonutil"
+	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/pkg/ratelimit"
-	"github.com/tikv/pd/pkg/replication"
-	sc "github.com/tikv/pd/pkg/schedule/config"
-	"github.com/tikv/pd/pkg/schedule/hbstream"
-	"github.com/tikv/pd/pkg/schedule/placement"
-	"github.com/tikv/pd/pkg/schedule/schedulers"
-	"github.com/tikv/pd/pkg/storage"
-	"github.com/tikv/pd/pkg/storage/endpoint"
-	"github.com/tikv/pd/pkg/storage/kv"
-	"github.com/tikv/pd/pkg/syncer"
 	"github.com/tikv/pd/pkg/systimemon"
-	"github.com/tikv/pd/pkg/tso"
-	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/grpcutil"
-	"github.com/tikv/pd/pkg/utils/jsonutil"
-	"github.com/tikv/pd/pkg/utils/logutil"
-	"github.com/tikv/pd/pkg/utils/syncutil"
-	"github.com/tikv/pd/pkg/utils/tsoutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
-	"github.com/tikv/pd/pkg/versioninfo"
+	"github.com/tikv/pd/pkg/tsoutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/encryptionkm"
+	"github.com/tikv/pd/server/gc"
+	"github.com/tikv/pd/server/id"
+	"github.com/tikv/pd/server/keyspace"
+	"github.com/tikv/pd/server/member"
+	syncer "github.com/tikv/pd/server/region_syncer"
+	"github.com/tikv/pd/server/replication"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/hbstream"
+	"github.com/tikv/pd/server/schedule/placement"
+	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/storage/endpoint"
+	"github.com/tikv/pd/server/storage/kv"
+	"github.com/tikv/pd/server/tso"
+	"github.com/tikv/pd/server/versioninfo"
+	"github.com/urfave/negroni"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
-	"go.etcd.io/etcd/mvcc/mvccpb"
 	"go.etcd.io/etcd/pkg/types"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
 
 const (
+	etcdTimeout           = time.Second * 3
 	serverMetricsInterval = time.Minute
+	leaderTickInterval    = 50 * time.Millisecond
 	// pdRootPath for all pd servers.
 	pdRootPath      = "/pd"
 	pdAPIPrefix     = "/pd/"
@@ -99,17 +90,6 @@ const (
 
 	recoveringMarkPath = "cluster/markers/snapshot-recovering"
 
-	// PDMode represents that server is in PD mode.
-	PDMode = "PD"
-	// APIServiceMode represents that server is in API service mode.
-	APIServiceMode = "API Service"
-
-	// maxRetryTimesGetServicePrimary is the max retry times for getting primary addr.
-	// Note: it need to be less than client.defaultPDTimeout
-	maxRetryTimesGetServicePrimary = 25
-	// retryIntervalGetServicePrimary is the retry interval for getting primary addr.
-	retryIntervalGetServicePrimary = 100 * time.Millisecond
-
 	lostPDLeaderMaxTimeoutSecs   = 10
 	lostPDLeaderReElectionFactor = 10
 )
@@ -117,20 +97,13 @@ const (
 // EtcdStartTimeout the timeout of the startup etcd.
 var EtcdStartTimeout = time.Minute * 5
 
-var (
-	// WithLabelValues is a heavy operation, define variable to avoid call it every time.
-	etcdTermGauge           = etcdStateGauge.WithLabelValues("term")
-	etcdAppliedIndexGauge   = etcdStateGauge.WithLabelValues("appliedIndex")
-	etcdCommittedIndexGauge = etcdStateGauge.WithLabelValues("committedIndex")
-)
-
-// Server is the pd server. It implements bs.Server
+// Server is the pd server.
 // nolint
 type Server struct {
 	diagnosticspb.DiagnosticsServer
 
-	// Server state. 0 is not running, 1 is running.
-	isRunning int64
+	// Server state.
+	isServing int64
 
 	// Server start timestamp
 	startTimestamp int64
@@ -149,7 +122,7 @@ type Server struct {
 	serverLoopWg     sync.WaitGroup
 
 	// for PD leader election.
-	member *member.EmbeddedEtcdMember
+	member *member.Member
 	// etcd client
 	client *clientv3.Client
 	// electionClient is used for leader election.
@@ -165,17 +138,13 @@ type Server struct {
 	// a unique ID.
 	idAllocator id.Allocator
 	// for encryption
-	encryptionKeyManager *encryption.Manager
+	encryptionKeyManager *encryptionkm.KeyManager
 	// for storage operation.
 	storage storage.Storage
 	// safepoint manager
 	gcSafePointManager *gc.SafePointManager
 	// keyspace manager
 	keyspaceManager *keyspace.Manager
-	// safe point V2 manager
-	safePointV2Manager *gc.SafePointV2Manager
-	// keyspace group manager
-	keyspaceGroupManager *keyspace.GroupManager
 	// for basicCluster operation.
 	basicCluster *core.BasicCluster
 	// for tso.
@@ -188,65 +157,101 @@ type Server struct {
 	lg       *zap.Logger
 	logProps *log.ZapProperties
 
-	// Callback functions for different stages
-	// startCallbacks will be called after the server is started.
+	// Add callback functions at different stages
 	startCallbacks []func()
-	// leaderCallbacks will be called after the server becomes leader.
-	leaderCallbacks []func(context.Context) error
-	// closeCallbacks will be called before the server is closed.
 	closeCallbacks []func()
 
-	// hot region history info storage
+	// hot region history info storeage
 	hotRegionStorage *storage.HotRegionStorage
 	// Store as map[string]*grpc.ClientConn
 	clientConns sync.Map
-
-	tsoClientPool struct {
-		syncutil.RWMutex
-		clients map[string]tsopb.TSO_TsoClient
-	}
-
 	// tsoDispatcher is used to dispatch different TSO requests to
 	// the corresponding forwarding TSO channel.
-	tsoDispatcher *tsoutil.TSODispatcher
-	// tsoProtoFactory is the abstract factory for creating tso
-	// related data structures defined in the TSO grpc service
-	tsoProtoFactory *tsoutil.TSOProtoFactory
-	// pdProtoFactory is the abstract factory for creating tso
-	// related data structures defined in the PD grpc service
-	pdProtoFactory *tsoutil.PDProtoFactory
+	tsoDispatcher sync.Map /* Store as map[string]chan *tsoRequest */
 
-	serviceRateLimiter *ratelimit.Controller
+	serviceRateLimiter *ratelimit.Limiter
 	serviceLabels      map[string][]apiutil.AccessPath
 	apiServiceLabelMap map[apiutil.AccessPath]string
-
-	grpcServiceRateLimiter *ratelimit.Controller
-	grpcServiceLabels      map[string]struct{}
-	grpcServer             *grpc.Server
 
 	serviceAuditBackendLabels map[string]*audit.BackendLabels
 
 	auditBackends []audit.Backend
-
-	registry                 *registry.ServiceRegistry
-	mode                     string
-	servicePrimaryMap        sync.Map /* Store as map[string]string */
-	tsoPrimaryWatcher        *etcdutil.LoopWatcher
-	schedulingPrimaryWatcher *etcdutil.LoopWatcher
 }
 
 // HandlerBuilder builds a server HTTP handler.
-type HandlerBuilder func(context.Context, *Server) (http.Handler, apiutil.APIServiceGroup, error)
+type HandlerBuilder func(context.Context, *Server) (http.Handler, ServiceGroup, error)
+
+// ServiceGroup used to register the service.
+type ServiceGroup struct {
+	Name       string
+	Version    string
+	IsCore     bool
+	PathPrefix string
+}
+
+const (
+	// CorePath the core group, is at REST path `/pd/api/v1`.
+	CorePath = "/pd/api/v1"
+	// ExtensionsPath the named groups are REST at `/pd/apis/{GROUP_NAME}/{Version}`.
+	ExtensionsPath = "/pd/apis"
+)
+
+func combineBuilderServerHTTPService(ctx context.Context, svr *Server, serviceBuilders ...HandlerBuilder) (map[string]http.Handler, error) {
+	userHandlers := make(map[string]http.Handler)
+	registerMap := make(map[string]struct{})
+
+	apiService := negroni.New()
+	recovery := negroni.NewRecovery()
+	apiService.Use(recovery)
+	router := mux.NewRouter()
+
+	for _, build := range serviceBuilders {
+		handler, info, err := build(ctx, svr)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsCore && len(info.PathPrefix) == 0 && (len(info.Name) == 0 || len(info.Version) == 0) {
+			return nil, errs.ErrAPIInformationInvalid.FastGenByArgs(info.Name, info.Version)
+		}
+		var pathPrefix string
+		if len(info.PathPrefix) != 0 {
+			pathPrefix = info.PathPrefix
+		} else if info.IsCore {
+			pathPrefix = CorePath
+		} else {
+			pathPrefix = path.Join(ExtensionsPath, info.Name, info.Version)
+		}
+		if _, ok := registerMap[pathPrefix]; ok {
+			return nil, errs.ErrServiceRegistered.FastGenByArgs(pathPrefix)
+		}
+
+		log.Info("register REST path", zap.String("path", pathPrefix))
+		registerMap[pathPrefix] = struct{}{}
+		if len(info.PathPrefix) != 0 {
+			// If PathPrefix is specified, register directly into userHandlers
+			userHandlers[pathPrefix] = handler
+		} else {
+			// If PathPrefix is not specified, register into apiService,
+			// and finally apiService is registered in userHandlers.
+			router.PathPrefix(pathPrefix).Handler(handler)
+			if info.IsCore {
+				// Deprecated
+				router.Path("/pd/health").Handler(handler)
+				// Deprecated
+				router.Path("/pd/ping").Handler(handler)
+			}
+		}
+	}
+	apiService.UseHandler(router)
+	userHandlers[pdAPIPrefix] = apiService
+
+	return userHandlers, nil
+}
 
 // CreateServer creates the UNINITIALIZED pd server with given configuration.
-func CreateServer(ctx context.Context, cfg *config.Config, services []string, legacyServiceBuilders ...HandlerBuilder) (*Server, error) {
-	var mode string
-	if len(services) != 0 {
-		mode = APIServiceMode
-	} else {
-		mode = PDMode
-	}
-	log.Info(fmt.Sprintf("%s config", mode), zap.Reflect("config", cfg))
+func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...HandlerBuilder) (*Server, error) {
+	log.Info("PD Config", zap.Reflect("config", cfg))
+	rand.Seed(time.Now().UnixNano())
 	serviceMiddlewareCfg := config.NewServiceMiddlewareConfig()
 
 	s := &Server{
@@ -254,17 +259,10 @@ func CreateServer(ctx context.Context, cfg *config.Config, services []string, le
 		persistOptions:                  config.NewPersistOptions(cfg),
 		serviceMiddlewareCfg:            serviceMiddlewareCfg,
 		serviceMiddlewarePersistOptions: config.NewServiceMiddlewarePersistOptions(serviceMiddlewareCfg),
-		member:                          &member.EmbeddedEtcdMember{},
+		member:                          &member.Member{},
 		ctx:                             ctx,
 		startTimestamp:                  time.Now().Unix(),
 		DiagnosticsServer:               sysutil.NewDiagnosticsServer(cfg.Log.File.Filename),
-		mode:                            mode,
-		tsoClientPool: struct {
-			syncutil.RWMutex
-			clients map[string]tsopb.TSO_TsoClient
-		}{
-			clients: make(map[string]tsopb.TSO_TsoClient),
-		},
 	}
 	s.handler = newHandler(s)
 
@@ -273,11 +271,10 @@ func CreateServer(ctx context.Context, cfg *config.Config, services []string, le
 		audit.NewLocalLogBackend(true),
 		audit.NewPrometheusHistogramBackend(serviceAuditHistogram, false),
 	}
-	s.serviceRateLimiter = ratelimit.NewController()
-	s.grpcServiceRateLimiter = ratelimit.NewController()
+	s.serviceRateLimiter = ratelimit.NewLimiter()
 	s.serviceAuditBackendLabels = make(map[string]*audit.BackendLabels)
+	s.serviceRateLimiter = ratelimit.NewLimiter()
 	s.serviceLabels = make(map[string][]apiutil.AccessPath)
-	s.grpcServiceLabels = make(map[string]struct{})
 	s.apiServiceLabelMap = make(map[apiutil.AccessPath]string)
 
 	// Adjust etcd config.
@@ -285,35 +282,22 @@ func CreateServer(ctx context.Context, cfg *config.Config, services []string, le
 	if err != nil {
 		return nil, err
 	}
-	if len(legacyServiceBuilders) != 0 {
-		userHandlers, err := combineBuilderServerHTTPService(ctx, s, legacyServiceBuilders...)
+	if len(serviceBuilders) != 0 {
+		userHandlers, err := combineBuilderServerHTTPService(ctx, s, serviceBuilders...)
 		if err != nil {
 			return nil, err
 		}
 		etcdCfg.UserHandlers = userHandlers
 	}
-	// New way to register services.
-	s.registry = registry.NewServerServiceRegistry()
-	failpoint.Inject("useGlobalRegistry", func() {
-		s.registry = registry.ServerServiceRegistry
-	})
-	s.registry.RegisterService("MetaStorage", ms_server.NewService[*Server])
-	s.registry.RegisterService("ResourceManager", rm_server.NewService[*Server])
-	// Register the micro services REST path.
-	s.registry.InstallAllRESTHandler(s, etcdCfg.UserHandlers)
-
 	etcdCfg.ServiceRegister = func(gs *grpc.Server) {
 		grpcServer := &GrpcServer{Server: s}
 		pdpb.RegisterPDServer(gs, grpcServer)
 		keyspacepb.RegisterKeyspaceServer(gs, &KeyspaceServer{GrpcServer: grpcServer})
 		diagnosticspb.RegisterDiagnosticsServer(gs, s)
-		// Register the micro services GRPC service.
-		s.registry.InstallAllGRPCServices(s, gs)
-		s.grpcServer = gs
 	}
 	s.etcdCfg = etcdCfg
-	s.lg = cfg.Logger
-	s.logProps = cfg.LogProps
+	s.lg = cfg.GetZapLogger()
+	s.logProps = cfg.GetZapLogProperties()
 	return s, nil
 }
 
@@ -347,23 +331,34 @@ func (s *Server) startEtcd(ctx context.Context) error {
 		return errs.ErrCancelStartEtcd.FastGenByArgs()
 	}
 
-	// start client
-	s.client, s.httpClient, err = s.startClient()
+	endpoints := []string{s.etcdCfg.ACUrls[0].String()}
+	log.Info("create etcd v3 client", zap.Strings("endpoints", endpoints), zap.Reflect("cert", s.cfg.Security))
+
+	lgc := zap.NewProductionConfig()
+	lgc.Encoding = log.ZapEncodingName
+	clientConfig := clientv3.Config{
+		Endpoints:   endpoints,
+		DialTimeout: etcdTimeout,
+		TLS:         tlsConfig,
+		LogConfig:   &lgc,
+	}
+	client, err := clientv3.New(clientConfig)
 	if err != nil {
-		return err
+		return errs.ErrNewEtcdClient.Wrap(err).GenWithStackByCause()
 	}
 
-	s.electionClient, err = s.startElectionClient()
+	s.electionClient, err = clientv3.New(clientConfig)
 	if err != nil {
-		return err
+		return errs.ErrNewEtcdClient.Wrap(err).GenWithStackByCause()
 	}
+
+	etcdServerID := uint64(etcd.Server.ID())
 
 	// update advertise peer urls.
-	etcdMembers, err := etcdutil.ListEtcdMembers(s.client)
+	etcdMembers, err := etcdutil.ListEtcdMembers(client)
 	if err != nil {
 		return err
 	}
-	etcdServerID := uint64(etcd.Server.ID())
 	for _, m := range etcdMembers.Members {
 		if etcdServerID == m.ID {
 			etcdPeerURLs := strings.Join(m.PeerURLs, ",")
@@ -373,45 +368,23 @@ func (s *Server) startEtcd(ctx context.Context) error {
 			}
 		}
 	}
+	s.client = client
+	// FIXME: Currently, there is no timeout set for certain requests, such as GetRegions,
+	// which may take a significant amount of time. However, it might be necessary to
+	// define an appropriate timeout in the future.
+	httpCli := &http.Client{}
+	if tlsConfig != nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = tlsConfig
+		httpCli.Transport = transport
+	}
+	s.httpClient = httpCli
+
 	failpoint.Inject("memberNil", func() {
 		time.Sleep(1500 * time.Millisecond)
 	})
 	s.member = member.NewMember(etcd, s.electionClient, etcdServerID)
-	s.initGRPCServiceLabels()
 	return nil
-}
-
-func (s *Server) initGRPCServiceLabels() {
-	for _, serviceInfo := range s.grpcServer.GetServiceInfo() {
-		for _, methodInfo := range serviceInfo.Methods {
-			s.grpcServiceLabels[methodInfo.Name] = struct{}{}
-		}
-	}
-}
-
-func (s *Server) startClient() (*clientv3.Client, *http.Client, error) {
-	tlsConfig, err := s.cfg.Security.ToTLSConfig()
-	if err != nil {
-		return nil, nil, err
-	}
-	etcdCfg, err := s.cfg.GenEmbedEtcdConfig()
-	if err != nil {
-		return nil, nil, err
-	}
-	return etcdutil.CreateClients(tlsConfig, etcdCfg.ACUrls)
-}
-
-func (s *Server) startElectionClient() (*clientv3.Client, error) {
-	tlsConfig, err := s.cfg.Security.ToTLSConfig()
-	if err != nil {
-		return nil, err
-	}
-	etcdCfg, err := s.cfg.GenEmbedEtcdConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	return etcdutil.CreateEtcdClient(tlsConfig, etcdCfg.ACUrls)
 }
 
 // AddStartCallback adds a callback in the startServer phase.
@@ -421,17 +394,17 @@ func (s *Server) AddStartCallback(callbacks ...func()) {
 
 func (s *Server) startServer(ctx context.Context) error {
 	var err error
-	if s.clusterID, err = etcdutil.InitClusterID(s.client, pdClusterIDPath); err != nil {
-		log.Error("failed to init cluster id", errs.ZapError(err))
+	if err = s.initClusterID(); err != nil {
 		return err
 	}
 	log.Info("init cluster id", zap.Uint64("cluster-id", s.clusterID))
-	// It may lose accuracy if use float64 to store uint64. So we store the cluster id in label.
+	// It may lose accuracy if use float64 to store uint64. So we store the
+	// cluster id in label.
 	metadataGauge.WithLabelValues(fmt.Sprintf("cluster%d", s.clusterID)).Set(0)
 	serverInfo.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
 
-	s.rootPath = endpoint.PDRootPath(s.clusterID)
-	s.member.InitMemberInfo(s.cfg.AdvertiseClientUrls, s.cfg.AdvertisePeerUrls, s.Name(), s.rootPath)
+	s.rootPath = path.Join(pdRootPath, strconv.FormatUint(s.clusterID, 10))
+	s.member.MemberInfo(s.cfg, s.Name(), s.rootPath)
 	s.member.SetMemberDeployPath(s.member.ID())
 	s.member.SetMemberBinaryVersion(s.member.ID(), versioninfo.PDReleaseVersion)
 	s.member.SetMemberGitHash(s.member.ID(), versioninfo.PDGitHash)
@@ -442,38 +415,33 @@ func (s *Server) startServer(ctx context.Context) error {
 		Label:     idAllocLabel,
 		Member:    s.member.MemberValue(),
 	})
+	s.tsoAllocatorManager = tso.NewAllocatorManager(
+		s.member, s.rootPath, s.cfg,
+		func() time.Duration { return s.persistOptions.GetMaxResetTSGap() })
+	// Set up the Global TSO Allocator here, it will be initialized once the PD campaigns leader successfully.
+	s.tsoAllocatorManager.SetUpAllocator(ctx, tso.GlobalDCLocation, s.member.GetLeadership())
+	// When disabled the Local TSO, we should clean up the Local TSO Allocator's meta info written in etcd if it exists.
+	if !s.cfg.EnableLocalTSO {
+		if err = s.tsoAllocatorManager.CleanUpDCLocation(); err != nil {
+			return err
+		}
+	}
+	if zone, exist := s.cfg.Labels[config.ZoneLabel]; exist && zone != "" && s.cfg.EnableLocalTSO {
+		if err = s.tsoAllocatorManager.SetLocalTSOConfig(zone); err != nil {
+			return err
+		}
+	}
+	s.encryptionKeyManager, err = encryptionkm.NewKeyManager(s.client, &s.cfg.Security.Encryption)
+	if err != nil {
+		return err
+	}
 	regionStorage, err := storage.NewStorageWithLevelDBBackend(ctx, filepath.Join(s.cfg.DataDir, "region-meta"), s.encryptionKeyManager)
 	if err != nil {
 		return err
 	}
 	defaultStorage := storage.NewStorageWithEtcdBackend(s.client, s.rootPath)
 	s.storage = storage.NewCoreStorage(defaultStorage, regionStorage)
-	s.tsoDispatcher = tsoutil.NewTSODispatcher(tsoProxyHandleDuration, tsoProxyBatchSize)
-	s.tsoProtoFactory = &tsoutil.TSOProtoFactory{}
-	s.pdProtoFactory = &tsoutil.PDProtoFactory{}
-	if !s.IsAPIServiceMode() {
-		s.tsoAllocatorManager = tso.NewAllocatorManager(s.ctx, mcs.DefaultKeyspaceGroupID, s.member, s.rootPath, s.storage, s, false)
-		// When disabled the Local TSO, we should clean up the Local TSO Allocator's meta info written in etcd if it exists.
-		if !s.cfg.EnableLocalTSO {
-			if err = s.tsoAllocatorManager.CleanUpDCLocation(); err != nil {
-				return err
-			}
-		}
-		if zone, exist := s.cfg.Labels[config.ZoneLabel]; exist && zone != "" && s.cfg.EnableLocalTSO {
-			if err = s.tsoAllocatorManager.SetLocalTSOConfig(zone); err != nil {
-				return err
-			}
-		}
-	}
-
-	s.encryptionKeyManager, err = encryption.NewManager(s.client, &s.cfg.Security.Encryption)
-	if err != nil {
-		return err
-	}
-
-	s.gcSafePointManager = gc.NewSafePointManager(s.storage, s.cfg.PDServerCfg)
-	s.basicCluster = core.NewBasicCluster()
-	s.cluster = cluster.NewRaftCluster(ctx, s.clusterID, s.GetBasicCluster(), s.GetStorage(), syncer.NewRegionSyncer(s), s.client, s.httpClient)
+	s.gcSafePointManager = gc.NewSafePointManager(s.storage)
 	keyspaceIDAllocator := id.NewAllocator(&id.AllocatorParams{
 		Client:    s.client,
 		RootPath:  s.rootPath,
@@ -482,30 +450,43 @@ func (s *Server) startServer(ctx context.Context) error {
 		Member:    s.member.MemberValue(),
 		Step:      keyspace.AllocStep,
 	})
-	if s.IsAPIServiceMode() {
-		s.keyspaceGroupManager = keyspace.NewKeyspaceGroupManager(s.ctx, s.storage, s.client, s.clusterID)
+	s.keyspaceManager, err = keyspace.NewKeyspaceManager(s.storage, keyspaceIDAllocator)
+	if err != nil {
+		return err
 	}
-	s.keyspaceManager = keyspace.NewKeyspaceManager(s.ctx, s.storage, s.cluster, keyspaceIDAllocator, &s.cfg.Keyspace, s.keyspaceGroupManager)
-	s.safePointV2Manager = gc.NewSafePointManagerV2(s.ctx, s.storage, s.storage, s.storage)
-	s.hbStreams = hbstream.NewHeartbeatStreams(ctx, s.clusterID, "", s.cluster)
+	s.basicCluster = core.NewBasicCluster()
+	s.cluster = cluster.NewRaftCluster(ctx, s.clusterID, syncer.NewRegionSyncer(s), s.client, s.httpClient)
+	s.hbStreams = hbstream.NewHeartbeatStreams(ctx, s.clusterID, s.cluster)
 	// initial hot_region_storage in here.
-
 	s.hotRegionStorage, err = storage.NewHotRegionsStorage(
 		ctx, filepath.Join(s.cfg.DataDir, "hot-region"), s.encryptionKeyManager, s.handler)
 	if err != nil {
 		return err
 	}
-
 	// Run callbacks
-	log.Info("triggering the start callback functions")
 	for _, cb := range s.startCallbacks {
 		cb()
 	}
 
 	// Server has started.
-	atomic.StoreInt64(&s.isRunning, 1)
-	serverMaxProcs.Set(float64(runtime.GOMAXPROCS(0)))
+	atomic.StoreInt64(&s.isServing, 1)
 	return nil
+}
+
+func (s *Server) initClusterID() error {
+	// Get any cluster key to parse the cluster ID.
+	resp, err := etcdutil.EtcdKVGet(s.client, pdClusterIDPath)
+	if err != nil {
+		return err
+	}
+
+	// If no key exist, generate a random cluster ID.
+	if len(resp.Kvs) == 0 {
+		s.clusterID, err = initOrGetClusterID(s.client, pdClusterIDPath)
+		return err
+	}
+	s.clusterID, err = typeutil.BytesToUint64(resp.Kvs[0].Value)
+	return err
 }
 
 // AddCloseCallback adds a callback in the Close phase.
@@ -515,7 +496,7 @@ func (s *Server) AddCloseCallback(callbacks ...func()) {
 
 // Close closes the server.
 func (s *Server) Close() {
-	if !atomic.CompareAndSwapInt64(&s.isRunning, 1, 0) {
+	if !atomic.CompareAndSwapInt64(&s.isServing, 1, 0) {
 		// server is already closed
 		return
 	}
@@ -523,9 +504,6 @@ func (s *Server) Close() {
 	log.Info("closing server")
 
 	s.stopServerLoop()
-	if s.IsAPIServiceMode() {
-		s.keyspaceGroupManager.Close()
-	}
 
 	if s.client != nil {
 		if err := s.client.Close(); err != nil {
@@ -553,14 +531,11 @@ func (s *Server) Close() {
 		log.Error("close storage meet error", errs.ZapError(err))
 	}
 
-	if s.hotRegionStorage != nil {
-		if err := s.hotRegionStorage.Close(); err != nil {
-			log.Error("close hot region storage meet error", errs.ZapError(err))
-		}
+	if err := s.hotRegionStorage.Close(); err != nil {
+		log.Error("close hot region storage meet error", errs.ZapError(err))
 	}
 
 	// Run callbacks
-	log.Info("triggering the close callback functions")
 	for _, cb := range s.closeCallbacks {
 		cb()
 	}
@@ -570,7 +545,7 @@ func (s *Server) Close() {
 
 // IsClosed checks whether server is closed or not.
 func (s *Server) IsClosed() bool {
-	return atomic.LoadInt64(&s.isRunning) == 0
+	return atomic.LoadInt64(&s.isServing) == 0
 }
 
 // Run runs the pd server.
@@ -582,14 +557,10 @@ func (s *Server) Run() error {
 	if err := s.startEtcd(s.ctx); err != nil {
 		return err
 	}
-
 	if err := s.startServer(s.ctx); err != nil {
 		return err
 	}
 
-	failpoint.Inject("delayStartServerLoop", func() {
-		time.Sleep(2 * time.Second)
-	})
 	s.startServerLoop(s.ctx)
 
 	return nil
@@ -617,15 +588,12 @@ func (s *Server) LoopContext() context.Context {
 
 func (s *Server) startServerLoop(ctx context.Context) {
 	s.serverLoopCtx, s.serverLoopCancel = context.WithCancel(ctx)
-	s.serverLoopWg.Add(4)
+	s.serverLoopWg.Add(5)
 	go s.leaderLoop()
 	go s.etcdLeaderLoop()
 	go s.serverMetricsLoop()
+	go s.tsoAllocatorLoop()
 	go s.encryptionKeyManagerLoop()
-	if s.IsAPIServiceMode() {
-		s.initTSOPrimaryWatcher()
-		s.initSchedulingPrimaryWatcher()
-	}
 }
 
 func (s *Server) stopServerLoop() {
@@ -639,17 +607,26 @@ func (s *Server) serverMetricsLoop() {
 
 	ctx, cancel := context.WithCancel(s.serverLoopCtx)
 	defer cancel()
-	ticker := time.NewTicker(serverMetricsInterval)
-	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C:
+		case <-time.After(serverMetricsInterval):
 			s.collectEtcdStateMetrics()
 		case <-ctx.Done():
 			log.Info("server is closed, exit metrics loop")
 			return
 		}
 	}
+}
+
+// tsoAllocatorLoop is used to run the TSO Allocator updating daemon.
+func (s *Server) tsoAllocatorLoop() {
+	defer logutil.LogPanic()
+	defer s.serverLoopWg.Done()
+
+	ctx, cancel := context.WithCancel(s.serverLoopCtx)
+	defer cancel()
+	s.tsoAllocatorManager.AllocatorDaemon(ctx)
+	log.Info("server is closed, exit allocator loop")
 }
 
 // encryptionKeyManagerLoop is used to start monitor encryption key changes.
@@ -664,9 +641,9 @@ func (s *Server) encryptionKeyManagerLoop() {
 }
 
 func (s *Server) collectEtcdStateMetrics() {
-	etcdTermGauge.Set(float64(s.member.Etcd().Server.Term()))
-	etcdAppliedIndexGauge.Set(float64(s.member.Etcd().Server.AppliedIndex()))
-	etcdCommittedIndexGauge.Set(float64(s.member.Etcd().Server.CommittedIndex()))
+	etcdStateGauge.WithLabelValues("term").Set(float64(s.member.Etcd().Server.Term()))
+	etcdStateGauge.WithLabelValues("appliedIndex").Set(float64(s.member.Etcd().Server.AppliedIndex()))
+	etcdStateGauge.WithLabelValues("committedIndex").Set(float64(s.member.Etcd().Server.CommittedIndex()))
 }
 
 func (s *Server) bootstrapCluster(req *pdpb.BootstrapRequest) (*pdpb.BootstrapResponse, error) {
@@ -747,10 +724,6 @@ func (s *Server) bootstrapCluster(req *pdpb.BootstrapRequest) (*pdpb.BootstrapRe
 		return nil, err
 	}
 
-	if err = s.GetKeyspaceManager().Bootstrap(); err != nil {
-		log.Warn("bootstrapping keyspace manager failed", errs.ZapError(err))
-	}
-
 	return &pdpb.BootstrapResponse{
 		ReplicationStatus: s.cluster.GetReplicationMode().GetReplicationStatus(),
 	}, nil
@@ -767,11 +740,6 @@ func (s *Server) createRaftCluster() error {
 func (s *Server) stopRaftCluster() {
 	failpoint.Inject("raftclusterIsBusy", func() {})
 	s.cluster.Stop()
-}
-
-// IsAPIServiceMode return whether the server is in API service mode.
-func (s *Server) IsAPIServiceMode() bool {
-	return s.mode == APIServiceMode
 }
 
 // GetAddr returns the server urls for clients.
@@ -807,7 +775,7 @@ func (s *Server) GetClient() *clientv3.Client {
 	return s.client
 }
 
-// GetHTTPClient returns builtin http client.
+// GetHTTPClient returns builtin etcd client.
 func (s *Server) GetHTTPClient() *http.Client {
 	return s.httpClient
 }
@@ -817,13 +785,8 @@ func (s *Server) GetLeader() *pdpb.Member {
 	return s.member.GetLeader()
 }
 
-// GetLeaderListenUrls gets service endpoints from the leader in election group.
-func (s *Server) GetLeaderListenUrls() []string {
-	return s.member.GetLeaderListenUrls()
-}
-
 // GetMember returns the member of server.
-func (s *Server) GetMember() *member.EmbeddedEtcdMember {
+func (s *Server) GetMember() *member.Member {
 	return s.member
 }
 
@@ -878,22 +841,6 @@ func (s *Server) GetKeyspaceManager() *keyspace.Manager {
 	return s.keyspaceManager
 }
 
-// SetKeyspaceManager sets the keyspace manager of server.
-// Note: it is only used for test.
-func (s *Server) SetKeyspaceManager(keyspaceManager *keyspace.Manager) {
-	s.keyspaceManager = keyspaceManager
-}
-
-// GetSafePointV2Manager returns the safe point v2 manager of server.
-func (s *Server) GetSafePointV2Manager() *gc.SafePointV2Manager {
-	return s.safePointV2Manager
-}
-
-// GetKeyspaceGroupManager returns the keyspace group manager of server.
-func (s *Server) GetKeyspaceGroupManager() *keyspace.GroupManager {
-	return s.keyspaceGroupManager
-}
-
 // Name returns the unique etcd Name for this server in etcd cluster.
 func (s *Server) Name() string {
 	return s.cfg.Name
@@ -922,7 +869,6 @@ func (s *Server) GetServiceMiddlewareConfig() *config.ServiceMiddlewareConfig {
 	cfg := s.serviceMiddlewareCfg.Clone()
 	cfg.AuditConfig = *s.serviceMiddlewarePersistOptions.GetAuditConfig().Clone()
 	cfg.RateLimitConfig = *s.serviceMiddlewarePersistOptions.GetRateLimitConfig().Clone()
-	cfg.GRPCRateLimitConfig = *s.serviceMiddlewarePersistOptions.GetGRPCRateLimitConfig().Clone()
 	return cfg
 }
 
@@ -938,52 +884,39 @@ func (s *Server) GetConfig() *config.Config {
 	cfg.Replication = *s.persistOptions.GetReplicationConfig().Clone()
 	cfg.PDServerCfg = *s.persistOptions.GetPDServerConfig().Clone()
 	cfg.ReplicationMode = *s.persistOptions.GetReplicationModeConfig()
-	cfg.Keyspace = *s.persistOptions.GetKeyspaceConfig().Clone()
 	cfg.LabelProperty = s.persistOptions.GetLabelPropertyConfig().Clone()
 	cfg.ClusterVersion = *s.persistOptions.GetClusterVersion()
 	if s.storage == nil {
 		return cfg
 	}
-	sches, configs, err := s.storage.LoadAllSchedulerConfigs()
+	sches, configs, err := s.storage.LoadAllScheduleConfig()
 	if err != nil {
 		return cfg
 	}
-	cfg.Schedule.SchedulersPayload = schedulers.ToPayload(sches, configs)
+	payload := make(map[string]interface{})
+	for i, sche := range sches {
+		var config interface{}
+		err := schedule.DecodeConfig([]byte(configs[i]), &config)
+		if err != nil {
+			log.Error("failed to decode scheduler config",
+				zap.String("config", configs[i]),
+				zap.String("scheduler", sche),
+				errs.ZapError(err))
+			continue
+		}
+		payload[sche] = config
+	}
+	cfg.Schedule.SchedulersPayload = payload
 	return cfg
 }
 
-// GetKeyspaceConfig gets the keyspace config information.
-func (s *Server) GetKeyspaceConfig() *config.KeyspaceConfig {
-	return s.persistOptions.GetKeyspaceConfig().Clone()
-}
-
-// SetKeyspaceConfig sets the keyspace config information.
-func (s *Server) SetKeyspaceConfig(cfg config.KeyspaceConfig) error {
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-	old := s.persistOptions.GetKeyspaceConfig()
-	s.persistOptions.SetKeyspaceConfig(&cfg)
-	if err := s.persistOptions.Persist(s.storage); err != nil {
-		s.persistOptions.SetKeyspaceConfig(old)
-		log.Error("failed to update keyspace config",
-			zap.Reflect("new", cfg),
-			zap.Reflect("old", old),
-			errs.ZapError(err))
-		return err
-	}
-	s.keyspaceManager.UpdateConfig(&cfg)
-	log.Info("keyspace config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
-	return nil
-}
-
 // GetScheduleConfig gets the balance config information.
-func (s *Server) GetScheduleConfig() *sc.ScheduleConfig {
+func (s *Server) GetScheduleConfig() *config.ScheduleConfig {
 	return s.persistOptions.GetScheduleConfig().Clone()
 }
 
 // SetScheduleConfig sets the balance config information.
-func (s *Server) SetScheduleConfig(cfg sc.ScheduleConfig) error {
+func (s *Server) SetScheduleConfig(cfg config.ScheduleConfig) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -1006,12 +939,12 @@ func (s *Server) SetScheduleConfig(cfg sc.ScheduleConfig) error {
 }
 
 // GetReplicationConfig get the replication config.
-func (s *Server) GetReplicationConfig() *sc.ReplicationConfig {
+func (s *Server) GetReplicationConfig() *config.ReplicationConfig {
 	return s.persistOptions.GetReplicationConfig().Clone()
 }
 
 // SetReplicationConfig sets the replication config.
-func (s *Server) SetReplicationConfig(cfg sc.ReplicationConfig) error {
+func (s *Server) SetReplicationConfig(cfg config.ReplicationConfig) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -1043,7 +976,7 @@ func (s *Server) SetReplicationConfig(cfg sc.ReplicationConfig) error {
 			return errs.ErrNotBootstrapped.GenWithStackByArgs()
 		}
 		// replication.MaxReplicas won't work when placement rule is enabled and not only have one default rule.
-		defaultRule := rc.GetRuleManager().GetRule(placement.DefaultGroupID, placement.DefaultRuleID)
+		defaultRule := rc.GetRuleManager().GetRule("pd", "default")
 
 		CheckInDefaultRule := func() error {
 			// replication config won't work when placement rule is enabled and exceeds one default rule
@@ -1051,14 +984,14 @@ func (s *Server) SetReplicationConfig(cfg sc.ReplicationConfig) error {
 				len(defaultRule.StartKey) == 0 && len(defaultRule.EndKey) == 0) {
 				return errors.New("cannot update MaxReplicas, LocationLabels or IsolationLevel when placement rules feature is enabled and not only default rule exists, please update rule instead")
 			}
-			if !(defaultRule.Count == int(old.MaxReplicas) && typeutil.AreStringSlicesEqual(defaultRule.LocationLabels, []string(old.LocationLabels)) && defaultRule.IsolationLevel == old.IsolationLevel) {
+			if !(defaultRule.Count == int(old.MaxReplicas) && typeutil.StringsEqual(defaultRule.LocationLabels, []string(old.LocationLabels)) && defaultRule.IsolationLevel == old.IsolationLevel) {
 				return errors.New("cannot to update replication config, the default rules do not consistent with replication config, please update rule instead")
 			}
 
 			return nil
 		}
 
-		if !(cfg.MaxReplicas == old.MaxReplicas && typeutil.AreStringSlicesEqual(cfg.LocationLabels, old.LocationLabels) && cfg.IsolationLevel == old.IsolationLevel) {
+		if !(cfg.MaxReplicas == old.MaxReplicas && typeutil.StringsEqual(cfg.LocationLabels, old.LocationLabels) && cfg.IsolationLevel == old.IsolationLevel) {
 			if err := CheckInDefaultRule(); err != nil {
 				return err
 			}
@@ -1121,7 +1054,7 @@ func (s *Server) SetAuditConfig(cfg config.AuditConfig) error {
 			errs.ZapError(err))
 		return err
 	}
-	log.Info("audit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
+	log.Info("Audit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
 	return nil
 }
 
@@ -1129,7 +1062,7 @@ func (s *Server) SetAuditConfig(cfg config.AuditConfig) error {
 func (s *Server) UpdateRateLimitConfig(key, label string, value ratelimit.DimensionConfig) error {
 	cfg := s.GetServiceMiddlewareConfig()
 	rateLimitCfg := make(map[string]ratelimit.DimensionConfig)
-	for label, item := range cfg.RateLimitConfig.LimiterConfig {
+	for label, item := range cfg.LimiterConfig {
 		rateLimitCfg[label] = item
 	}
 	rateLimitCfg[label] = value
@@ -1164,62 +1097,13 @@ func (s *Server) SetRateLimitConfig(cfg config.RateLimitConfig) error {
 	s.serviceMiddlewarePersistOptions.SetRateLimitConfig(&cfg)
 	if err := s.serviceMiddlewarePersistOptions.Persist(s.storage); err != nil {
 		s.serviceMiddlewarePersistOptions.SetRateLimitConfig(old)
-		log.Error("failed to update rate limit config",
+		log.Error("failed to update Rate Limit config",
 			zap.Reflect("new", cfg),
 			zap.Reflect("old", old),
 			errs.ZapError(err))
 		return err
 	}
-	log.Info("rate limit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
-	return nil
-}
-
-// UpdateGRPCRateLimitConfig is used to update rate-limit config which will reserve old limiter-config
-func (s *Server) UpdateGRPCRateLimitConfig(key, label string, value ratelimit.DimensionConfig) error {
-	cfg := s.GetServiceMiddlewareConfig()
-	rateLimitCfg := make(map[string]ratelimit.DimensionConfig)
-	for label, item := range cfg.GRPCRateLimitConfig.LimiterConfig {
-		rateLimitCfg[label] = item
-	}
-	rateLimitCfg[label] = value
-	return s.UpdateGRPCRateLimit(&cfg.GRPCRateLimitConfig, key, &rateLimitCfg)
-}
-
-// UpdateGRPCRateLimit is used to update gRPC rate-limit config which will overwrite limiter-config
-func (s *Server) UpdateGRPCRateLimit(cfg *config.GRPCRateLimitConfig, key string, value interface{}) error {
-	updated, found, err := jsonutil.AddKeyValue(cfg, key, value)
-	if err != nil {
-		return err
-	}
-
-	if !found {
-		return errors.Errorf("config item %s not found", key)
-	}
-
-	if updated {
-		err = s.SetGRPCRateLimitConfig(*cfg)
-	}
-	return err
-}
-
-// GetGRPCRateLimitConfig gets the rate limit config information.
-func (s *Server) GetGRPCRateLimitConfig() *config.GRPCRateLimitConfig {
-	return s.serviceMiddlewarePersistOptions.GetGRPCRateLimitConfig().Clone()
-}
-
-// SetGRPCRateLimitConfig sets the rate limit config.
-func (s *Server) SetGRPCRateLimitConfig(cfg config.GRPCRateLimitConfig) error {
-	old := s.serviceMiddlewarePersistOptions.GetGRPCRateLimitConfig()
-	s.serviceMiddlewarePersistOptions.SetGRPCRateLimitConfig(&cfg)
-	if err := s.serviceMiddlewarePersistOptions.Persist(s.storage); err != nil {
-		s.serviceMiddlewarePersistOptions.SetGRPCRateLimitConfig(old)
-		log.Error("failed to update gRPC rate limit config",
-			zap.Reflect("new", cfg),
-			zap.Reflect("old", old),
-			errs.ZapError(err))
-		return err
-	}
-	log.Info("gRPC rate limit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
+	log.Info("Rate Limit config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
 	return nil
 }
 
@@ -1349,23 +1233,12 @@ func (s *Server) GetTLSConfig() *grpcutil.TLSConfig {
 	return &s.cfg.Security.TLSConfig
 }
 
-// GetControllerConfig gets the resource manager controller config.
-func (s *Server) GetControllerConfig() *rm_server.ControllerConfig {
-	return &s.cfg.Controller
-}
-
 // GetRaftCluster gets Raft cluster.
 // If cluster has not been bootstrapped, return nil.
 func (s *Server) GetRaftCluster() *cluster.RaftCluster {
 	if s.IsClosed() || !s.cluster.IsRunning() {
 		return nil
 	}
-	return s.cluster
-}
-
-// DirectlyGetRaftCluster returns raft cluster directly.
-// Only used for test.
-func (s *Server) DirectlyGetRaftCluster() *cluster.RaftCluster {
 	return s.cluster
 }
 
@@ -1400,15 +1273,6 @@ func (s *Server) GetRegions() []*core.RegionInfo {
 	return nil
 }
 
-// IsServiceIndependent returns if the service is enabled
-func (s *Server) IsServiceIndependent(name string) bool {
-	rc := s.GetRaftCluster()
-	if rc != nil {
-		return rc.IsServiceIndependent(name)
-	}
-	return false
-}
-
 // GetServiceLabels returns ApiAccessPaths by given service label
 // TODO: this function will be used for updating api rate limit config
 func (s *Server) GetServiceLabels(serviceLabel string) []apiutil.AccessPath {
@@ -1418,21 +1282,15 @@ func (s *Server) GetServiceLabels(serviceLabel string) []apiutil.AccessPath {
 	return nil
 }
 
-// IsGRPCServiceLabelExist returns if the service label exists
-func (s *Server) IsGRPCServiceLabelExist(serviceLabel string) bool {
-	_, ok := s.grpcServiceLabels[serviceLabel]
-	return ok
-}
-
 // GetAPIAccessServiceLabel returns service label by given access path
 // TODO: this function will be used for updating api rate limit config
 func (s *Server) GetAPIAccessServiceLabel(accessPath apiutil.AccessPath) string {
-	if serviceLabel, ok := s.apiServiceLabelMap[accessPath]; ok {
-		return serviceLabel
+	if servicelabel, ok := s.apiServiceLabelMap[accessPath]; ok {
+		return servicelabel
 	}
 	accessPathNoMethod := apiutil.NewAccessPath(accessPath.Path, "")
-	if serviceLabel, ok := s.apiServiceLabelMap[accessPathNoMethod]; ok {
-		return serviceLabel
+	if servicelabel, ok := s.apiServiceLabelMap[accessPathNoMethod]; ok {
+		return servicelabel
 	}
 	return ""
 }
@@ -1467,11 +1325,11 @@ func (s *Server) SetServiceAuditBackendLabels(serviceLabel string, labels []stri
 }
 
 // GetServiceRateLimiter is used to get rate limiter
-func (s *Server) GetServiceRateLimiter() *ratelimit.Controller {
+func (s *Server) GetServiceRateLimiter() *ratelimit.Limiter {
 	return s.serviceRateLimiter
 }
 
-// IsInRateLimitAllowList returns whether given service label is in allow lost
+// IsInRateLimitAllowList returns whethis given service label is in allow lost
 func (s *Server) IsInRateLimitAllowList(serviceLabel string) bool {
 	return s.serviceRateLimiter.IsInAllowList(serviceLabel)
 }
@@ -1479,16 +1337,6 @@ func (s *Server) IsInRateLimitAllowList(serviceLabel string) bool {
 // UpdateServiceRateLimiter is used to update RateLimiter
 func (s *Server) UpdateServiceRateLimiter(serviceLabel string, opts ...ratelimit.Option) ratelimit.UpdateStatus {
 	return s.serviceRateLimiter.Update(serviceLabel, opts...)
-}
-
-// GetGRPCRateLimiter is used to get rate limiter
-func (s *Server) GetGRPCRateLimiter() *ratelimit.Controller {
-	return s.grpcServiceRateLimiter
-}
-
-// UpdateGRPCServiceRateLimiter is used to update RateLimiter
-func (s *Server) UpdateGRPCServiceRateLimiter(serviceLabel string, opts ...ratelimit.Option) ratelimit.UpdateStatus {
-	return s.grpcServiceRateLimiter.Update(serviceLabel, opts...)
 }
 
 // GetClusterStatus gets cluster status.
@@ -1500,13 +1348,22 @@ func (s *Server) GetClusterStatus() (*cluster.Status, error) {
 
 // SetLogLevel sets log level.
 func (s *Server) SetLogLevel(level string) error {
-	if !logutil.IsLevelLegal(level) {
+	if !isLevelLegal(level) {
 		return errors.Errorf("log level %s is illegal", level)
 	}
 	s.cfg.Log.Level = level
 	log.SetLevel(logutil.StringToZapLogLevel(level))
 	log.Warn("log level changed", zap.String("level", log.GetLevel().String()))
 	return nil
+}
+
+func isLevelLegal(level string) bool {
+	switch strings.ToLower(level) {
+	case "fatal", "error", "warn", "warning", "debug", "info":
+		return true
+	default:
+		return false
+	}
 }
 
 // GetReplicationModeConfig returns the replication mode config.
@@ -1554,27 +1411,17 @@ func (s *Server) SetReplicationModeConfig(cfg config.ReplicationModeConfig) erro
 	return nil
 }
 
-// IsServing returns whether the server is the leader if there is embedded etcd, or the primary otherwise.
-func (s *Server) IsServing() bool {
-	return s.member.IsLeader()
-}
-
-// AddServiceReadyCallback adds callbacks when the server becomes the leader if there is embedded etcd, or the primary otherwise.
-func (s *Server) AddServiceReadyCallback(callbacks ...func(context.Context) error) {
-	s.leaderCallbacks = append(s.leaderCallbacks, callbacks...)
-}
-
 func (s *Server) leaderLoop() {
 	defer logutil.LogPanic()
 	defer s.serverLoopWg.Done()
 
 	for {
 		if s.IsClosed() {
-			log.Info(fmt.Sprintf("server is closed, return %s leader loop", s.mode))
+			log.Info("server is closed, return pd leader loop")
 			return
 		}
 
-		leader, checkAgain := s.member.CheckLeader()
+		leader, rev, checkAgain := s.member.CheckLeader()
 		// add failpoint to test leader check go to stuck.
 		failpoint.Inject("leaderLoopCheckAgain", func(val failpoint.Value) {
 			memberString := val.(string)
@@ -1592,17 +1439,15 @@ func (s *Server) leaderLoop() {
 				log.Error("reload config failed", errs.ZapError(err))
 				continue
 			}
-			if !s.IsAPIServiceMode() {
-				// Check the cluster dc-location after the PD leader is elected
-				go s.tsoAllocatorManager.ClusterDCLocationChecker()
-			}
+			// Check the cluster dc-location after the PD leader is elected
+			go s.tsoAllocatorManager.ClusterDCLocationChecker()
 			syncer := s.cluster.GetRegionSyncer()
 			if s.persistOptions.IsUseRegionStorage() {
-				syncer.StartSyncWithLeader(leader.GetListenUrls()[0])
+				syncer.StartSyncWithLeader(leader.GetClientUrls()[0])
 			}
 			log.Info("start to watch pd leader", zap.Stringer("pd-leader", leader))
 			// WatchLeader will keep looping and never return unless the PD leader has changed.
-			leader.Watch(s.serverLoopCtx)
+			s.member.WatchLeader(s.serverLoopCtx, leader, rev)
 			syncer.StopSyncWithLeader()
 			log.Info("pd leader has changed, try to re-campaign a pd leader")
 		}
@@ -1641,14 +1486,14 @@ func (s *Server) leaderLoop() {
 }
 
 func (s *Server) campaignLeader() {
-	log.Info(fmt.Sprintf("start to campaign %s leader", s.mode), zap.String("campaign-leader-name", s.Name()))
-	if err := s.member.CampaignLeader(s.ctx, s.cfg.LeaderLease); err != nil {
+	log.Info("start to campaign pd leader", zap.String("campaign-pd-leader-name", s.Name()))
+	if err := s.member.CampaignLeader(s.cfg.LeaderLease); err != nil {
 		if err.Error() == errs.ErrEtcdTxnConflict.Error() {
-			log.Info(fmt.Sprintf("campaign %s leader meets error due to txn conflict, another PD/API server may campaign successfully", s.mode),
-				zap.String("campaign-leader-name", s.Name()))
+			log.Info("campaign pd leader meets error due to txn conflict, another PD server may campaign successfully",
+				zap.String("campaign-pd-leader-name", s.Name()))
 		} else {
-			log.Error(fmt.Sprintf("campaign %s leader meets error due to etcd error", s.mode),
-				zap.String("campaign-leader-name", s.Name()),
+			log.Error("campaign pd leader meets error due to etcd error",
+				zap.String("campaign-pd-leader-name", s.Name()),
 				errs.ZapError(err))
 		}
 		return
@@ -1667,31 +1512,27 @@ func (s *Server) campaignLeader() {
 
 	// maintain the PD leadership, after this, TSO can be service.
 	s.member.KeepLeader(ctx)
-	log.Info(fmt.Sprintf("campaign %s leader ok", s.mode), zap.String("campaign-leader-name", s.Name()))
+	log.Info("campaign pd leader ok", zap.String("campaign-pd-leader-name", s.Name()))
 
-	if !s.IsAPIServiceMode() {
-		allocator, err := s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
-		if err != nil {
-			log.Error("failed to get the global TSO allocator", errs.ZapError(err))
-			return
-		}
-		log.Info("initializing the global TSO allocator")
-		if err := allocator.Initialize(0); err != nil {
-			log.Error("failed to initialize the global TSO allocator", errs.ZapError(err))
-			return
-		}
-		defer func() {
-			s.tsoAllocatorManager.ResetAllocatorGroup(tso.GlobalDCLocation)
-			failpoint.Inject("updateAfterResetTSO", func() {
-				if err = allocator.UpdateTSO(); !errorspkg.Is(err, errs.ErrUpdateTimestamp) {
-					log.Panic("the tso update after reset should return ErrUpdateTimestamp as expected", zap.Error(err))
-				}
-				if allocator.IsInitialize() {
-					log.Panic("the allocator should be uninitialized after reset")
-				}
-			})
-		}()
+	allocator, err := s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
+	if err != nil {
+		log.Error("failed to get the global TSO allocator", errs.ZapError(err))
+		return
 	}
+	log.Info("initializing the global TSO allocator")
+	if err := allocator.Initialize(0); err != nil {
+		log.Error("failed to initialize the global TSO allocator", errs.ZapError(err))
+		return
+	}
+	defer func() {
+		s.tsoAllocatorManager.ResetAllocatorGroup(tso.GlobalDCLocation)
+		failpoint.Inject("updateAfterResetTSO", func() {
+			if err = allocator.UpdateTSO(); err != nil {
+				panic(err)
+			}
+		})
+	}()
+
 	if err := s.reloadConfigFromKV(); err != nil {
 		log.Error("failed to reload configuration", errs.ZapError(err))
 		return
@@ -1707,14 +1548,6 @@ func (s *Server) campaignLeader() {
 		return
 	}
 
-	log.Info("triggering the leader callback functions")
-	for _, cb := range s.leaderCallbacks {
-		if err := cb(ctx); err != nil {
-			log.Error("failed to execute leader callback function", errs.ZapError(err))
-			return
-		}
-	}
-
 	// Try to create raft cluster.
 	if err := s.createRaftCluster(); err != nil {
 		log.Error("failed to create raft cluster", errs.ZapError(err))
@@ -1727,23 +1560,19 @@ func (s *Server) campaignLeader() {
 	}
 	// EnableLeader to accept the remaining service, such as GetStore, GetRegion.
 	s.member.EnableLeader()
-	member.ServiceMemberGauge.WithLabelValues(s.mode).Set(1)
-	if !s.IsAPIServiceMode() {
-		// Check the cluster dc-location after the PD leader is elected.
-		go s.tsoAllocatorManager.ClusterDCLocationChecker()
-	}
+	// Check the cluster dc-location after the PD leader is elected.
+	go s.tsoAllocatorManager.ClusterDCLocationChecker()
 	defer resetLeaderOnce.Do(func() {
 		// as soon as cancel the leadership keepalive, then other member have chance
 		// to be new leader.
 		cancel()
 		s.member.ResetLeader()
-		member.ServiceMemberGauge.WithLabelValues(s.mode).Set(0)
 	})
 
 	CheckPDVersion(s.persistOptions)
-	log.Info(fmt.Sprintf("%s leader is ready to serve", s.mode), zap.String("leader-name", s.Name()))
+	log.Info("PD cluster leader is ready to serve", zap.String("pd-leader-name", s.Name()))
 
-	leaderTicker := time.NewTicker(mcs.LeaderTickInterval)
+	leaderTicker := time.NewTicker(leaderTickInterval)
 	defer leaderTicker.Stop()
 
 	for {
@@ -1782,14 +1611,10 @@ func (s *Server) etcdLeaderLoop() {
 
 	ctx, cancel := context.WithCancel(s.serverLoopCtx)
 	defer cancel()
-	ticker := time.NewTicker(s.cfg.LeaderPriorityCheckInterval.Duration)
-	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C:
+		case <-time.After(s.cfg.LeaderPriorityCheckInterval.Duration):
 			s.member.CheckPriority(ctx)
-			// Note: we reset the ticker here to support updating configuration dynamically.
-			ticker.Reset(s.cfg.LeaderPriorityCheckInterval.Duration)
 		case <-ctx.Done():
 			log.Info("server is closed, exit etcd leader loop")
 			return
@@ -1807,8 +1632,6 @@ func (s *Server) reloadConfigFromKV() error {
 		return err
 	}
 	s.loadRateLimitConfig()
-	s.loadGRPCRateLimitConfig()
-	s.loadKeyspaceConfig()
 	useRegionStorage := s.persistOptions.IsUseRegionStorage()
 	regionStorage := storage.TrySwitchRegionStorage(s.storage, useRegionStorage)
 	if regionStorage != nil {
@@ -1821,27 +1644,11 @@ func (s *Server) reloadConfigFromKV() error {
 	return nil
 }
 
-func (s *Server) loadKeyspaceConfig() {
-	if s.keyspaceManager == nil {
-		return
-	}
-	cfg := s.persistOptions.GetKeyspaceConfig()
-	s.keyspaceManager.UpdateConfig(cfg)
-}
-
 func (s *Server) loadRateLimitConfig() {
 	cfg := s.serviceMiddlewarePersistOptions.GetRateLimitConfig().LimiterConfig
 	for key := range cfg {
 		value := cfg[key]
 		s.serviceRateLimiter.Update(key, ratelimit.UpdateDimensionConfig(&value))
-	}
-}
-
-func (s *Server) loadGRPCRateLimitConfig() {
-	cfg := s.serviceMiddlewarePersistOptions.GetGRPCRateLimitConfig().LimiterConfig
-	for key := range cfg {
-		value := cfg[key]
-		s.grpcServiceRateLimiter.Update(key, ratelimit.UpdateDimensionConfig(&value))
 	}
 }
 
@@ -1856,7 +1663,7 @@ func (s *Server) ReplicateFileToMember(ctx context.Context, member *pdpb.Member,
 	}
 	url := clientUrls[0] + filepath.Join("/pd/api/v1/admin/persist-file", name)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(data))
-	req.Header.Set(apiutil.PDAllowFollowerHandleHeader, "true")
+	req.Header.Set("PD-Allow-follower-handle", "true")
 	res, err := s.httpClient.Do(req)
 	if err != nil {
 		log.Warn("failed to replicate file", zap.String("name", name), zap.String("member", member.GetName()), errs.ZapError(err))
@@ -1945,88 +1752,18 @@ func (s *Server) UnmarkSnapshotRecovering(ctx context.Context) error {
 	return err
 }
 
-// GetServicePrimaryAddr returns the primary address for a given service.
-// Note: This function will only return primary address without judging if it's alive.
-func (s *Server) GetServicePrimaryAddr(ctx context.Context, serviceName string) (string, bool) {
-	ticker := time.NewTicker(retryIntervalGetServicePrimary)
-	defer ticker.Stop()
-	for i := 0; i < maxRetryTimesGetServicePrimary; i++ {
-		if v, ok := s.servicePrimaryMap.Load(serviceName); ok {
-			return v.(string), true
-		}
-		select {
-		case <-s.ctx.Done():
-			return "", false
-		case <-ctx.Done():
-			return "", false
-		case <-ticker.C:
-		}
-	}
-	return "", false
-}
-
-// SetServicePrimaryAddr sets the primary address directly.
-// Note: This function is only used for test.
-func (s *Server) SetServicePrimaryAddr(serviceName, addr string) {
-	s.servicePrimaryMap.Store(serviceName, addr)
-}
-
-func (s *Server) initTSOPrimaryWatcher() {
-	serviceName := mcs.TSOServiceName
-	tsoRootPath := endpoint.TSOSvcRootPath(s.clusterID)
-	tsoServicePrimaryKey := endpoint.KeyspaceGroupPrimaryPath(tsoRootPath, mcs.DefaultKeyspaceGroupID)
-	s.tsoPrimaryWatcher = s.initServicePrimaryWatcher(serviceName, tsoServicePrimaryKey)
-	s.tsoPrimaryWatcher.StartWatchLoop()
-}
-
-func (s *Server) initSchedulingPrimaryWatcher() {
-	serviceName := mcs.SchedulingServiceName
-	primaryKey := endpoint.SchedulingPrimaryPath(s.clusterID)
-	s.schedulingPrimaryWatcher = s.initServicePrimaryWatcher(serviceName, primaryKey)
-	s.schedulingPrimaryWatcher.StartWatchLoop()
-}
-
-func (s *Server) initServicePrimaryWatcher(serviceName string, primaryKey string) *etcdutil.LoopWatcher {
-	putFn := func(kv *mvccpb.KeyValue) error {
-		primary := member.NewParticipantByService(serviceName)
-		if err := proto.Unmarshal(kv.Value, primary); err != nil {
-			return err
-		}
-		listenUrls := primary.GetListenUrls()
-		if len(listenUrls) > 0 {
-			// listenUrls[0] is the primary service endpoint of the keyspace group
-			s.servicePrimaryMap.Store(serviceName, listenUrls[0])
-			log.Info("update service primary", zap.String("service-name", serviceName), zap.String("primary", listenUrls[0]))
-		}
-		return nil
-	}
-	deleteFn := func(kv *mvccpb.KeyValue) error {
-		var oldPrimary string
-		v, ok := s.servicePrimaryMap.Load(serviceName)
-		if ok {
-			oldPrimary = v.(string)
-		}
-		log.Info("delete service primary", zap.String("service-name", serviceName), zap.String("old-primary", oldPrimary))
-		s.servicePrimaryMap.Delete(serviceName)
-		return nil
-	}
-	name := fmt.Sprintf("%s-primary-watcher", serviceName)
-	return etcdutil.NewLoopWatcher(
-		s.serverLoopCtx,
-		&s.serverLoopWg,
-		s.client,
-		name,
-		primaryKey,
-		func([]*clientv3.Event) error { return nil },
-		putFn,
-		deleteFn,
-		func([]*clientv3.Event) error { return nil },
-	)
-}
-
 // RecoverAllocID recover alloc id. set current base id to input id
 func (s *Server) RecoverAllocID(ctx context.Context, id uint64) error {
 	return s.idAllocator.SetBase(id)
+}
+
+// GetGlobalTS returns global tso.
+func (s *Server) GetGlobalTS() (uint64, error) {
+	ts, err := s.tsoAllocatorManager.GetGlobalTSO()
+	if err != nil {
+		return 0, err
+	}
+	return tsoutil.GenerateTS(ts), nil
 }
 
 // GetExternalTS returns external timestamp.
@@ -2039,7 +1776,11 @@ func (s *Server) GetExternalTS() uint64 {
 }
 
 // SetExternalTS returns external timestamp.
-func (s *Server) SetExternalTS(externalTS, globalTS uint64) error {
+func (s *Server) SetExternalTS(externalTS uint64) error {
+	globalTS, err := s.GetGlobalTS()
+	if err != nil {
+		return err
+	}
 	if tsoutil.CompareTimestampUint64(externalTS, globalTS) == 1 {
 		desc := "the external timestamp should not be larger than global ts"
 		log.Error(desc, zap.Uint64("request timestamp", externalTS), zap.Uint64("global ts", globalTS))
@@ -2051,48 +1792,12 @@ func (s *Server) SetExternalTS(externalTS, globalTS uint64) error {
 	}
 	currentExternalTS := c.GetExternalTS()
 	if tsoutil.CompareTimestampUint64(externalTS, currentExternalTS) != 1 {
-		desc := "the external timestamp should be larger than current external timestamp"
-		log.Error(desc, zap.Uint64("request", externalTS), zap.Uint64("current", currentExternalTS))
+		desc := "the external timestamp should be larger than now"
+		log.Error(desc, zap.Uint64("request timestamp", externalTS), zap.Uint64("current external timestamp", currentExternalTS))
 		return errors.New(desc)
 	}
 
 	return c.SetExternalTS(externalTS)
-}
-
-// IsLocalTSOEnabled returns if the local TSO is enabled.
-func (s *Server) IsLocalTSOEnabled() bool {
-	return s.cfg.IsLocalTSOEnabled()
-}
-
-// GetMaxConcurrentTSOProxyStreamings returns the max concurrent TSO proxy streamings.
-// If the value is negative, there is no limit.
-func (s *Server) GetMaxConcurrentTSOProxyStreamings() int {
-	return s.cfg.GetMaxConcurrentTSOProxyStreamings()
-}
-
-// GetTSOProxyRecvFromClientTimeout returns timeout value for TSO proxy receiving from the client.
-func (s *Server) GetTSOProxyRecvFromClientTimeout() time.Duration {
-	return s.cfg.GetTSOProxyRecvFromClientTimeout()
-}
-
-// GetLeaderLease returns the leader lease.
-func (s *Server) GetLeaderLease() int64 {
-	return s.cfg.GetLeaderLease()
-}
-
-// GetTSOSaveInterval returns TSO save interval.
-func (s *Server) GetTSOSaveInterval() time.Duration {
-	return s.cfg.GetTSOSaveInterval()
-}
-
-// GetTSOUpdatePhysicalInterval returns TSO update physical interval.
-func (s *Server) GetTSOUpdatePhysicalInterval() time.Duration {
-	return s.cfg.GetTSOUpdatePhysicalInterval()
-}
-
-// GetMaxResetTSGap gets the max gap to reset the tso.
-func (s *Server) GetMaxResetTSGap() time.Duration {
-	return s.persistOptions.GetMaxResetTSGap()
 }
 
 // SetClient sets the etcd client.
