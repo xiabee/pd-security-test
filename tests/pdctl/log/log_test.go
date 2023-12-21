@@ -21,7 +21,6 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
@@ -32,7 +31,6 @@ type logTestSuite struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	cluster *tests.TestCluster
-	svr     *server.Server
 	pdAddrs []string
 }
 
@@ -41,11 +39,12 @@ func TestLogTestSuite(t *testing.T) {
 }
 
 func (suite *logTestSuite) SetupSuite() {
+	re := suite.Require()
 	suite.ctx, suite.cancel = context.WithCancel(context.Background())
 	var err error
 	suite.cluster, err = tests.NewTestCluster(suite.ctx, 3)
-	suite.NoError(err)
-	suite.NoError(suite.cluster.RunInitialServers())
+	re.NoError(err)
+	re.NoError(suite.cluster.RunInitialServers())
 	suite.cluster.WaitLeader()
 	suite.pdAddrs = suite.cluster.GetConfig().GetClientURLs()
 
@@ -54,10 +53,9 @@ func (suite *logTestSuite) SetupSuite() {
 		State:         metapb.StoreState_Up,
 		LastHeartbeat: time.Now().UnixNano(),
 	}
-	leaderServer := suite.cluster.GetServer(suite.cluster.GetLeader())
-	suite.NoError(leaderServer.BootstrapCluster())
-	suite.svr = leaderServer.GetServer()
-	pdctl.MustPutStore(suite.Require(), suite.svr, store)
+	leaderServer := suite.cluster.GetLeaderServer()
+	re.NoError(leaderServer.BootstrapCluster())
+	tests.MustPutStore(re, suite.cluster, store)
 }
 
 func (suite *logTestSuite) TearDownSuite() {
@@ -66,6 +64,7 @@ func (suite *logTestSuite) TearDownSuite() {
 }
 
 func (suite *logTestSuite) TestLog() {
+	re := suite.Require()
 	cmd := pdctlCmd.GetRootCmd()
 	var testCases = []struct {
 		cmd    []string
@@ -96,12 +95,13 @@ func (suite *logTestSuite) TestLog() {
 
 	for _, testCase := range testCases {
 		_, err := pdctl.ExecuteCommand(cmd, testCase.cmd...)
-		suite.NoError(err)
-		suite.Equal(testCase.expect, suite.svr.GetConfig().Log.Level)
+		re.NoError(err)
+		re.Equal(testCase.expect, suite.cluster.GetLeaderServer().GetConfig().Log.Level)
 	}
 }
 
 func (suite *logTestSuite) TestInstanceLog() {
+	re := suite.Require()
 	cmd := pdctlCmd.GetRootCmd()
 	var testCases = []struct {
 		cmd      []string
@@ -128,11 +128,11 @@ func (suite *logTestSuite) TestInstanceLog() {
 
 	for _, testCase := range testCases {
 		_, err := pdctl.ExecuteCommand(cmd, testCase.cmd...)
-		suite.NoError(err)
+		re.NoError(err)
 		svrs := suite.cluster.GetServers()
 		for _, svr := range svrs {
 			if svr.GetAddr() == testCase.instance {
-				suite.Equal(testCase.expect, svr.GetConfig().Log.Level)
+				re.Equal(testCase.expect, svr.GetConfig().Log.Level)
 			}
 		}
 	}

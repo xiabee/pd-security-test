@@ -155,7 +155,7 @@ func makeJSONResponse(promResp *response) (*http.Response, []byte, error) {
 
 	response := &http.Response{
 		Status:        "200 OK",
-		StatusCode:    200,
+		StatusCode:    http.StatusOK,
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
@@ -196,7 +196,7 @@ func TestRetrieveCPUMetrics(t *testing.T) {
 			for i := 0; i < len(addresses)-1; i++ {
 				value, ok := result[addresses[i]]
 				re.True(ok)
-				re.True(math.Abs(value-mockResultValue) < 1e-6)
+				re.Less(math.Abs(value-mockResultValue), 1e-6)
 			}
 
 			_, ok := result[addresses[len(addresses)-1]]
@@ -246,7 +246,7 @@ func (c *errorHTTPStatusClient) Do(_ context.Context, req *http.Request) (r *htt
 
 	r, body, err = makeJSONResponse(promResp)
 
-	r.StatusCode = 500
+	r.StatusCode = http.StatusInternalServerError
 	r.Status = "500 Internal Server Error"
 
 	return
