@@ -44,7 +44,7 @@ require (
 	go.etcd.io/etcd v0.5.0-alpha.5.0.20220915004622-85b640cee793
 	go.uber.org/goleak v1.1.12
 	go.uber.org/zap v1.19.1
-	golang.org/x/text v0.9.0
+	golang.org/x/text v0.11.0
 	golang.org/x/time v0.0.0-20220224211638-0e9765cccd65
 	golang.org/x/tools v0.6.0
 	google.golang.org/grpc v1.26.0
@@ -163,7 +163,7 @@ require (
 	golang.org/x/arch v0.3.0 // indirect
 	golang.org/x/crypto v0.9.0 // indirect
 	golang.org/x/exp v0.0.0-20220321173239-a90fa8a75705 // indirect
-	golang.org/x/image v0.0.0-20200119044424-58c23975cae1 // indirect
+	golang.org/x/image v0.10.0 // indirect
 	golang.org/x/mod v0.8.0 // indirect
 	golang.org/x/net v0.10.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20190226205417-e64efc72b421 // indirect
