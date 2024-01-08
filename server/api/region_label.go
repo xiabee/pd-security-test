@@ -20,10 +20,10 @@ import (
 	"strconv"
 
 	"github.com/gorilla/mux"
-	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/schedule/labeler"
+	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/schedule/labeler"
 	"github.com/unrolled/render"
 )
 
@@ -83,7 +83,7 @@ func (h *regionLabelHandler) PatchRegionLabelRules(w http.ResponseWriter, r *htt
 // @Success  200  {array}   labeler.LabelRule
 // @Failure  400  {string}  string  "The input is invalid."
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /config/region-label/rule/ids [get]
+// @Router   /config/region-label/rules/ids [get]
 func (h *regionLabelHandler) GetRegionLabelRulesByIDs(w http.ResponseWriter, r *http.Request) {
 	cluster := getCluster(r)
 	var ids []string

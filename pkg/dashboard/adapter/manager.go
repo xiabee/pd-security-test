@@ -19,12 +19,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/pingcap/tidb-dashboard/pkg/apiserver"
-
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb-dashboard/pkg/apiserver"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/cluster"
 )
@@ -76,6 +76,10 @@ func (m *Manager) Stop() {
 func (m *Manager) serviceLoop() {
 	defer logutil.LogPanic()
 	defer m.wg.Done()
+	// TODO: After we fix the atomic problem of config, we can remove this failpoint.
+	failpoint.Inject("skipDashboardLoop", func() {
+		failpoint.Return()
+	})
 
 	ticker := time.NewTicker(CheckInterval)
 	defer ticker.Stop()
@@ -192,9 +196,9 @@ func (m *Manager) startService() {
 		return
 	}
 	if err := m.service.Start(m.ctx); err != nil {
-		log.Error("Can not start dashboard server", errs.ZapError(errs.ErrDashboardStart, err))
+		log.Error("can not start dashboard server", errs.ZapError(errs.ErrDashboardStart, err))
 	} else {
-		log.Info("Dashboard server is started")
+		log.Info("dashboard server is started")
 	}
 }
 
@@ -203,8 +207,8 @@ func (m *Manager) stopService() {
 		return
 	}
 	if err := m.service.Stop(context.Background()); err != nil {
-		log.Error("Stop dashboard server error", errs.ZapError(errs.ErrDashboardStop, err))
+		log.Error("stop dashboard server error", errs.ZapError(errs.ErrDashboardStop, err))
 	} else {
-		log.Info("Dashboard server is stopped")
+		log.Info("dashboard server is stopped")
 	}
 }
