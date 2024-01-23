@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/typeutil"
 )
 
 func TestAdjustDefaultValue(t *testing.T) {
@@ -38,19 +38,19 @@ func TestAdjustInvalidDataEncryptionMethod(t *testing.T) {
 	t.Parallel()
 	re := require.New(t)
 	config := &Config{DataEncryptionMethod: "unknown"}
-	re.Error(config.Adjust())
+	re.NotNil(config.Adjust())
 }
 
 func TestAdjustNegativeRotationDuration(t *testing.T) {
 	t.Parallel()
 	re := require.New(t)
 	config := &Config{DataKeyRotationPeriod: typeutil.NewDuration(time.Duration(int64(-1)))}
-	re.Error(config.Adjust())
+	re.NotNil(config.Adjust())
 }
 
 func TestAdjustInvalidMasterKeyType(t *testing.T) {
 	t.Parallel()
 	re := require.New(t)
 	config := &Config{MasterKey: MasterKeyConfig{Type: "unknown"}}
-	re.Error(config.Adjust())
+	re.NotNil(config.Adjust())
 }

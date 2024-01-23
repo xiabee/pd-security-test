@@ -25,35 +25,20 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/spf13/cobra"
-	pd "github.com/tikv/pd/client/http"
-	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/apiutil"
 	"go.etcd.io/etcd/pkg/transport"
 )
 
-const (
-	pdControlCallerID = "pd-ctl"
-	pingPrefix        = "pd/api/v1/ping"
+var (
+	pdControllerComponentName = "pdctl"
+	dialClient                = &http.Client{
+		Transport: apiutil.NewComponentSignatureRoundTripper(http.DefaultTransport, pdControllerComponentName),
+	}
+	pingPrefix = "pd/api/v1/ping"
 )
 
-// PDCli is a pd HTTP client
-var PDCli pd.Client
-
-// SetNewPDClient creates a PD HTTP client with the given PD addresses and options.
-func SetNewPDClient(addrs []string, opts ...pd.ClientOption) {
-	if PDCli != nil {
-		PDCli.Close()
-	}
-	withOpts := append(opts, pd.WithLoggerRedirection("fatal", ""))
-	PDCli = pd.NewClient(pdControlCallerID, addrs, withOpts...)
-}
-
-// TODO: replace dialClient with PDCli
-var dialClient = &http.Client{
-	Transport: apiutil.NewCallerIDRoundTripper(http.DefaultTransport, pdControlCallerID),
-}
-
 // InitHTTPSClient creates https client with ca file
-func InitHTTPSClient(pdAddrs, caPath, certPath, keyPath string) error {
+func InitHTTPSClient(caPath, certPath, keyPath string) error {
 	tlsInfo := transport.TLSInfo{
 		CertFile:      certPath,
 		KeyFile:       keyPath,
@@ -65,11 +50,9 @@ func InitHTTPSClient(pdAddrs, caPath, certPath, keyPath string) error {
 	}
 
 	dialClient = &http.Client{
-		Transport: apiutil.NewCallerIDRoundTripper(
-			&http.Transport{TLSClientConfig: tlsConfig}, pdControlCallerID),
+		Transport: apiutil.NewComponentSignatureRoundTripper(
+			&http.Transport{TLSClientConfig: tlsConfig}, pdControllerComponentName),
 	}
-
-	SetNewPDClient(strings.Split(pdAddrs, ","), pd.WithTLSConfig(tlsConfig))
 
 	return nil
 }
@@ -182,7 +165,7 @@ func getEndpoints(cmd *cobra.Command) []string {
 	return strings.Split(addrs, ",")
 }
 
-func requestJSON(cmd *cobra.Command, method, prefix string, input map[string]interface{}) {
+func postJSON(cmd *cobra.Command, prefix string, input map[string]interface{}) {
 	data, err := json.Marshal(input)
 	if err != nil {
 		cmd.Println(err)
@@ -190,49 +173,29 @@ func requestJSON(cmd *cobra.Command, method, prefix string, input map[string]int
 	}
 
 	endpoints := getEndpoints(cmd)
-	var msg []byte
 	err = tryURLs(cmd, endpoints, func(endpoint string) error {
-		var req *http.Request
-		var resp *http.Response
+		var msg []byte
+		var r *http.Response
 		url := endpoint + "/" + prefix
-		switch method {
-		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodGet:
-			req, err = http.NewRequest(method, url, bytes.NewBuffer(data))
+		r, err = dialClient.Post(url, "application/json", bytes.NewBuffer(data))
+		if err != nil {
+			return err
+		}
+		defer r.Body.Close()
+		if r.StatusCode != http.StatusOK {
+			msg, err = io.ReadAll(r.Body)
 			if err != nil {
 				return err
 			}
-			req.Header.Set("Content-Type", "application/json")
-			resp, err = dialClient.Do(req)
-		default:
-			err := errors.Errorf("method %s not supported", method)
-			return err
-		}
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		msg, err = io.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
-		if resp.StatusCode != http.StatusOK {
-			return errors.Errorf("[%d] %s", resp.StatusCode, msg)
+			return errors.Errorf("[%d] %s", r.StatusCode, msg)
 		}
 		return nil
 	})
 	if err != nil {
-		cmd.Printf("Failed! %s\n", err)
+		cmd.Printf("Failed! %s", err)
 		return
 	}
-	cmd.Printf("Success! %s\n", strings.Trim(string(msg), "\""))
-}
-
-func postJSON(cmd *cobra.Command, prefix string, input map[string]interface{}) {
-	requestJSON(cmd, http.MethodPost, prefix, input)
-}
-
-func patchJSON(cmd *cobra.Command, prefix string, input map[string]interface{}) {
-	requestJSON(cmd, http.MethodPatch, prefix, input)
+	cmd.Println("Success!")
 }
 
 // do send a request to server. Default is Get.
@@ -279,14 +242,4 @@ func checkURL(endpoint string) (string, error) {
 	}
 
 	return u.String(), nil
-}
-
-func jsonPrint(cmd *cobra.Command, val any) {
-	jsonBytes, err := json.MarshalIndent(val, "", "  ")
-	if err != nil {
-		cmd.Printf("Failed to marshal the data to json: %s\n", err)
-		return
-	}
-
-	cmd.Println(string(jsonBytes))
 }

@@ -21,14 +21,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
 )
 
 type profTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   testutil.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
@@ -52,14 +51,13 @@ func (suite *profTestSuite) TearDownSuite() {
 }
 
 func (suite *profTestSuite) TestGetZip() {
-	re := suite.Require()
 	rsp, err := testDialClient.Get(suite.urlPrefix + "/pprof/zip?" + "seconds=5s")
-	re.NoError(err)
+	suite.NoError(err)
 	defer rsp.Body.Close()
 	body, err := io.ReadAll(rsp.Body)
-	re.NoError(err)
-	re.NotNil(body)
+	suite.NoError(err)
+	suite.NotNil(body)
 	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
-	re.NoError(err)
-	re.Len(zipReader.File, 7)
+	suite.NoError(err)
+	suite.Len(zipReader.File, 7)
 }

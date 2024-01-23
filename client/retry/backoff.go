@@ -34,11 +34,9 @@ func (bo *BackOffer) Exec(
 	fn func() error,
 ) error {
 	if err := fn(); err != nil {
-		after := time.NewTimer(bo.nextInterval())
-		defer after.Stop()
 		select {
 		case <-ctx.Done():
-		case <-after.C:
+		case <-time.After(bo.nextInterval()):
 			failpoint.Inject("backOffExecute", func() {
 				testBackOffExecuteFlag = true
 			})

@@ -26,6 +26,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/spf13/cobra"
+	"github.com/tikv/pd/server/statistics"
 )
 
 var (
@@ -150,9 +151,6 @@ func NewAddSchedulerCommand() *cobra.Command {
 	c.AddCommand(NewEvictSlowStoreSchedulerCommand())
 	c.AddCommand(NewGrantHotRegionSchedulerCommand())
 	c.AddCommand(NewSplitBucketSchedulerCommand())
-	c.AddCommand(NewSlowTrendEvictLeaderSchedulerCommand())
-	c.AddCommand(NewBalanceWitnessSchedulerCommand())
-	c.AddCommand(NewTransferWitnessLeaderSchedulerCommand())
 	return c
 }
 
@@ -354,36 +352,6 @@ func NewGrantHotRegionSchedulerCommand() *cobra.Command {
 	return c
 }
 
-// NewBalanceWitnessSchedulerCommand returns a command to add a balance-witness-scheduler.
-func NewBalanceWitnessSchedulerCommand() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "balance-witness-scheduler",
-		Short: "add a scheduler to balance witness",
-		Run:   addSchedulerCommandFunc,
-	}
-	return c
-}
-
-// NewTransferWitnessLeaderSchedulerCommand returns a command to add a transfer-witness-leader-shceudler.
-func NewTransferWitnessLeaderSchedulerCommand() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "transfer-witness-leader-scheduler",
-		Short: "add a scheduler to transfer witness leader",
-		Run:   addSchedulerCommandFunc,
-	}
-	return c
-}
-
-// NewSlowTrendEvictLeaderSchedulerCommand returns a command to add a evict-slow-trend-scheduler.
-func NewSlowTrendEvictLeaderSchedulerCommand() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "evict-slow-trend-scheduler",
-		Short: "add a scheduler to detect and evict slow stores by trend",
-		Run:   addSchedulerCommandFunc,
-	}
-	return c
-}
-
 func addSchedulerForSplitBucketCommandFunc(cmd *cobra.Command, args []string) {
 	input := make(map[string]interface{})
 	input["name"] = cmd.Name()
@@ -499,9 +467,6 @@ func NewConfigSchedulerCommand() *cobra.Command {
 		newConfigGrantHotRegionCommand(),
 		newConfigBalanceLeaderCommand(),
 		newSplitBucketCommand(),
-		newConfigEvictSlowStoreCommand(),
-		newConfigShuffleHotRegionSchedulerCommand(),
-		newConfigEvictSlowTrendCommand(),
 	)
 	return c
 }
@@ -716,7 +681,32 @@ func postSchedulerConfigCommandFunc(cmd *cobra.Command, schedulerName string, ar
 		val = value
 	}
 	if schedulerName == "balance-hot-region-scheduler" && (key == "read-priorities" || key == "write-leader-priorities" || key == "write-peer-priorities") {
-		input[key] = strings.Split(value, ",")
+		priorities := make([]string, 0)
+		prioritiesMap := make(map[string]struct{})
+		for _, priority := range strings.Split(value, ",") {
+			if priority != statistics.BytePriority && priority != statistics.KeyPriority && priority != statistics.QueryPriority {
+				cmd.Println(fmt.Sprintf("priority should be one of [%s, %s, %s]",
+					statistics.BytePriority,
+					statistics.QueryPriority,
+					statistics.KeyPriority))
+				return
+			}
+			if priority == statistics.QueryPriority && key == "write-peer-priorities" {
+				cmd.Println("query is not allowed to be set in priorities for write-peer-priorities")
+				return
+			}
+			priorities = append(priorities, priority)
+			prioritiesMap[priority] = struct{}{}
+		}
+		if len(priorities) < 2 {
+			cmd.Println("priorities should have at least 2 dimensions")
+			return
+		}
+		input[key] = priorities
+		if len(priorities) != len(prioritiesMap) {
+			cmd.Println("priorities shouldn't be repeated")
+			return
+		}
 	} else {
 		input[key] = val
 	}
@@ -746,17 +736,11 @@ func showShuffleRegionSchedulerRolesCommandFunc(cmd *cobra.Command, args []strin
 	if p == "show-roles" {
 		p = cmd.Parent().Name()
 	}
-	url := path.Join(schedulerConfigPrefix, p, "list")
-	r, err := doRequest(cmd, url, http.MethodGet, http.Header{})
+	path := path.Join(schedulerConfigPrefix, p, "roles")
+	r, err := doRequest(cmd, path, http.MethodGet, http.Header{})
 	if err != nil {
-		// try to use old api
-		var err2 error
-		url := path.Join(schedulerConfigPrefix, p, "roles")
-		r, err2 = doRequest(cmd, url, http.MethodGet, http.Header{})
-		if err2 != nil {
-			cmd.Println(err, err2)
-			return
-		}
+		cmd.Println(err)
+		return
 	}
 	cmd.Println(r)
 }
@@ -782,63 +766,6 @@ func setShuffleRegionSchedulerRolesCommandFunc(cmd *cobra.Command, args []string
 		return
 	}
 	cmd.Println("Success!")
-}
-
-func newConfigEvictSlowStoreCommand() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "evict-slow-store-scheduler",
-		Short: "evict-slow-store-scheduler config",
-		Run:   listSchedulerConfigCommandFunc,
-	}
-
-	c.AddCommand(&cobra.Command{
-		Use:   "show",
-		Short: "list the config item",
-		Run:   listSchedulerConfigCommandFunc,
-	}, &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "set the config item",
-		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
-	})
-	return c
-}
-
-func newConfigShuffleHotRegionSchedulerCommand() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "shuffle-hot-region-scheduler",
-		Short: "shuffle-hot-region-scheduler config",
-		Run:   listSchedulerConfigCommandFunc,
-	}
-
-	c.AddCommand(&cobra.Command{
-		Use:   "show",
-		Short: "list the config item",
-		Run:   listSchedulerConfigCommandFunc,
-	}, &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "set the config item",
-		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
-	})
-	return c
-}
-
-func newConfigEvictSlowTrendCommand() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "evict-slow-trend-scheduler",
-		Short: "evict-slow-trend-scheduler config",
-		Run:   listSchedulerConfigCommandFunc,
-	}
-
-	c.AddCommand(&cobra.Command{
-		Use:   "show",
-		Short: "list the config item",
-		Run:   listSchedulerConfigCommandFunc,
-	}, &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "set the config item",
-		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
-	})
-	return c
 }
 
 // NewDescribeSchedulerCommand returns command to describe the scheduler.

@@ -21,14 +21,13 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	mcsutils "github.com/tikv/pd/pkg/mcs/utils"
-	"github.com/tikv/pd/pkg/schedule/operator"
-	"github.com/tikv/pd/pkg/statistics/buckets"
-	"github.com/tikv/pd/pkg/utils/logutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
-	"github.com/tikv/pd/pkg/versioninfo"
+	"github.com/tikv/pd/pkg/logutil"
+	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/statistics/buckets"
+	"github.com/tikv/pd/server/versioninfo"
 	"go.uber.org/zap"
 )
 
@@ -38,23 +37,20 @@ func (c *RaftCluster) HandleRegionHeartbeat(region *core.RegionInfo) error {
 		return err
 	}
 
-	if c.IsServiceIndependent(mcsutils.SchedulingServiceName) {
-		return nil
-	}
-	c.coordinator.GetOperatorController().Dispatch(region, operator.DispatchFromHeartBeat, c.coordinator.RecordOpStepWithTTL)
+	c.coordinator.opController.Dispatch(region, schedule.DispatchFromHeartBeat)
 	return nil
 }
 
 // HandleAskSplit handles the split request.
 func (c *RaftCluster) HandleAskSplit(request *pdpb.AskSplitRequest) (*pdpb.AskSplitResponse, error) {
-	if c.isSchedulingHalted() {
-		return nil, errs.ErrSchedulingIsHalted.FastGenByArgs()
+	if allowed, err := c.CheckSchedulingAllowance(); !allowed {
+		return nil, err
 	}
 	if !c.opt.IsTikvRegionSplitEnabled() {
 		return nil, errs.ErrSchedulerTiKVSplitDisabled.FastGenByArgs()
 	}
 	reqRegion := request.GetRegion()
-	err := c.ValidRegion(reqRegion)
+	err := c.ValidRequestRegion(reqRegion)
 	if err != nil {
 		return nil, err
 	}
@@ -90,21 +86,34 @@ func (c *RaftCluster) HandleAskSplit(request *pdpb.AskSplitRequest) (*pdpb.AskSp
 	return split, nil
 }
 
-func (c *RaftCluster) isSchedulingHalted() bool {
-	return c.opt.IsSchedulingHalted()
+// ValidRequestRegion is used to decide if the region is valid.
+func (c *RaftCluster) ValidRequestRegion(reqRegion *metapb.Region) error {
+	startKey := reqRegion.GetStartKey()
+	region := c.GetRegionByKey(startKey)
+	if region == nil {
+		return errors.Errorf("region not found, request region: %v", logutil.RedactStringer(core.RegionToHexMeta(reqRegion)))
+	}
+	// If the request epoch is less than current region epoch, then returns an error.
+	reqRegionEpoch := reqRegion.GetRegionEpoch()
+	regionEpoch := region.GetMeta().GetRegionEpoch()
+	if reqRegionEpoch.GetVersion() < regionEpoch.GetVersion() ||
+		reqRegionEpoch.GetConfVer() < regionEpoch.GetConfVer() {
+		return errors.Errorf("invalid region epoch, request: %v, current: %v", reqRegionEpoch, regionEpoch)
+	}
+	return nil
 }
 
 // HandleAskBatchSplit handles the batch split request.
 func (c *RaftCluster) HandleAskBatchSplit(request *pdpb.AskBatchSplitRequest) (*pdpb.AskBatchSplitResponse, error) {
-	if c.isSchedulingHalted() {
-		return nil, errs.ErrSchedulingIsHalted.FastGenByArgs()
+	if allowed, err := c.CheckSchedulingAllowance(); !allowed {
+		return nil, err
 	}
 	if !c.opt.IsTikvRegionSplitEnabled() {
 		return nil, errs.ErrSchedulerTiKVSplitDisabled.FastGenByArgs()
 	}
 	reqRegion := request.GetRegion()
 	splitCount := request.GetSplitCount()
-	err := c.ValidRegion(reqRegion)
+	err := c.ValidRequestRegion(reqRegion)
 	if err != nil {
 		return nil, err
 	}
@@ -237,8 +246,6 @@ func (c *RaftCluster) HandleReportBuckets(b *metapb.Buckets) error {
 	if err := c.processReportBuckets(b); err != nil {
 		return err
 	}
-	if !c.IsServiceIndependent(mcsutils.SchedulingServiceName) {
-		c.hotStat.CheckAsync(buckets.NewCheckPeerTask(b))
-	}
+	c.hotBuckets.CheckAsync(buckets.NewCheckPeerTask(b))
 	return nil
 }

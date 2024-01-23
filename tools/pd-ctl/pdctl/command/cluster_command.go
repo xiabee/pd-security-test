@@ -15,10 +15,13 @@
 package command
 
 import (
-	"context"
+	"net/http"
 
 	"github.com/spf13/cobra"
 )
+
+const clusterPrefix = "pd/api/v1/cluster"
+const clusterStatusPrefix = "pd/api/v1/cluster/status"
 
 // NewClusterCommand return a cluster subcommand of rootCmd
 func NewClusterCommand() *cobra.Command {
@@ -41,20 +44,20 @@ func NewClusterStatusCommand() *cobra.Command {
 	return r
 }
 
-func showClusterCommandFunc(cmd *cobra.Command, _ []string) {
-	info, err := PDCli.GetCluster(context.Background())
+func showClusterCommandFunc(cmd *cobra.Command, args []string) {
+	r, err := doRequest(cmd, clusterPrefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get the cluster information: %s\n", err)
 		return
 	}
-	jsonPrint(cmd, info)
+	cmd.Println(r)
 }
 
-func showClusterStatusCommandFunc(cmd *cobra.Command, _ []string) {
-	status, err := PDCli.GetClusterStatus(context.Background())
+func showClusterStatusCommandFunc(cmd *cobra.Command, args []string) {
+	r, err := doRequest(cmd, clusterStatusPrefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get the cluster status: %s\n", err)
 		return
 	}
-	jsonPrint(cmd, status)
+	cmd.Println(r)
 }
