@@ -16,21 +16,21 @@ package api
 
 import (
 	"fmt"
-	"net/http"
 	"testing"
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/pkg/storage/endpoint"
+	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/storage/endpoint"
 )
 
 type serviceGCSafepointTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   cleanUpFunc
+	cleanup   testutil.CleanupFunc
 	urlPrefix string
 }
 
@@ -55,10 +55,11 @@ func (suite *serviceGCSafepointTestSuite) TearDownSuite() {
 }
 
 func (suite *serviceGCSafepointTestSuite) TestServiceGCSafepoint() {
+	re := suite.Require()
 	sspURL := suite.urlPrefix + "/gc/safepoint"
 
 	storage := suite.svr.GetStorage()
-	list := &listServiceGCSafepoint{
+	list := &ListServiceGCSafepoint{
 		ServiceGCSafepoints: []*endpoint.ServiceSafePoint{
 			{
 				ServiceID: "a",
@@ -80,23 +81,22 @@ func (suite *serviceGCSafepointTestSuite) TestServiceGCSafepoint() {
 	}
 	for _, ssp := range list.ServiceGCSafepoints {
 		err := storage.SaveServiceGCSafePoint(ssp)
-		suite.NoError(err)
+		re.NoError(err)
 	}
 	storage.SaveGCSafePoint(1)
 
 	res, err := testDialClient.Get(sspURL)
-	suite.NoError(err)
+	re.NoError(err)
 	defer res.Body.Close()
-	listResp := &listServiceGCSafepoint{}
+	listResp := &ListServiceGCSafepoint{}
 	err = apiutil.ReadJSON(res.Body, listResp)
-	suite.NoError(err)
-	suite.Equal(list, listResp)
+	re.NoError(err)
+	re.Equal(list, listResp)
 
-	statusCode, err := apiutil.DoDelete(testDialClient, sspURL+"/a")
-	suite.NoError(err)
-	suite.Equal(http.StatusOK, statusCode)
+	err = testutil.CheckDelete(testDialClient, sspURL+"/a", testutil.StatusOK(re))
+	re.NoError(err)
 
 	left, err := storage.LoadAllServiceGCSafePoints()
-	suite.NoError(err)
-	suite.Equal(list.ServiceGCSafepoints[1:], left)
+	re.NoError(err)
+	re.Equal(list.ServiceGCSafepoints[1:], left)
 }

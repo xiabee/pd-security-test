@@ -21,14 +21,14 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/suite"
-	tu "github.com/tikv/pd/pkg/testutil"
+	tu "github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
 )
 
 type logTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   cleanUpFunc
+	cleanup   tu.CleanupFunc
 	urlPrefix string
 }
 
@@ -52,10 +52,11 @@ func (suite *logTestSuite) TearDownSuite() {
 }
 
 func (suite *logTestSuite) TestSetLogLevel() {
+	re := suite.Require()
 	level := "error"
 	data, err := json.Marshal(level)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/log", data, tu.StatusOK(suite.Require()))
-	suite.NoError(err)
-	suite.Equal(level, log.GetLevel().String())
+	re.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/log", data, tu.StatusOK(re))
+	re.NoError(err)
+	re.Equal(level, log.GetLevel().String())
 }
