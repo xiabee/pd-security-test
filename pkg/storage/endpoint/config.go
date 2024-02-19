@@ -51,13 +51,17 @@ func (se *StorageEndpoint) LoadConfig(cfg interface{}) (bool, error) {
 
 // SaveConfig stores marshallable cfg to the configPath.
 func (se *StorageEndpoint) SaveConfig(cfg interface{}) error {
-	return se.saveJSON(configPath, cfg)
+	value, err := json.Marshal(cfg)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
+	}
+	return se.Save(configPath, string(value))
 }
 
 // LoadAllSchedulerConfigs loads all schedulers' config.
 func (se *StorageEndpoint) LoadAllSchedulerConfigs() ([]string, []string, error) {
 	prefix := customSchedulerConfigPath + "/"
-	keys, values, err := se.LoadRange(prefix, clientv3.GetPrefixRangeEnd(prefix), MinKVRangeLimit)
+	keys, values, err := se.LoadRange(prefix, clientv3.GetPrefixRangeEnd(prefix), 1000)
 	for i, key := range keys {
 		keys[i] = strings.TrimPrefix(key, prefix)
 	}

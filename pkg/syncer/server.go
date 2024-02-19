@@ -18,7 +18,6 @@ import (
 	"context"
 	"io"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/docker/go-units"
@@ -84,8 +83,6 @@ type RegionSyncer struct {
 	history   *historyBuffer
 	limit     *ratelimit.RateLimiter
 	tlsConfig *grpcutil.TLSConfig
-	// status when as client
-	streamingRunning atomic.Bool
 }
 
 // NewRegionSyncer returns a region syncer.
@@ -231,16 +228,7 @@ func (s *RegionSyncer) syncHistoryRegion(ctx context.Context, request *pdpb.Sync
 		if s.history.GetNextIndex() == startIndex {
 			log.Info("requested server has already in sync with server",
 				zap.String("requested-server", name), zap.String("server", s.server.Name()), zap.Uint64("last-index", startIndex))
-			// still send a response to follower to show the history region sync.
-			resp := &pdpb.SyncRegionResponse{
-				Header:        &pdpb.ResponseHeader{ClusterId: s.server.ClusterID()},
-				Regions:       nil,
-				StartIndex:    startIndex,
-				RegionStats:   nil,
-				RegionLeaders: nil,
-				Buckets:       nil,
-			}
-			return stream.Send(resp)
+			return nil
 		}
 		// do full synchronization
 		if startIndex == 0 {

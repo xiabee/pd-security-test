@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
-	"strings"
 	"sync"
 
 	"github.com/gin-contrib/cors"
@@ -82,11 +81,10 @@ func NewService(srv *rmserver.Service) *Service {
 		c.Set(multiservicesapi.ServiceContextKey, manager.GetBasicServer())
 		c.Next()
 	})
+	apiHandlerEngine.Use(multiservicesapi.ServiceRedirector())
 	apiHandlerEngine.GET("metrics", utils.PromHandler())
-	apiHandlerEngine.GET("status", utils.StatusHandler)
 	pprof.Register(apiHandlerEngine)
 	endpoint := apiHandlerEngine.Group(APIPathPrefix)
-	endpoint.Use(multiservicesapi.ServiceRedirector())
 	s := &Service{
 		manager:          manager,
 		apiHandlerEngine: apiHandlerEngine,
@@ -185,14 +183,12 @@ func (s *Service) putResourceGroup(c *gin.Context) {
 //
 //	@Tags		ResourceManager
 //	@Summary	Get resource group by name.
-//	@Success	200		    {string}	json	format	of	rmserver.ResourceGroup
-//	@Failure	404		    {string}	error
-//	@Param		name	    path		string	true	"groupName"
-//	@Param		with_stats	query		bool	false	"whether to return statistics data."
+//	@Success	200		{string}	json	format	of	rmserver.ResourceGroup
+//	@Failure	404		{string}	error
+//	@Param		name	path		string	true	"groupName"
 //	@Router		/config/group/{name} [GET]
 func (s *Service) getResourceGroup(c *gin.Context) {
-	withStats := strings.EqualFold(c.Query("with_stats"), "true")
-	group := s.manager.GetResourceGroup(c.Param("name"), withStats)
+	group := s.manager.GetResourceGroup(c.Param("name"))
 	if group == nil {
 		c.String(http.StatusNotFound, errors.New("resource group not found").Error())
 	}
@@ -205,11 +201,9 @@ func (s *Service) getResourceGroup(c *gin.Context) {
 //	@Summary	get all resource group with a list.
 //	@Success	200	{string}	json	format	of	[]rmserver.ResourceGroup
 //	@Failure	404	{string}	error
-//	@Param		with_stats		query	bool	false	"whether to return statistics data."
 //	@Router		/config/groups [GET]
 func (s *Service) getResourceGroupList(c *gin.Context) {
-	withStats := strings.EqualFold(c.Query("with_stats"), "true")
-	groups := s.manager.GetResourceGroupList(withStats)
+	groups := s.manager.GetResourceGroupList()
 	c.IndentedJSON(http.StatusOK, groups)
 }
 

@@ -50,19 +50,18 @@ func TestKeyspaceTestSuite(t *testing.T) {
 }
 
 func (suite *keyspaceTestSuite) SetupTest() {
-	re := suite.Require()
 	ctx, cancel := context.WithCancel(context.Background())
 	suite.cancel = cancel
 	cluster, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, serverName string) {
 		conf.Keyspace.PreAlloc = preAllocKeyspace
 	})
 	suite.cluster = cluster
-	re.NoError(err)
-	re.NoError(cluster.RunInitialServers())
-	re.NotEmpty(cluster.WaitLeader())
+	suite.NoError(err)
+	suite.NoError(cluster.RunInitialServers())
+	suite.NotEmpty(cluster.WaitLeader())
 	suite.server = cluster.GetLeaderServer()
 	suite.manager = suite.server.GetKeyspaceManager()
-	re.NoError(suite.server.BootstrapCluster())
+	suite.NoError(suite.server.BootstrapCluster())
 }
 
 func (suite *keyspaceTestSuite) TearDownTest() {
@@ -101,7 +100,7 @@ func checkLabelRule(re *require.Assertions, id uint32, regionLabeler *labeler.Re
 
 	rangeRule, ok := loadedLabel.Data.([]*labeler.KeyRangeRule)
 	re.True(ok)
-	re.Len(rangeRule, 2)
+	re.Equal(2, len(rangeRule))
 
 	keyspaceIDBytes := make([]byte, 4)
 	nextKeyspaceIDBytes := make([]byte, 4)

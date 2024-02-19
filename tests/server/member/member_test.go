@@ -88,7 +88,7 @@ func TestMemberDelete(t *testing.T) {
 		t.Log(time.Now(), "try to delete:", table.path)
 		testutil.Eventually(re, func() bool {
 			addr := leader.GetConfig().ClientUrls + "/pd/api/v1/members/" + table.path
-			req, err := http.NewRequest(http.MethodDelete, addr, http.NoBody)
+			req, err := http.NewRequest(http.MethodDelete, addr, nil)
 			re.NoError(err)
 			res, err := httpClient.Do(req)
 			re.NoError(err)
@@ -260,7 +260,7 @@ func TestPDLeaderLostWhileEtcdLeaderIntact(t *testing.T) {
 	re.NoError(err)
 
 	leader1 := cluster.WaitLeader()
-	memberID := cluster.GetLeaderServer().GetLeader().GetMemberId()
+	memberID := cluster.GetServer(leader1).GetLeader().GetMemberId()
 
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/leaderLoopCheckAgain", fmt.Sprintf("return(\"%d\")", memberID)))
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/exitCampaignLeader", fmt.Sprintf("return(\"%d\")", memberID)))
@@ -338,7 +338,7 @@ func TestCampaignLeaderFrequently(t *testing.T) {
 	re.NotEmpty(cluster.GetLeader())
 
 	for i := 0; i < 3; i++ {
-		cluster.GetLeaderServer().ResetPDLeader()
+		cluster.GetServers()[cluster.GetLeader()].ResetPDLeader()
 		cluster.WaitLeader()
 	}
 	// PD leader should be different from before because etcd leader changed.

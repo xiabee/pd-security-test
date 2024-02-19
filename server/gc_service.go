@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/storage/endpoint"
+	"github.com/tikv/pd/pkg/tso"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/tsoutil"
 	"go.etcd.io/etcd/clientv3"
@@ -106,7 +107,15 @@ func (s *GrpcServer) UpdateServiceSafePointV2(ctx context.Context, request *pdpb
 		return rsp.(*pdpb.UpdateServiceSafePointV2Response), err
 	}
 
-	nowTSO, err := s.getGlobalTSO(ctx)
+	var (
+		nowTSO pdpb.Timestamp
+		err    error
+	)
+	if s.IsAPIServiceMode() {
+		nowTSO, err = s.getGlobalTSOFromTSOServer(ctx)
+	} else {
+		nowTSO, err = s.tsoAllocatorManager.HandleRequest(ctx, tso.GlobalDCLocation, 1)
+	}
 	if err != nil {
 		return nil, err
 	}

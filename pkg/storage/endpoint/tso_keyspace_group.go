@@ -177,7 +177,12 @@ func (se *StorageEndpoint) LoadKeyspaceGroup(txn kv.Txn, id uint32) (*KeyspaceGr
 
 // SaveKeyspaceGroup saves the keyspace group.
 func (se *StorageEndpoint) SaveKeyspaceGroup(txn kv.Txn, kg *KeyspaceGroup) error {
-	return saveJSONInTxn(txn, KeyspaceGroupIDPath(kg.ID), kg)
+	key := KeyspaceGroupIDPath(kg.ID)
+	value, err := json.Marshal(kg)
+	if err != nil {
+		return err
+	}
+	return txn.Save(key, string(value))
 }
 
 // DeleteKeyspaceGroup deletes the keyspace group.

@@ -21,6 +21,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/mock/mockid"
 	"github.com/tikv/pd/pkg/storage"
 )
@@ -32,7 +33,7 @@ func TestReportSplit(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
 	left := &metapb.Region{Id: 1, StartKey: []byte("a"), EndKey: []byte("b")}
 	right := &metapb.Region{Id: 2, StartKey: []byte("b"), EndKey: []byte("c")}
 	_, err = cluster.HandleReportSplit(&pdpb.ReportSplitRequest{Left: left, Right: right})
@@ -48,7 +49,7 @@ func TestReportBatchSplit(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
 	regions := []*metapb.Region{
 		{Id: 1, StartKey: []byte(""), EndKey: []byte("a")},
 		{Id: 2, StartKey: []byte("a"), EndKey: []byte("b")},

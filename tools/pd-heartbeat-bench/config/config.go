@@ -1,8 +1,6 @@
 package config
 
 import (
-	"sync/atomic"
-
 	"github.com/BurntSushi/toml"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -20,7 +18,6 @@ const (
 	defaultEpochUpdateRatio  = 0.04
 	defaultSpaceUpdateRatio  = 0.15
 	defaultFlowUpdateRatio   = 0.35
-	defaultReportRatio       = 1
 	defaultRound             = 0
 	defaultSample            = false
 
@@ -38,8 +35,6 @@ type Config struct {
 	Logger   *zap.Logger
 	LogProps *log.ZapProperties
 
-	Security configutil.SecurityConfig `toml:"security" json:"security"`
-
 	StoreCount        int     `toml:"store-count" json:"store-count"`
 	RegionCount       int     `toml:"region-count" json:"region-count"`
 	KeyLength         int     `toml:"key-length" json:"key-length"`
@@ -48,7 +43,6 @@ type Config struct {
 	EpochUpdateRatio  float64 `toml:"epoch-update-ratio" json:"epoch-update-ratio"`
 	SpaceUpdateRatio  float64 `toml:"space-update-ratio" json:"space-update-ratio"`
 	FlowUpdateRatio   float64 `toml:"flow-update-ratio" json:"flow-update-ratio"`
-	ReportRatio       float64 `toml:"report-ratio" json:"report-ratio"`
 	Sample            bool    `toml:"sample" json:"sample"`
 	Round             int     `toml:"round" json:"round"`
 }
@@ -60,12 +54,8 @@ func NewConfig() *Config {
 	fs := cfg.flagSet
 	fs.ParseErrorsWhitelist.UnknownFlags = true
 	fs.StringVar(&cfg.configFile, "config", "", "config file")
-	fs.StringVar(&cfg.PDAddr, "pd-endpoints", "127.0.0.1:2379", "pd address")
-	fs.StringVar(&cfg.Log.File.Filename, "log-file", "", "log file path")
-	fs.StringVar(&cfg.StatusAddr, "status-addr", "127.0.0.1:20180", "status address")
-	fs.StringVar(&cfg.Security.CAPath, "cacert", "", "path of file that contains list of trusted TLS CAs")
-	fs.StringVar(&cfg.Security.CertPath, "cert", "", "path of file that contains X509 certificate in PEM format")
-	fs.StringVar(&cfg.Security.KeyPath, "key", "", "path of file that contains X509 key in PEM format")
+	fs.StringVar(&cfg.PDAddr, "pd", "http://127.0.0.1:2379", "pd address")
+	fs.StringVar(&cfg.StatusAddr, "status-addr", "http://127.0.0.1:20180", "status address")
 
 	return cfg
 }
@@ -98,7 +88,7 @@ func (c *Config) Parse(arguments []string) error {
 	}
 
 	c.Adjust(meta)
-	return c.Validate()
+	return nil
 }
 
 // Adjust is used to adjust configurations
@@ -137,92 +127,7 @@ func (c *Config) Adjust(meta *toml.MetaData) {
 	if !meta.IsDefined("flow-update-ratio") {
 		configutil.AdjustFloat64(&c.FlowUpdateRatio, defaultFlowUpdateRatio)
 	}
-	if !meta.IsDefined("report-ratio") {
-		configutil.AdjustFloat64(&c.ReportRatio, defaultReportRatio)
-	}
 	if !meta.IsDefined("sample") {
 		c.Sample = defaultSample
 	}
-}
-
-// Validate is used to validate configurations
-func (c *Config) Validate() error {
-	if c.ReportRatio < 0 || c.ReportRatio > 1 {
-		return errors.Errorf("report-ratio must be in [0, 1]")
-	}
-	if c.LeaderUpdateRatio > c.ReportRatio || c.LeaderUpdateRatio < 0 {
-		return errors.Errorf("leader-update-ratio can not be negative or larger than report-ratio")
-	}
-	if c.EpochUpdateRatio > c.ReportRatio || c.EpochUpdateRatio < 0 {
-		return errors.Errorf("epoch-update-ratio can not be negative or larger than report-ratio")
-	}
-	if c.SpaceUpdateRatio > c.ReportRatio || c.SpaceUpdateRatio < 0 {
-		return errors.Errorf("space-update-ratio can not be negative or larger than report-ratio")
-	}
-	if c.FlowUpdateRatio > c.ReportRatio || c.FlowUpdateRatio < 0 {
-		return errors.Errorf("flow-update-ratio can not be negative or larger than report-ratio")
-	}
-	return nil
-}
-
-// Clone creates a copy of current config.
-func (c *Config) Clone() *Config {
-	cfg := &Config{}
-	*cfg = *c
-	return cfg
-}
-
-// Options is the option of the heartbeat-bench.
-type Options struct {
-	ReportRatio atomic.Value
-
-	LeaderUpdateRatio atomic.Value
-	EpochUpdateRatio  atomic.Value
-	SpaceUpdateRatio  atomic.Value
-	FlowUpdateRatio   atomic.Value
-}
-
-// NewOptions creates a new option.
-func NewOptions(cfg *Config) *Options {
-	o := &Options{}
-	o.LeaderUpdateRatio.Store(cfg.LeaderUpdateRatio)
-	o.EpochUpdateRatio.Store(cfg.EpochUpdateRatio)
-	o.SpaceUpdateRatio.Store(cfg.SpaceUpdateRatio)
-	o.FlowUpdateRatio.Store(cfg.FlowUpdateRatio)
-	o.ReportRatio.Store(cfg.ReportRatio)
-	return o
-}
-
-// GetLeaderUpdateRatio returns the leader update ratio.
-func (o *Options) GetLeaderUpdateRatio() float64 {
-	return o.LeaderUpdateRatio.Load().(float64)
-}
-
-// GetEpochUpdateRatio returns the epoch update ratio.
-func (o *Options) GetEpochUpdateRatio() float64 {
-	return o.EpochUpdateRatio.Load().(float64)
-}
-
-// GetSpaceUpdateRatio returns the space update ratio.
-func (o *Options) GetSpaceUpdateRatio() float64 {
-	return o.SpaceUpdateRatio.Load().(float64)
-}
-
-// GetFlowUpdateRatio returns the flow update ratio.
-func (o *Options) GetFlowUpdateRatio() float64 {
-	return o.FlowUpdateRatio.Load().(float64)
-}
-
-// GetReportRatio returns the report ratio.
-func (o *Options) GetReportRatio() float64 {
-	return o.ReportRatio.Load().(float64)
-}
-
-// SetOptions sets the option.
-func (o *Options) SetOptions(cfg *Config) {
-	o.LeaderUpdateRatio.Store(cfg.LeaderUpdateRatio)
-	o.EpochUpdateRatio.Store(cfg.EpochUpdateRatio)
-	o.SpaceUpdateRatio.Store(cfg.SpaceUpdateRatio)
-	o.FlowUpdateRatio.Store(cfg.FlowUpdateRatio)
-	o.ReportRatio.Store(cfg.ReportRatio)
 }

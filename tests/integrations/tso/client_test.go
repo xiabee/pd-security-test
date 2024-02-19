@@ -98,7 +98,7 @@ func (suite *tsoClientTestSuite) SetupSuite() {
 	suite.keyspaceIDs = make([]uint32, 0)
 
 	if suite.legacy {
-		client, err := pd.NewClientWithContext(suite.ctx, strings.Split(suite.backendEndpoints, ","), pd.SecurityOption{}, pd.WithForwardingOption(true))
+		client, err := pd.NewClientWithContext(suite.ctx, strings.Split(suite.backendEndpoints, ","), pd.SecurityOption{})
 		re.NoError(err)
 		innerClient, ok := client.(interface{ GetServiceDiscovery() pd.ServiceDiscovery })
 		re.True(ok)
@@ -183,13 +183,9 @@ func (suite *tsoClientTestSuite) TearDownSuite() {
 		suite.tsoCluster.Destroy()
 	}
 	suite.cluster.Destroy()
-	for _, client := range suite.clients {
-		client.Close()
-	}
 }
 
 func (suite *tsoClientTestSuite) TestGetTS() {
-	re := suite.Require()
 	var wg sync.WaitGroup
 	wg.Add(tsoRequestConcurrencyNumber * len(suite.clients))
 	for i := 0; i < tsoRequestConcurrencyNumber; i++ {
@@ -199,9 +195,9 @@ func (suite *tsoClientTestSuite) TestGetTS() {
 				var lastTS uint64
 				for j := 0; j < tsoRequestRound; j++ {
 					physical, logical, err := client.GetTS(suite.ctx)
-					re.NoError(err)
+					suite.NoError(err)
 					ts := tsoutil.ComposeTS(physical, logical)
-					re.Less(lastTS, ts)
+					suite.Less(lastTS, ts)
 					lastTS = ts
 				}
 			}(client)
@@ -211,7 +207,6 @@ func (suite *tsoClientTestSuite) TestGetTS() {
 }
 
 func (suite *tsoClientTestSuite) TestGetTSAsync() {
-	re := suite.Require()
 	var wg sync.WaitGroup
 	wg.Add(tsoRequestConcurrencyNumber * len(suite.clients))
 	for i := 0; i < tsoRequestConcurrencyNumber; i++ {
@@ -225,9 +220,9 @@ func (suite *tsoClientTestSuite) TestGetTSAsync() {
 				var lastTS uint64 = math.MaxUint64
 				for j := len(tsFutures) - 1; j >= 0; j-- {
 					physical, logical, err := tsFutures[j].Wait()
-					re.NoError(err)
+					suite.NoError(err)
 					ts := tsoutil.ComposeTS(physical, logical)
-					re.Greater(lastTS, ts)
+					suite.Greater(lastTS, ts)
 					lastTS = ts
 				}
 			}(client)
@@ -255,13 +250,12 @@ func (suite *tsoClientTestSuite) TestDiscoverTSOServiceWithLegacyPath() {
 	defer cancel()
 	client := mcs.SetupClientWithKeyspaceID(
 		ctx, re, keyspaceID, strings.Split(suite.backendEndpoints, ","))
-	defer client.Close()
 	var lastTS uint64
 	for j := 0; j < tsoRequestRound; j++ {
 		physical, logical, err := client.GetTS(ctx)
-		re.NoError(err)
+		suite.NoError(err)
 		ts := tsoutil.ComposeTS(physical, logical)
-		re.Less(lastTS, ts)
+		suite.Less(lastTS, ts)
 		lastTS = ts
 	}
 }
@@ -269,9 +263,7 @@ func (suite *tsoClientTestSuite) TestDiscoverTSOServiceWithLegacyPath() {
 // TestGetMinTS tests the correctness of GetMinTS.
 func (suite *tsoClientTestSuite) TestGetMinTS() {
 	re := suite.Require()
-	if !suite.legacy {
-		suite.waitForAllKeyspaceGroupsInServing(re)
-	}
+	suite.waitForAllKeyspaceGroupsInServing(re)
 
 	var wg sync.WaitGroup
 	wg.Add(tsoRequestConcurrencyNumber * len(suite.clients))
@@ -301,15 +293,6 @@ func (suite *tsoClientTestSuite) TestGetMinTS() {
 		}
 	}
 	wg.Wait()
-
-	re.NoError(failpoint.Enable("github.com/tikv/pd/client/unreachableNetwork1", "return(true)"))
-	time.Sleep(time.Second)
-	testutil.Eventually(re, func() bool {
-		var err error
-		_, _, err = suite.clients[0].GetMinTS(suite.ctx)
-		return err == nil
-	})
-	re.NoError(failpoint.Disable("github.com/tikv/pd/client/unreachableNetwork1"))
 }
 
 // More details can be found in this issue: https://github.com/tikv/pd/issues/4884
@@ -321,6 +304,7 @@ func (suite *tsoClientTestSuite) TestUpdateAfterResetTSO() {
 	defer func() {
 		re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/member/skipCampaignLeaderCheck"))
 	}()
+
 	for i := 0; i < len(suite.clients); i++ {
 		client := suite.clients[i]
 		testutil.Eventually(re, func() bool {
@@ -495,7 +479,6 @@ func TestUpgradingAPIandTSOClusters(t *testing.T) {
 	pdClient, err := pd.NewClientWithContext(context.Background(),
 		[]string{backendEndpoints}, pd.SecurityOption{}, pd.WithMaxErrorRetry(1))
 	re.NoError(err)
-	defer pdClient.Close()
 
 	// Create a TSO cluster which has 2 servers
 	tsoCluster, err := tests.NewTestTSOCluster(ctx, 2, backendEndpoints)

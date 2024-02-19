@@ -21,6 +21,7 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
+	"github.com/tikv/pd/client/grpcutil"
 )
 
 // KeyspaceClient manages keyspace metadata.
@@ -56,6 +57,7 @@ func (c *client) LoadKeyspace(ctx context.Context, name string) (*keyspacepb.Key
 		Header: c.requestHeader(),
 		Name:   name,
 	}
+	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
 	resp, err := c.keyspaceClient().LoadKeyspace(ctx, req)
 	cancel()
 
@@ -96,6 +98,7 @@ func (c *client) UpdateKeyspaceState(ctx context.Context, id uint32, state keysp
 		Id:     id,
 		State:  state,
 	}
+	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
 	resp, err := c.keyspaceClient().UpdateKeyspaceState(ctx, req)
 	cancel()
 
@@ -135,6 +138,7 @@ func (c *client) GetAllKeyspaces(ctx context.Context, startID uint32, limit uint
 		StartId: startID,
 		Limit:   limit,
 	}
+	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
 	resp, err := c.keyspaceClient().GetAllKeyspaces(ctx, req)
 	cancel()
 

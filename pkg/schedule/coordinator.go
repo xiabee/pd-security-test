@@ -88,8 +88,8 @@ type Coordinator struct {
 }
 
 // NewCoordinator creates a new Coordinator.
-func NewCoordinator(parentCtx context.Context, cluster sche.ClusterInformer, hbStreams *hbstream.HeartbeatStreams) *Coordinator {
-	ctx, cancel := context.WithCancel(parentCtx)
+func NewCoordinator(ctx context.Context, cluster sche.ClusterInformer, hbStreams *hbstream.HeartbeatStreams) *Coordinator {
+	ctx, cancel := context.WithCancel(ctx)
 	opController := operator.NewController(ctx, cluster.GetBasicCluster(), cluster.GetSharedConfig(), hbStreams)
 	schedulers := schedulers.NewController(ctx, cluster, cluster.GetStorage(), opController)
 	checkers := checker.NewController(ctx, cluster, cluster.GetCheckerConfig(), cluster.GetRuleManager(), cluster.GetRegionLabeler(), opController)
@@ -368,8 +368,8 @@ func (c *Coordinator) driveSlowNodeScheduler() {
 }
 
 // RunUntilStop runs the coordinator until receiving the stop signal.
-func (c *Coordinator) RunUntilStop(collectWaitTime ...time.Duration) {
-	c.Run(collectWaitTime...)
+func (c *Coordinator) RunUntilStop() {
+	c.Run()
 	<-c.ctx.Done()
 	log.Info("coordinator is stopping")
 	c.GetSchedulersController().Wait()
@@ -378,7 +378,7 @@ func (c *Coordinator) RunUntilStop(collectWaitTime ...time.Duration) {
 }
 
 // Run starts coordinator.
-func (c *Coordinator) Run(collectWaitTime ...time.Duration) {
+func (c *Coordinator) Run() {
 	ticker := time.NewTicker(runSchedulerCheckInterval)
 	failpoint.Inject("changeCoordinatorTicker", func() {
 		ticker = time.NewTicker(100 * time.Millisecond)
@@ -386,7 +386,7 @@ func (c *Coordinator) Run(collectWaitTime ...time.Duration) {
 	defer ticker.Stop()
 	log.Info("coordinator starts to collect cluster information")
 	for {
-		if c.ShouldRun(collectWaitTime...) {
+		if c.ShouldRun() {
 			log.Info("coordinator has finished cluster information preparation")
 			break
 		}
@@ -458,16 +458,13 @@ func (c *Coordinator) InitSchedulers(needRun bool) {
 			log.Error("can not create scheduler with independent configuration", zap.String("scheduler-name", name), zap.Strings("scheduler-args", cfg.Args), errs.ZapError(err))
 			continue
 		}
+		log.Info("create scheduler with independent configuration", zap.String("scheduler-name", s.GetName()))
 		if needRun {
-			log.Info("create scheduler with independent configuration", zap.String("scheduler-name", s.GetName()))
 			if err = c.schedulers.AddScheduler(s); err != nil {
 				log.Error("can not add scheduler with independent configuration", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", cfg.Args), errs.ZapError(err))
 			}
-		} else {
-			log.Info("create scheduler handler with independent configuration", zap.String("scheduler-name", s.GetName()))
-			if err = c.schedulers.AddSchedulerHandler(s); err != nil {
-				log.Error("can not add scheduler handler with independent configuration", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", cfg.Args), errs.ZapError(err))
-			}
+		} else if err = c.schedulers.AddSchedulerHandler(s); err != nil {
+			log.Error("can not add scheduler handler with independent configuration", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", cfg.Args), errs.ZapError(err))
 		}
 	}
 
@@ -487,8 +484,8 @@ func (c *Coordinator) InitSchedulers(needRun bool) {
 			continue
 		}
 
+		log.Info("create scheduler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", schedulerCfg.Args))
 		if needRun {
-			log.Info("create scheduler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", schedulerCfg.Args))
 			if err = c.schedulers.AddScheduler(s, schedulerCfg.Args...); err != nil && !errors.ErrorEqual(err, errs.ErrSchedulerExisted.FastGenByArgs()) {
 				log.Error("can not add scheduler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", schedulerCfg.Args), errs.ZapError(err))
 			} else {
@@ -496,14 +493,8 @@ func (c *Coordinator) InitSchedulers(needRun bool) {
 				scheduleCfg.Schedulers[k] = schedulerCfg
 				k++
 			}
-		} else {
-			log.Info("create scheduler handler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", schedulerCfg.Args))
-			if err = c.schedulers.AddSchedulerHandler(s, schedulerCfg.Args...); err != nil && !errors.ErrorEqual(err, errs.ErrSchedulerExisted.FastGenByArgs()) {
-				log.Error("can not add scheduler handler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", schedulerCfg.Args), errs.ZapError(err))
-			} else {
-				scheduleCfg.Schedulers[k] = schedulerCfg
-				k++
-			}
+		} else if err = c.schedulers.AddSchedulerHandler(s, schedulerCfg.Args...); err != nil && !errors.ErrorEqual(err, errs.ErrSchedulerExisted.FastGenByArgs()) {
+			log.Error("can not add scheduler handler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", schedulerCfg.Args), errs.ZapError(err))
 		}
 	}
 
@@ -513,7 +504,6 @@ func (c *Coordinator) InitSchedulers(needRun bool) {
 	if err := c.cluster.GetSchedulerConfig().Persist(c.cluster.GetStorage()); err != nil {
 		log.Error("cannot persist schedule config", errs.ZapError(err))
 	}
-	log.Info("scheduler config is updated", zap.Reflect("scheduler-config", scheduleCfg.Schedulers))
 
 	c.markSchedulersInitialized()
 }
@@ -721,8 +711,8 @@ func ResetHotSpotMetrics() {
 }
 
 // ShouldRun returns true if the coordinator should run.
-func (c *Coordinator) ShouldRun(collectWaitTime ...time.Duration) bool {
-	return c.prepareChecker.check(c.cluster.GetBasicCluster(), collectWaitTime...)
+func (c *Coordinator) ShouldRun() bool {
+	return c.prepareChecker.check(c.cluster.GetBasicCluster())
 }
 
 // GetSchedulersController returns the schedulers controller.

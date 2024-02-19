@@ -43,5 +43,9 @@ func (se *StorageEndpoint) LoadServiceMiddlewareConfig(cfg interface{}) (bool, e
 
 // SaveServiceMiddlewareConfig stores marshallable cfg to the serviceMiddlewarePath.
 func (se *StorageEndpoint) SaveServiceMiddlewareConfig(cfg interface{}) error {
-	return se.saveJSON(serviceMiddlewarePath, cfg)
+	value, err := json.Marshal(cfg)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
+	}
+	return se.Save(serviceMiddlewarePath, string(value))
 }

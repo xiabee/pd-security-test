@@ -499,8 +499,6 @@ func NewConfigSchedulerCommand() *cobra.Command {
 		newConfigGrantHotRegionCommand(),
 		newConfigBalanceLeaderCommand(),
 		newSplitBucketCommand(),
-		newConfigEvictSlowStoreCommand(),
-		newConfigShuffleHotRegionSchedulerCommand(),
 		newConfigEvictSlowTrendCommand(),
 	)
 	return c
@@ -746,17 +744,11 @@ func showShuffleRegionSchedulerRolesCommandFunc(cmd *cobra.Command, args []strin
 	if p == "show-roles" {
 		p = cmd.Parent().Name()
 	}
-	url := path.Join(schedulerConfigPrefix, p, "list")
-	r, err := doRequest(cmd, url, http.MethodGet, http.Header{})
+	path := path.Join(schedulerConfigPrefix, p, "roles")
+	r, err := doRequest(cmd, path, http.MethodGet, http.Header{})
 	if err != nil {
-		// try to use old api
-		var err2 error
-		url := path.Join(schedulerConfigPrefix, p, "roles")
-		r, err2 = doRequest(cmd, url, http.MethodGet, http.Header{})
-		if err2 != nil {
-			cmd.Println(err, err2)
-			return
-		}
+		cmd.Println(err)
+		return
 	}
 	cmd.Println(r)
 }
@@ -782,44 +774,6 @@ func setShuffleRegionSchedulerRolesCommandFunc(cmd *cobra.Command, args []string
 		return
 	}
 	cmd.Println("Success!")
-}
-
-func newConfigEvictSlowStoreCommand() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "evict-slow-store-scheduler",
-		Short: "evict-slow-store-scheduler config",
-		Run:   listSchedulerConfigCommandFunc,
-	}
-
-	c.AddCommand(&cobra.Command{
-		Use:   "show",
-		Short: "list the config item",
-		Run:   listSchedulerConfigCommandFunc,
-	}, &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "set the config item",
-		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
-	})
-	return c
-}
-
-func newConfigShuffleHotRegionSchedulerCommand() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "shuffle-hot-region-scheduler",
-		Short: "shuffle-hot-region-scheduler config",
-		Run:   listSchedulerConfigCommandFunc,
-	}
-
-	c.AddCommand(&cobra.Command{
-		Use:   "show",
-		Short: "list the config item",
-		Run:   listSchedulerConfigCommandFunc,
-	}, &cobra.Command{
-		Use:   "set <key> <value>",
-		Short: "set the config item",
-		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
-	})
-	return c
 }
 
 func newConfigEvictSlowTrendCommand() *cobra.Command {

@@ -159,11 +159,10 @@ func schedulersRegister() {
 	})
 
 	RegisterScheduler(EvictSlowStoreType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
-		conf := initEvictSlowStoreSchedulerConfig(storage)
+		conf := &evictSlowStoreSchedulerConfig{storage: storage, EvictedStores: make([]uint64, 0)}
 		if err := decoder(conf); err != nil {
 			return nil, err
 		}
-		conf.cluster = opController.GetCluster()
 		return newEvictSlowStoreScheduler(opController, conf), nil
 	})
 
@@ -379,7 +378,6 @@ func schedulersRegister() {
 		if err := decoder(conf); err != nil {
 			return nil, err
 		}
-		conf.storage = storage
 		return newShuffleHotRegionScheduler(opController, conf), nil
 	})
 

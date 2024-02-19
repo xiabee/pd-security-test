@@ -162,8 +162,3 @@ func (bs *BaseServer) GetListener() net.Listener {
 func (bs *BaseServer) IsSecure() bool {
 	return bs.secure
 }
-
-// StartTimestamp returns the start timestamp of this server
-func (bs *BaseServer) StartTimestamp() int64 {
-	return bs.startTimestamp
-}

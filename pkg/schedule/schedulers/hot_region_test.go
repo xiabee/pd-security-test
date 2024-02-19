@@ -180,11 +180,11 @@ func checkGCPendingOpInfos(re *require.Assertions, enablePlacementRules bool) {
 				kind := hb.regionPendings[regionID].op.Kind()
 				switch typ {
 				case transferLeader:
-					re.NotZero(kind & operator.OpLeader)
-					re.Zero(kind & operator.OpRegion)
+					re.True(kind&operator.OpLeader != 0)
+					re.True(kind&operator.OpRegion == 0)
 				case movePeer:
-					re.Zero(kind & operator.OpLeader)
-					re.NotZero(kind & operator.OpRegion)
+					re.True(kind&operator.OpLeader == 0)
+					re.True(kind&operator.OpRegion != 0)
 				}
 			}
 		}
@@ -257,7 +257,7 @@ func TestSplitIfRegionTooHot(t *testing.T) {
 	re.Equal(expectOp.Kind(), ops[0].Kind())
 
 	ops, _ = hb.Schedule(tc, false)
-	re.Empty(ops)
+	re.Len(ops, 0)
 
 	tc.UpdateStorageWrittenBytes(1, 6*units.MiB*utils.StoreHeartBeatReportInterval)
 	tc.UpdateStorageWrittenBytes(2, 1*units.MiB*utils.StoreHeartBeatReportInterval)
@@ -276,7 +276,7 @@ func TestSplitIfRegionTooHot(t *testing.T) {
 	re.Equal(operator.OpSplit, ops[0].Kind())
 
 	ops, _ = hb.Schedule(tc, false)
-	re.Empty(ops)
+	re.Len(ops, 0)
 }
 
 func TestSplitBucketsBySize(t *testing.T) {
@@ -319,10 +319,10 @@ func TestSplitBucketsBySize(t *testing.T) {
 		region.UpdateBuckets(b, region.GetBuckets())
 		ops := solve.createSplitOperator([]*core.RegionInfo{region}, bySize)
 		if data.splitKeys == nil {
-			re.Empty(ops)
+			re.Equal(0, len(ops))
 			continue
 		}
-		re.Len(ops, 1)
+		re.Equal(1, len(ops))
 		op := ops[0]
 		re.Equal(splitHotReadBuckets, op.Desc())
 
@@ -380,10 +380,10 @@ func TestSplitBucketsByLoad(t *testing.T) {
 		time.Sleep(time.Millisecond * 10)
 		ops := solve.createSplitOperator([]*core.RegionInfo{region}, byLoad)
 		if data.splitKeys == nil {
-			re.Empty(ops)
+			re.Equal(0, len(ops))
 			continue
 		}
-		re.Len(ops, 1)
+		re.Equal(1, len(ops))
 		op := ops[0]
 		re.Equal(splitHotReadBuckets, op.Desc())
 
@@ -582,8 +582,8 @@ func TestHotWriteRegionScheduleByteRateOnlyWithTiFlash(t *testing.T) {
 	tc.SetHotRegionCacheHitsThreshold(0)
 	re.NoError(tc.RuleManager.SetRules([]*placement.Rule{
 		{
-			GroupID:        placement.DefaultGroupID,
-			ID:             placement.DefaultRuleID,
+			GroupID:        "pd",
+			ID:             "default",
 			Role:           placement.Voter,
 			Count:          3,
 			LocationLabels: []string{"zone", "host"},
@@ -731,7 +731,7 @@ func TestHotWriteRegionScheduleByteRateOnlyWithTiFlash(t *testing.T) {
 			loadsEqual(
 				hb.stLoadInfos[writeLeader][1].LoadPred.Expect.Loads,
 				[]float64{hotRegionBytesSum / allowLeaderTiKVCount, hotRegionKeysSum / allowLeaderTiKVCount, tikvQuerySum / allowLeaderTiKVCount}))
-		re.NotEqual(tikvQuerySum, hotRegionQuerySum)
+		re.True(tikvQuerySum != hotRegionQuerySum)
 		re.True(
 			loadsEqual(
 				hb.stLoadInfos[writePeer][1].LoadPred.Expect.Loads,
@@ -1143,7 +1143,7 @@ func TestHotWriteRegionScheduleWithRuleEnabled(t *testing.T) {
 	tc.AddRegionStore(3, 20)
 
 	err = tc.SetRule(&placement.Rule{
-		GroupID:  placement.DefaultGroupID,
+		GroupID:  "pd",
 		ID:       "leader",
 		Index:    1,
 		Override: true,
@@ -1161,7 +1161,7 @@ func TestHotWriteRegionScheduleWithRuleEnabled(t *testing.T) {
 	})
 	re.NoError(err)
 	err = tc.SetRule(&placement.Rule{
-		GroupID:  placement.DefaultGroupID,
+		GroupID:  "pd",
 		ID:       "voter",
 		Index:    2,
 		Override: false,
@@ -1574,7 +1574,7 @@ func TestHotReadWithEvictLeaderScheduler(t *testing.T) {
 	// two dim are both enough uniform among three stores
 	tc.SetStoreEvictLeader(4, true)
 	ops, _ = hb.Schedule(tc, false)
-	re.Empty(ops)
+	re.Len(ops, 0)
 	clearPendingInfluence(hb.(*hotScheduler))
 }
 
@@ -2499,32 +2499,32 @@ func TestConfigValidation(t *testing.T) {
 	re := require.New(t)
 
 	hc := initHotRegionScheduleConfig()
-	err := hc.validateLocked()
+	err := hc.valid()
 	re.NoError(err)
 
 	// priorities is illegal
 	hc.ReadPriorities = []string{"byte", "error"}
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.Error(err)
 
 	// priorities should have at least 2 dimensions
 	hc = initHotRegionScheduleConfig()
 	hc.WriteLeaderPriorities = []string{"byte"}
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.Error(err)
 
 	// query is not allowed to be set in priorities for write-peer-priorities
 	hc = initHotRegionScheduleConfig()
 	hc.WritePeerPriorities = []string{"query", "byte"}
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.Error(err)
 	// priorities shouldn't be repeated
 	hc.WritePeerPriorities = []string{"byte", "byte"}
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.Error(err)
 	// no error
 	hc.WritePeerPriorities = []string{"byte", "key"}
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.NoError(err)
 
 	// rank-formula-version
@@ -2533,17 +2533,17 @@ func TestConfigValidation(t *testing.T) {
 	re.Equal("v2", hc.GetRankFormulaVersion())
 	// v1
 	hc.RankFormulaVersion = "v1"
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.NoError(err)
 	re.Equal("v1", hc.GetRankFormulaVersion())
 	// v2
 	hc.RankFormulaVersion = "v2"
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.NoError(err)
 	re.Equal("v2", hc.GetRankFormulaVersion())
 	// illegal
 	hc.RankFormulaVersion = "v0"
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.Error(err)
 
 	// forbid-rw-type
@@ -2553,27 +2553,27 @@ func TestConfigValidation(t *testing.T) {
 	re.False(hc.IsForbidRWType(utils.Write))
 	// read
 	hc.ForbidRWType = "read"
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.NoError(err)
 	re.True(hc.IsForbidRWType(utils.Read))
 	re.False(hc.IsForbidRWType(utils.Write))
 	// write
 	hc.ForbidRWType = "write"
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.NoError(err)
 	re.False(hc.IsForbidRWType(utils.Read))
 	re.True(hc.IsForbidRWType(utils.Write))
 	// illegal
 	hc.ForbidRWType = "test"
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.Error(err)
 
 	hc.SplitThresholds = 0
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.Error(err)
 
 	hc.SplitThresholds = 1.1
-	err = hc.validateLocked()
+	err = hc.valid()
 	re.Error(err)
 }
 

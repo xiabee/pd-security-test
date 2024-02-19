@@ -46,24 +46,22 @@ func TestKeyspaceTestSuite(t *testing.T) {
 }
 
 func (suite *keyspaceTestSuite) SetupTest() {
-	re := suite.Require()
 	ctx, cancel := context.WithCancel(context.Background())
 	suite.cleanup = cancel
 	cluster, err := tests.NewTestCluster(ctx, 1)
 	suite.cluster = cluster
-	re.NoError(err)
-	re.NoError(cluster.RunInitialServers())
-	re.NotEmpty(cluster.WaitLeader())
+	suite.NoError(err)
+	suite.NoError(cluster.RunInitialServers())
+	suite.NotEmpty(cluster.WaitLeader())
 	suite.server = cluster.GetLeaderServer()
-	re.NoError(suite.server.BootstrapCluster())
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion", "return(true)"))
+	suite.NoError(suite.server.BootstrapCluster())
+	suite.NoError(failpoint.Enable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion", "return(true)"))
 }
 
 func (suite *keyspaceTestSuite) TearDownTest() {
-	re := suite.Require()
 	suite.cleanup()
 	suite.cluster.Destroy()
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion"))
+	suite.NoError(failpoint.Disable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion"))
 }
 
 func (suite *keyspaceTestSuite) TestCreateLoadKeyspace() {
@@ -135,7 +133,7 @@ func (suite *keyspaceTestSuite) TestLoadRangeKeyspace() {
 	loadResponse := sendLoadRangeRequest(re, suite.server, "", "")
 	re.Empty(loadResponse.NextPageToken) // Load response should contain no more pages.
 	// Load response should contain all created keyspace and a default.
-	re.Len(loadResponse.Keyspaces, len(keyspaces)+1)
+	re.Equal(len(keyspaces)+1, len(loadResponse.Keyspaces))
 	for i, created := range keyspaces {
 		re.Equal(created, loadResponse.Keyspaces[i+1].KeyspaceMeta)
 	}

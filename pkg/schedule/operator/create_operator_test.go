@@ -67,7 +67,6 @@ func (suite *createOperatorTestSuite) TearDownTest() {
 }
 
 func (suite *createOperatorTestSuite) TestCreateSplitRegionOperator() {
-	re := suite.Require()
 	type testCase struct {
 		startKey      []byte
 		endKey        []byte
@@ -144,19 +143,19 @@ func (suite *createOperatorTestSuite) TestCreateSplitRegionOperator() {
 		}, testCase.originPeers[0])
 		op, err := CreateSplitRegionOperator("test", region, 0, testCase.policy, testCase.keys)
 		if testCase.expectedError {
-			re.Error(err)
+			suite.Error(err)
 			continue
 		}
-		re.NoError(err)
-		re.Equal(OpSplit, op.Kind())
-		re.Len(op.steps, 1)
+		suite.NoError(err)
+		suite.Equal(OpSplit, op.Kind())
+		suite.Len(op.steps, 1)
 		for i := 0; i < op.Len(); i++ {
 			switch step := op.Step(i).(type) {
 			case SplitRegion:
-				re.Equal(testCase.startKey, step.StartKey)
-				re.Equal(testCase.endKey, step.EndKey)
-				re.Equal(testCase.policy, step.Policy)
-				re.Equal(testCase.keys, step.SplitKeys)
+				suite.Equal(testCase.startKey, step.StartKey)
+				suite.Equal(testCase.endKey, step.EndKey)
+				suite.Equal(testCase.policy, step.Policy)
+				suite.Equal(testCase.keys, step.SplitKeys)
 			default:
 				suite.T().Errorf("unexpected type: %s", step.String())
 			}
@@ -165,7 +164,6 @@ func (suite *createOperatorTestSuite) TestCreateSplitRegionOperator() {
 }
 
 func (suite *createOperatorTestSuite) TestCreateMergeRegionOperator() {
-	re := suite.Require()
 	type testCase struct {
 		sourcePeers   []*metapb.Peer // first is leader
 		targetPeers   []*metapb.Peer // first is leader
@@ -295,59 +293,58 @@ func (suite *createOperatorTestSuite) TestCreateMergeRegionOperator() {
 		target := core.NewRegionInfo(&metapb.Region{Id: 86, Peers: testCase.targetPeers}, testCase.targetPeers[0])
 		ops, err := CreateMergeRegionOperator("test", suite.cluster, source, target, 0)
 		if testCase.expectedError {
-			re.Error(err)
+			suite.Error(err)
 			continue
 		}
-		re.NoError(err)
-		re.Len(ops, 2)
-		re.Equal(testCase.kind, ops[0].kind)
-		re.Equal(len(testCase.prepareSteps)+1, ops[0].Len())
-		re.Equal(testCase.kind, ops[1].kind)
-		re.Equal(1, ops[1].Len())
-		re.Equal(MergeRegion{source.GetMeta(), target.GetMeta(), true}, ops[1].Step(0).(MergeRegion))
+		suite.NoError(err)
+		suite.Len(ops, 2)
+		suite.Equal(testCase.kind, ops[0].kind)
+		suite.Equal(len(testCase.prepareSteps)+1, ops[0].Len())
+		suite.Equal(testCase.kind, ops[1].kind)
+		suite.Equal(1, ops[1].Len())
+		suite.Equal(MergeRegion{source.GetMeta(), target.GetMeta(), true}, ops[1].Step(0).(MergeRegion))
 
 		expectedSteps := append(testCase.prepareSteps, MergeRegion{source.GetMeta(), target.GetMeta(), false})
 		for i := 0; i < ops[0].Len(); i++ {
 			switch step := ops[0].Step(i).(type) {
 			case TransferLeader:
-				re.Equal(expectedSteps[i].(TransferLeader).FromStore, step.FromStore)
-				re.Equal(expectedSteps[i].(TransferLeader).ToStore, step.ToStore)
+				suite.Equal(expectedSteps[i].(TransferLeader).FromStore, step.FromStore)
+				suite.Equal(expectedSteps[i].(TransferLeader).ToStore, step.ToStore)
 			case AddLearner:
-				re.Equal(expectedSteps[i].(AddLearner).ToStore, step.ToStore)
-				re.Equal(expectedSteps[i].(AddLearner).IsWitness, step.IsWitness)
+				suite.Equal(expectedSteps[i].(AddLearner).ToStore, step.ToStore)
+				suite.Equal(expectedSteps[i].(AddLearner).IsWitness, step.IsWitness)
 			case RemovePeer:
-				re.Equal(expectedSteps[i].(RemovePeer).FromStore, step.FromStore)
+				suite.Equal(expectedSteps[i].(RemovePeer).FromStore, step.FromStore)
 			case ChangePeerV2Enter:
-				re.Len(step.PromoteLearners, len(expectedSteps[i].(ChangePeerV2Enter).PromoteLearners))
-				re.Len(step.DemoteVoters, len(expectedSteps[i].(ChangePeerV2Enter).DemoteVoters))
+				suite.Len(step.PromoteLearners, len(expectedSteps[i].(ChangePeerV2Enter).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(expectedSteps[i].(ChangePeerV2Enter).DemoteVoters))
 				for j, p := range expectedSteps[i].(ChangePeerV2Enter).PromoteLearners {
-					re.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
-					re.Equal(p.IsWitness, step.PromoteLearners[j].IsWitness)
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
+					suite.Equal(p.IsWitness, step.PromoteLearners[j].IsWitness)
 				}
 				for j, d := range expectedSteps[i].(ChangePeerV2Enter).DemoteVoters {
-					re.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
-					re.Equal(d.IsWitness, step.DemoteVoters[j].IsWitness)
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
+					suite.Equal(d.IsWitness, step.DemoteVoters[j].IsWitness)
 				}
 			case ChangePeerV2Leave:
-				re.Len(step.PromoteLearners, len(expectedSteps[i].(ChangePeerV2Leave).PromoteLearners))
-				re.Len(step.DemoteVoters, len(expectedSteps[i].(ChangePeerV2Leave).DemoteVoters))
+				suite.Len(step.PromoteLearners, len(expectedSteps[i].(ChangePeerV2Leave).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(expectedSteps[i].(ChangePeerV2Leave).DemoteVoters))
 				for j, p := range expectedSteps[i].(ChangePeerV2Leave).PromoteLearners {
-					re.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
-					re.Equal(p.IsWitness, step.PromoteLearners[j].IsWitness)
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
+					suite.Equal(p.IsWitness, step.PromoteLearners[j].IsWitness)
 				}
 				for j, d := range expectedSteps[i].(ChangePeerV2Leave).DemoteVoters {
-					re.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
-					re.Equal(d.IsWitness, step.DemoteVoters[j].IsWitness)
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
+					suite.Equal(d.IsWitness, step.DemoteVoters[j].IsWitness)
 				}
 			case MergeRegion:
-				re.Equal(expectedSteps[i].(MergeRegion), step)
+				suite.Equal(expectedSteps[i].(MergeRegion), step)
 			}
 		}
 	}
 }
 
 func (suite *createOperatorTestSuite) TestCreateTransferLeaderOperator() {
-	re := suite.Require()
 	type testCase struct {
 		originPeers         []*metapb.Peer // first is leader
 		targetLeaderStoreID uint64
@@ -426,17 +423,17 @@ func (suite *createOperatorTestSuite) TestCreateTransferLeaderOperator() {
 		op, err := CreateTransferLeaderOperator("test", suite.cluster, region, testCase.originPeers[0].StoreId, testCase.targetLeaderStoreID, []uint64{}, 0)
 
 		if testCase.isErr {
-			re.Error(err)
+			suite.Error(err)
 			continue
 		}
 
-		re.NoError(err)
-		re.Equal(OpLeader, op.Kind())
-		re.Len(op.steps, 1)
+		suite.NoError(err)
+		suite.Equal(OpLeader, op.Kind())
+		suite.Len(op.steps, 1)
 		switch step := op.Step(0).(type) {
 		case TransferLeader:
-			re.Equal(testCase.originPeers[0].StoreId, step.FromStore)
-			re.Equal(testCase.targetLeaderStoreID, step.ToStore)
+			suite.Equal(testCase.originPeers[0].StoreId, step.FromStore)
+			suite.Equal(testCase.targetLeaderStoreID, step.ToStore)
 		default:
 			suite.T().Errorf("unexpected type: %s", step.String())
 		}
@@ -444,7 +441,6 @@ func (suite *createOperatorTestSuite) TestCreateTransferLeaderOperator() {
 }
 
 func (suite *createOperatorTestSuite) TestCreateLeaveJointStateOperator() {
-	re := suite.Require()
 	type testCase struct {
 		originPeers   []*metapb.Peer // first is leader
 		offlineStores []uint64
@@ -597,26 +593,26 @@ func (suite *createOperatorTestSuite) TestCreateLeaveJointStateOperator() {
 		region := core.NewRegionInfo(&metapb.Region{Id: 1, Peers: testCase.originPeers}, testCase.originPeers[0])
 		op, err := CreateLeaveJointStateOperator("test", suite.cluster, region)
 		if len(testCase.steps) == 0 {
-			re.Error(err)
+			suite.Error(err)
 			revertOffline()
 			continue
 		}
-		re.NoError(err)
-		re.Equal(testCase.kind, op.Kind())
-		re.Len(op.steps, len(testCase.steps))
+		suite.NoError(err)
+		suite.Equal(testCase.kind, op.Kind())
+		suite.Len(op.steps, len(testCase.steps))
 		for i := 0; i < op.Len(); i++ {
 			switch step := op.Step(i).(type) {
 			case TransferLeader:
-				re.Equal(testCase.steps[i].(TransferLeader).FromStore, step.FromStore)
-				re.Equal(testCase.steps[i].(TransferLeader).ToStore, step.ToStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).FromStore, step.FromStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).ToStore, step.ToStore)
 			case ChangePeerV2Leave:
-				re.Len(step.PromoteLearners, len(testCase.steps[i].(ChangePeerV2Leave).PromoteLearners))
-				re.Len(step.DemoteVoters, len(testCase.steps[i].(ChangePeerV2Leave).DemoteVoters))
+				suite.Len(step.PromoteLearners, len(testCase.steps[i].(ChangePeerV2Leave).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(testCase.steps[i].(ChangePeerV2Leave).DemoteVoters))
 				for j, p := range testCase.steps[i].(ChangePeerV2Leave).PromoteLearners {
-					re.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
 				}
 				for j, d := range testCase.steps[i].(ChangePeerV2Leave).DemoteVoters {
-					re.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
 				}
 			default:
 				suite.T().Errorf("unexpected type: %s", step.String())
@@ -628,7 +624,6 @@ func (suite *createOperatorTestSuite) TestCreateLeaveJointStateOperator() {
 }
 
 func (suite *createOperatorTestSuite) TestCreateMoveRegionOperator() {
-	re := suite.Require()
 	type testCase struct {
 		name            string
 		originPeers     []*metapb.Peer // first is leader
@@ -937,45 +932,45 @@ func (suite *createOperatorTestSuite) TestCreateMoveRegionOperator() {
 		op, err := CreateMoveRegionOperator("test", suite.cluster, region, OpAdmin, testCase.targetPeerRoles)
 
 		if testCase.expectedError == nil {
-			re.NoError(err)
+			suite.NoError(err)
 		} else {
-			re.Error(err)
-			re.Contains(err.Error(), testCase.expectedError.Error())
+			suite.Error(err)
+			suite.Contains(err.Error(), testCase.expectedError.Error())
 			continue
 		}
-		re.NotNil(op)
+		suite.NotNil(op)
 
-		re.Len(testCase.steps, op.Len())
+		suite.Len(testCase.steps, op.Len())
 		// Since the peer id may be generated by allocator in runtime, we only check store id.
 		for i := 0; i < op.Len(); i++ {
 			switch step := op.Step(i).(type) {
 			case TransferLeader:
-				re.Equal(testCase.steps[i].(TransferLeader).FromStore, step.FromStore)
-				re.Equal(testCase.steps[i].(TransferLeader).ToStore, step.ToStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).FromStore, step.FromStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).ToStore, step.ToStore)
 			case ChangePeerV2Leave:
-				re.Len(step.PromoteLearners, len(testCase.steps[i].(ChangePeerV2Leave).PromoteLearners))
-				re.Len(step.DemoteVoters, len(testCase.steps[i].(ChangePeerV2Leave).DemoteVoters))
+				suite.Len(step.PromoteLearners, len(testCase.steps[i].(ChangePeerV2Leave).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(testCase.steps[i].(ChangePeerV2Leave).DemoteVoters))
 				for j, p := range testCase.steps[i].(ChangePeerV2Leave).PromoteLearners {
-					re.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
 				}
 				for j, d := range testCase.steps[i].(ChangePeerV2Leave).DemoteVoters {
-					re.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
 				}
 			case ChangePeerV2Enter:
-				re.Len(step.PromoteLearners, len(testCase.steps[i].(ChangePeerV2Enter).PromoteLearners))
-				re.Len(step.DemoteVoters, len(testCase.steps[i].(ChangePeerV2Enter).DemoteVoters))
+				suite.Len(step.PromoteLearners, len(testCase.steps[i].(ChangePeerV2Enter).PromoteLearners))
+				suite.Len(step.DemoteVoters, len(testCase.steps[i].(ChangePeerV2Enter).DemoteVoters))
 				for j, p := range testCase.steps[i].(ChangePeerV2Enter).PromoteLearners {
-					re.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
+					suite.Equal(p.ToStore, step.PromoteLearners[j].ToStore)
 				}
 				for j, d := range testCase.steps[i].(ChangePeerV2Enter).DemoteVoters {
-					re.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
 				}
 			case AddLearner:
-				re.Equal(testCase.steps[i].(AddLearner).ToStore, step.ToStore)
+				suite.Equal(testCase.steps[i].(AddLearner).ToStore, step.ToStore)
 			case PromoteLearner:
-				re.Equal(testCase.steps[i].(PromoteLearner).ToStore, step.ToStore)
+				suite.Equal(testCase.steps[i].(PromoteLearner).ToStore, step.ToStore)
 			case RemovePeer:
-				re.Equal(testCase.steps[i].(RemovePeer).FromStore, step.FromStore)
+				suite.Equal(testCase.steps[i].(RemovePeer).FromStore, step.FromStore)
 			default:
 				suite.T().Errorf("unexpected type: %s", step.String())
 			}
@@ -984,7 +979,6 @@ func (suite *createOperatorTestSuite) TestCreateMoveRegionOperator() {
 }
 
 func (suite *createOperatorTestSuite) TestMoveRegionWithoutJointConsensus() {
-	re := suite.Require()
 	type testCase struct {
 		name            string
 		originPeers     []*metapb.Peer // first is leader
@@ -1113,27 +1107,27 @@ func (suite *createOperatorTestSuite) TestMoveRegionWithoutJointConsensus() {
 		op, err := CreateMoveRegionOperator("test", suite.cluster, region, OpAdmin, testCase.targetPeerRoles)
 
 		if testCase.expectedError == nil {
-			re.NoError(err)
+			suite.NoError(err)
 		} else {
-			re.Error(err)
-			re.Contains(err.Error(), testCase.expectedError.Error())
+			suite.Error(err)
+			suite.Contains(err.Error(), testCase.expectedError.Error())
 			continue
 		}
-		re.NotNil(op)
+		suite.NotNil(op)
 
-		re.Len(testCase.steps, op.Len())
+		suite.Len(testCase.steps, op.Len())
 		// Since the peer id may be generated by allocator in runtime, we only check store id.
 		for i := 0; i < op.Len(); i++ {
 			switch step := op.Step(i).(type) {
 			case TransferLeader:
-				re.Equal(testCase.steps[i].(TransferLeader).FromStore, step.FromStore)
-				re.Equal(testCase.steps[i].(TransferLeader).ToStore, step.ToStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).FromStore, step.FromStore)
+				suite.Equal(testCase.steps[i].(TransferLeader).ToStore, step.ToStore)
 			case AddLearner:
-				re.Equal(testCase.steps[i].(AddLearner).ToStore, step.ToStore)
+				suite.Equal(testCase.steps[i].(AddLearner).ToStore, step.ToStore)
 			case PromoteLearner:
-				re.Equal(testCase.steps[i].(PromoteLearner).ToStore, step.ToStore)
+				suite.Equal(testCase.steps[i].(PromoteLearner).ToStore, step.ToStore)
 			case RemovePeer:
-				re.Equal(testCase.steps[i].(RemovePeer).FromStore, step.FromStore)
+				suite.Equal(testCase.steps[i].(RemovePeer).FromStore, step.FromStore)
 			default:
 				suite.T().Errorf("unexpected type: %s", step.String())
 			}
@@ -1151,8 +1145,8 @@ func TestCreateLeaveJointStateOperatorWithoutFitRules(t *testing.T) {
 	cluster := mockcluster.NewCluster(ctx, opts)
 	re.NoError(cluster.SetRules([]*placement.Rule{
 		{
-			GroupID:     placement.DefaultGroupID,
-			ID:          placement.DefaultRuleID,
+			GroupID:     "pd",
+			ID:          "default",
 			StartKeyHex: hex.EncodeToString([]byte("")),
 			EndKeyHex:   hex.EncodeToString([]byte("")),
 			Role:        placement.Voter,
@@ -1200,7 +1194,6 @@ func TestCreateLeaveJointStateOperatorWithoutFitRules(t *testing.T) {
 }
 
 func (suite *createOperatorTestSuite) TestCreateNonWitnessPeerOperator() {
-	re := suite.Require()
 	type testCase struct {
 		originPeers   []*metapb.Peer // first is leader
 		kind          OpKind
@@ -1241,21 +1234,21 @@ func (suite *createOperatorTestSuite) TestCreateNonWitnessPeerOperator() {
 	for _, testCase := range testCases {
 		region := core.NewRegionInfo(&metapb.Region{Id: 68, Peers: testCase.originPeers}, testCase.originPeers[0])
 		op, err := CreateNonWitnessPeerOperator("test", suite.cluster, region, testCase.originPeers[1])
-		re.NoError(err)
-		re.NotNil(op)
-		re.Equal(testCase.kind, op.kind)
+		suite.NoError(err)
+		suite.NotNil(op)
+		suite.Equal(testCase.kind, op.kind)
 
 		expectedSteps := testCase.prepareSteps
 		for i := 0; i < op.Len(); i++ {
 			switch step := op.Step(i).(type) {
 			case ChangePeerV2Enter:
-				re.Len(step.DemoteVoters, len(expectedSteps[i].(ChangePeerV2Enter).DemoteVoters))
+				suite.Len(step.DemoteVoters, len(expectedSteps[i].(ChangePeerV2Enter).DemoteVoters))
 				for j, d := range expectedSteps[i].(ChangePeerV2Enter).DemoteVoters {
-					re.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
+					suite.Equal(d.ToStore, step.DemoteVoters[j].ToStore)
 				}
 			case BecomeNonWitness:
-				re.Equal(step.StoreID, expectedSteps[i].(BecomeNonWitness).StoreID)
-				re.Equal(step.PeerID, expectedSteps[i].(BecomeNonWitness).PeerID)
+				suite.Equal(step.StoreID, expectedSteps[i].(BecomeNonWitness).StoreID)
+				suite.Equal(step.PeerID, expectedSteps[i].(BecomeNonWitness).PeerID)
 			}
 		}
 	}

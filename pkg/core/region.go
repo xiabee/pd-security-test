@@ -98,6 +98,12 @@ func (r *RegionInfo) LoadedFromStorage() bool {
 	return r.source == Storage
 }
 
+// LoadedFromSync means this region's meta info loaded from region syncer.
+// Only used for test.
+func (r *RegionInfo) LoadedFromSync() bool {
+	return r.source == Sync
+}
+
 // NewRegionInfo creates RegionInfo with region's meta and leader peer.
 func NewRegionInfo(region *metapb.Region, leader *metapb.Peer, opts ...RegionCreateOption) *RegionInfo {
 	regionInfo := &RegionInfo{
@@ -705,7 +711,7 @@ func (r *RegionInfo) isRegionRecreated() bool {
 
 // RegionGuideFunc is a function that determines which follow-up operations need to be performed based on the origin
 // and new region information.
-type RegionGuideFunc func(region, origin *RegionInfo) (isNew, saveKV, saveCache, needSync bool)
+type RegionGuideFunc func(region, origin *RegionInfo) (saveKV, saveCache, needSync bool)
 
 // GenerateRegionGuideFunc is used to generate a RegionGuideFunc. Control the log output by specifying the log function.
 // nil means do not print the log.
@@ -718,19 +724,15 @@ func GenerateRegionGuideFunc(enableLog bool) RegionGuideFunc {
 	}
 	// Save to storage if meta is updated.
 	// Save to cache if meta or leader is updated, or contains any down/pending peer.
-	// Mark isNew if the region in cache does not have leader.
-	return func(region, origin *RegionInfo) (isNew, saveKV, saveCache, needSync bool) {
+	return func(region, origin *RegionInfo) (saveKV, saveCache, needSync bool) {
 		if origin == nil {
 			if log.GetLevel() <= zap.DebugLevel {
 				debug("insert new region",
 					zap.Uint64("region-id", region.GetID()),
 					logutil.ZapRedactStringer("meta-region", RegionToHexMeta(region.GetMeta())))
 			}
-			saveKV, saveCache, isNew = true, true, true
+			saveKV, saveCache = true, true
 		} else {
-			if origin.LoadedFromStorage() {
-				isNew = true
-			}
 			r := region.GetRegionEpoch()
 			o := origin.GetRegionEpoch()
 			if r.GetVersion() > o.GetVersion() {
@@ -756,9 +758,7 @@ func GenerateRegionGuideFunc(enableLog bool) RegionGuideFunc {
 				saveKV, saveCache = true, true
 			}
 			if region.GetLeader().GetId() != origin.GetLeader().GetId() {
-				if origin.GetLeader().GetId() == 0 {
-					isNew = true
-				} else if log.GetLevel() <= zap.InfoLevel {
+				if origin.GetLeader().GetId() != 0 && log.GetLevel() <= zap.InfoLevel {
 					info("leader changed",
 						zap.Uint64("region-id", region.GetID()),
 						zap.Uint64("from", origin.GetLeader().GetStoreId()),
@@ -1342,8 +1342,8 @@ func (r *RegionsInfo) GetStoreWriteRate(storeID uint64) (bytesRate, keysRate flo
 
 // GetClusterNotFromStorageRegionsCnt gets the `NotFromStorageRegionsCnt` count of regions that not loaded from storage anymore.
 func (r *RegionsInfo) GetClusterNotFromStorageRegionsCnt() int {
-	r.t.RLock()
-	defer r.t.RUnlock()
+	r.st.RLock()
+	defer r.st.RUnlock()
 	return r.tree.notFromStorageRegionsCount()
 }
 
@@ -1703,23 +1703,6 @@ func (r *RegionsInfo) GetAverageRegionSize() int64 {
 		return 0
 	}
 	return r.tree.TotalSize() / int64(r.tree.length())
-}
-
-// ValidRegion is used to decide if the region is valid.
-func (r *RegionsInfo) ValidRegion(region *metapb.Region) error {
-	startKey := region.GetStartKey()
-	currnetRegion := r.GetRegionByKey(startKey)
-	if currnetRegion == nil {
-		return errors.Errorf("region not found, request region: %v", logutil.RedactStringer(RegionToHexMeta(region)))
-	}
-	// If the request epoch is less than current region epoch, then returns an error.
-	regionEpoch := region.GetRegionEpoch()
-	currnetEpoch := currnetRegion.GetMeta().GetRegionEpoch()
-	if regionEpoch.GetVersion() < currnetEpoch.GetVersion() ||
-		regionEpoch.GetConfVer() < currnetEpoch.GetConfVer() {
-		return errors.Errorf("invalid region epoch, request: %v, current: %v", regionEpoch, currnetEpoch)
-	}
-	return nil
 }
 
 // DiffRegionPeersInfo return the difference of peers info  between two RegionInfo

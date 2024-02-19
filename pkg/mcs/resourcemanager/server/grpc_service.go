@@ -98,7 +98,7 @@ func (s *Service) GetResourceGroup(ctx context.Context, req *rmpb.GetResourceGro
 	if err := s.checkServing(); err != nil {
 		return nil, err
 	}
-	rg := s.manager.GetResourceGroup(req.ResourceGroupName, req.WithRuStats)
+	rg := s.manager.GetResourceGroup(req.ResourceGroupName)
 	if rg == nil {
 		return nil, errors.New("resource group not found")
 	}
@@ -112,7 +112,7 @@ func (s *Service) ListResourceGroups(ctx context.Context, req *rmpb.ListResource
 	if err := s.checkServing(); err != nil {
 		return nil, err
 	}
-	groups := s.manager.GetResourceGroupList(req.WithRuStats)
+	groups := s.manager.GetResourceGroupList()
 	resp := &rmpb.ListResourceGroupsResponse{
 		Groups: make([]*rmpb.ResourceGroup, 0, len(groups)),
 	}

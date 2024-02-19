@@ -60,8 +60,7 @@ func (suite *metaTestSuite) SetupSuite() {
 }
 
 func (suite *metaTestSuite) TearDownSuite() {
-	re := suite.Require()
-	re.NoError(failpoint.Disable("github.com/tikv/pd/server/cluster/highFrequencyClusterJobs"))
+	suite.NoError(failpoint.Disable("github.com/tikv/pd/server/cluster/highFrequencyClusterJobs"))
 	suite.cancel()
 	suite.cluster.Destroy()
 }
@@ -99,16 +98,5 @@ func (suite *metaTestSuite) TestStoreWatch() {
 	re.NoError(suite.pdLeaderServer.GetRaftCluster().RemoveTombStoneRecords())
 	testutil.Eventually(re, func() bool {
 		return cluster.GetStore(2) == nil
-	})
-
-	// test synchronized store labels
-	suite.pdLeaderServer.GetServer().GetRaftCluster().PutStore(
-		&metapb.Store{Id: 5, Address: "mock-5", State: metapb.StoreState_Up, NodeState: metapb.NodeState_Serving, LastHeartbeat: time.Now().UnixNano(), Labels: []*metapb.StoreLabel{{Key: "zone", Value: "z1"}}},
-	)
-	testutil.Eventually(re, func() bool {
-		if len(cluster.GetStore(5).GetLabels()) == 0 {
-			return false
-		}
-		return cluster.GetStore(5).GetLabels()[0].GetValue() == "z1"
 	})
 }

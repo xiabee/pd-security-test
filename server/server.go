@@ -43,7 +43,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/sysutil"
 	"github.com/tikv/pd/pkg/audit"
-	bs "github.com/tikv/pd/pkg/basicserver"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
@@ -217,11 +216,11 @@ type Server struct {
 	// related data structures defined in the PD grpc service
 	pdProtoFactory *tsoutil.PDProtoFactory
 
-	serviceRateLimiter *ratelimit.Controller
+	serviceRateLimiter *ratelimit.Limiter
 	serviceLabels      map[string][]apiutil.AccessPath
 	apiServiceLabelMap map[apiutil.AccessPath]string
 
-	grpcServiceRateLimiter *ratelimit.Controller
+	grpcServiceRateLimiter *ratelimit.Limiter
 	grpcServiceLabels      map[string]struct{}
 	grpcServer             *grpc.Server
 
@@ -274,8 +273,8 @@ func CreateServer(ctx context.Context, cfg *config.Config, services []string, le
 		audit.NewLocalLogBackend(true),
 		audit.NewPrometheusHistogramBackend(serviceAuditHistogram, false),
 	}
-	s.serviceRateLimiter = ratelimit.NewController(s.ctx, "http", apiConcurrencyGauge)
-	s.grpcServiceRateLimiter = ratelimit.NewController(s.ctx, "grpc", apiConcurrencyGauge)
+	s.serviceRateLimiter = ratelimit.NewLimiter()
+	s.grpcServiceRateLimiter = ratelimit.NewLimiter()
 	s.serviceAuditBackendLabels = make(map[string]*audit.BackendLabels)
 	s.serviceLabels = make(map[string][]apiutil.AccessPath)
 	s.grpcServiceLabels = make(map[string]struct{})
@@ -363,11 +362,9 @@ func (s *Server) startEtcd(ctx context.Context) error {
 }
 
 func (s *Server) initGRPCServiceLabels() {
-	for name, serviceInfo := range s.grpcServer.GetServiceInfo() {
-		if name == gRPCServiceName {
-			for _, methodInfo := range serviceInfo.Methods {
-				s.grpcServiceLabels[methodInfo.Name] = struct{}{}
-			}
+	for _, serviceInfo := range s.grpcServer.GetServiceInfo() {
+		for _, methodInfo := range serviceInfo.Methods {
+			s.grpcServiceLabels[methodInfo.Name] = struct{}{}
 		}
 	}
 }
@@ -383,12 +380,12 @@ func (s *Server) startClient() error {
 	}
 	/* Starting two different etcd clients here is to avoid the throttling. */
 	// This etcd client will be used to access the etcd cluster to read and write all kinds of meta data.
-	s.client, err = etcdutil.CreateEtcdClient(tlsConfig, etcdCfg.ACUrls)
+	s.client, err = etcdutil.CreateEtcdClient(tlsConfig, etcdCfg.ACUrls, "server-etcd-client")
 	if err != nil {
 		return errs.ErrNewEtcdClient.Wrap(err).GenWithStackByCause()
 	}
 	// This etcd client will only be used to read and write the election-related data, such as leader key.
-	s.electionClient, err = etcdutil.CreateEtcdClient(tlsConfig, etcdCfg.ACUrls)
+	s.electionClient, err = etcdutil.CreateEtcdClient(tlsConfig, etcdCfg.ACUrls, "election-etcd-client")
 	if err != nil {
 		return errs.ErrNewEtcdClient.Wrap(err).GenWithStackByCause()
 	}
@@ -433,7 +430,7 @@ func (s *Server) startServer(ctx context.Context) error {
 	log.Info("init cluster id", zap.Uint64("cluster-id", s.clusterID))
 	// It may lose accuracy if use float64 to store uint64. So we store the cluster id in label.
 	metadataGauge.WithLabelValues(fmt.Sprintf("cluster%d", s.clusterID)).Set(0)
-	bs.ServerInfoGauge.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
+	serverInfo.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
 
 	s.rootPath = endpoint.PDRootPath(s.clusterID)
 	s.member.InitMemberInfo(s.cfg.AdvertiseClientUrls, s.cfg.AdvertisePeerUrls, s.Name(), s.rootPath)
@@ -478,7 +475,7 @@ func (s *Server) startServer(ctx context.Context) error {
 
 	s.gcSafePointManager = gc.NewSafePointManager(s.storage, s.cfg.PDServerCfg)
 	s.basicCluster = core.NewBasicCluster()
-	s.cluster = cluster.NewRaftCluster(ctx, s.clusterID, s.GetBasicCluster(), s.GetStorage(), syncer.NewRegionSyncer(s), s.client, s.httpClient)
+	s.cluster = cluster.NewRaftCluster(ctx, s.clusterID, syncer.NewRegionSyncer(s), s.client, s.httpClient)
 	keyspaceIDAllocator := id.NewAllocator(&id.AllocatorParams{
 		Client:    s.client,
 		RootPath:  s.rootPath,
@@ -494,30 +491,22 @@ func (s *Server) startServer(ctx context.Context) error {
 	s.safePointV2Manager = gc.NewSafePointManagerV2(s.ctx, s.storage, s.storage, s.storage)
 	s.hbStreams = hbstream.NewHeartbeatStreams(ctx, s.clusterID, "", s.cluster)
 	// initial hot_region_storage in here.
-
-	s.hotRegionStorage, err = storage.NewHotRegionsStorage(
-		ctx, filepath.Join(s.cfg.DataDir, "hot-region"), s.encryptionKeyManager, s.handler)
-	if err != nil {
-		return err
+	if !s.IsAPIServiceMode() {
+		s.hotRegionStorage, err = storage.NewHotRegionsStorage(
+			ctx, filepath.Join(s.cfg.DataDir, "hot-region"), s.encryptionKeyManager, s.handler)
+		if err != nil {
+			return err
+		}
 	}
-
 	// Run callbacks
 	log.Info("triggering the start callback functions")
 	for _, cb := range s.startCallbacks {
 		cb()
 	}
 
-	// to init all rate limiter and metrics
-	for service := range s.serviceLabels {
-		s.serviceRateLimiter.Update(service, ratelimit.InitLimiter())
-	}
-	for service := range s.grpcServiceLabels {
-		s.grpcServiceRateLimiter.Update(service, ratelimit.InitLimiter())
-	}
-
 	// Server has started.
 	atomic.StoreInt64(&s.isRunning, 1)
-	bs.ServerMaxProcsGauge.Set(float64(runtime.GOMAXPROCS(0)))
+	serverMaxProcs.Set(float64(runtime.GOMAXPROCS(0)))
 	return nil
 }
 
@@ -572,8 +561,6 @@ func (s *Server) Close() {
 		}
 	}
 
-	s.grpcServiceRateLimiter.Close()
-	s.serviceRateLimiter.Close()
 	// Run callbacks
 	log.Info("triggering the close callback functions")
 	for _, cb := range s.closeCallbacks {
@@ -954,7 +941,6 @@ func (s *Server) GetConfig() *config.Config {
 	cfg.PDServerCfg = *s.persistOptions.GetPDServerConfig().Clone()
 	cfg.ReplicationMode = *s.persistOptions.GetReplicationModeConfig()
 	cfg.Keyspace = *s.persistOptions.GetKeyspaceConfig().Clone()
-	cfg.MicroService = *s.persistOptions.GetMicroServiceConfig().Clone()
 	cfg.LabelProperty = s.persistOptions.GetLabelPropertyConfig().Clone()
 	cfg.ClusterVersion = *s.persistOptions.GetClusterVersion()
 	if s.storage == nil {
@@ -964,7 +950,20 @@ func (s *Server) GetConfig() *config.Config {
 	if err != nil {
 		return cfg
 	}
-	cfg.Schedule.SchedulersPayload = schedulers.ToPayload(sches, configs)
+	payload := make(map[string]interface{})
+	for i, sche := range sches {
+		var config interface{}
+		err := schedulers.DecodeConfig([]byte(configs[i]), &config)
+		if err != nil {
+			log.Error("failed to decode scheduler config",
+				zap.String("config", configs[i]),
+				zap.String("scheduler", sche),
+				errs.ZapError(err))
+			continue
+		}
+		payload[sche] = config
+	}
+	cfg.Schedule.SchedulersPayload = payload
 	return cfg
 }
 
@@ -990,27 +989,6 @@ func (s *Server) SetKeyspaceConfig(cfg config.KeyspaceConfig) error {
 	}
 	s.keyspaceManager.UpdateConfig(&cfg)
 	log.Info("keyspace config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
-	return nil
-}
-
-// GetMicroServiceConfig gets the micro service config information.
-func (s *Server) GetMicroServiceConfig() *config.MicroServiceConfig {
-	return s.persistOptions.GetMicroServiceConfig().Clone()
-}
-
-// SetMicroServiceConfig sets the micro service config information.
-func (s *Server) SetMicroServiceConfig(cfg config.MicroServiceConfig) error {
-	old := s.persistOptions.GetMicroServiceConfig()
-	s.persistOptions.SetMicroServiceConfig(&cfg)
-	if err := s.persistOptions.Persist(s.storage); err != nil {
-		s.persistOptions.SetMicroServiceConfig(old)
-		log.Error("failed to update micro service config",
-			zap.Reflect("new", cfg),
-			zap.Reflect("old", old),
-			errs.ZapError(err))
-		return err
-	}
-	log.Info("micro service config is updated", zap.Reflect("new", cfg), zap.Reflect("old", old))
 	return nil
 }
 
@@ -1080,7 +1058,7 @@ func (s *Server) SetReplicationConfig(cfg sc.ReplicationConfig) error {
 			return errs.ErrNotBootstrapped.GenWithStackByArgs()
 		}
 		// replication.MaxReplicas won't work when placement rule is enabled and not only have one default rule.
-		defaultRule := rc.GetRuleManager().GetRule(placement.DefaultGroupID, placement.DefaultRuleID)
+		defaultRule := rc.GetRuleManager().GetRule("pd", "default")
 
 		CheckInDefaultRule := func() error {
 			// replication config won't work when placement rule is enabled and exceeds one default rule
@@ -1400,12 +1378,6 @@ func (s *Server) GetRaftCluster() *cluster.RaftCluster {
 	return s.cluster
 }
 
-// DirectlyGetRaftCluster returns raft cluster directly.
-// Only used for test.
-func (s *Server) DirectlyGetRaftCluster() *cluster.RaftCluster {
-	return s.cluster
-}
-
 // GetCluster gets cluster.
 func (s *Server) GetCluster() *metapb.Cluster {
 	return &metapb.Cluster{
@@ -1435,15 +1407,6 @@ func (s *Server) GetRegions() []*core.RegionInfo {
 		return rc.GetRegions()
 	}
 	return nil
-}
-
-// IsServiceIndependent returns if the service is enabled
-func (s *Server) IsServiceIndependent(name string) bool {
-	rc := s.GetRaftCluster()
-	if rc != nil {
-		return rc.IsServiceIndependent(name)
-	}
-	return false
 }
 
 // GetServiceLabels returns ApiAccessPaths by given service label
@@ -1504,7 +1467,7 @@ func (s *Server) SetServiceAuditBackendLabels(serviceLabel string, labels []stri
 }
 
 // GetServiceRateLimiter is used to get rate limiter
-func (s *Server) GetServiceRateLimiter() *ratelimit.Controller {
+func (s *Server) GetServiceRateLimiter() *ratelimit.Limiter {
 	return s.serviceRateLimiter
 }
 
@@ -1519,7 +1482,7 @@ func (s *Server) UpdateServiceRateLimiter(serviceLabel string, opts ...ratelimit
 }
 
 // GetGRPCRateLimiter is used to get rate limiter
-func (s *Server) GetGRPCRateLimiter() *ratelimit.Controller {
+func (s *Server) GetGRPCRateLimiter() *ratelimit.Limiter {
 	return s.grpcServiceRateLimiter
 }
 
@@ -2054,11 +2017,9 @@ func (s *Server) initServicePrimaryWatcher(serviceName string, primaryKey string
 		s.client,
 		name,
 		primaryKey,
-		func([]*clientv3.Event) error { return nil },
 		putFn,
 		deleteFn,
-		func([]*clientv3.Event) error { return nil },
-		false, /* withPrefix */
+		func() error { return nil },
 	)
 }
 
