@@ -54,7 +54,7 @@ require (
 	golang.org/x/text v0.13.0
 	golang.org/x/time v0.1.0
 	golang.org/x/tools v0.6.0
-	google.golang.org/grpc v1.54.0
+	google.golang.org/grpc v1.56.3
 	gotest.tools/gotestsum v1.7.0
 )
 
