@@ -19,24 +19,24 @@ import (
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/schedule/hbstream"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule/hbstream"
 )
 
 // HeartbeatStream is used to mock HeartbeatStream for test use.
 type HeartbeatStream struct {
-	ch chan core.RegionHeartbeatResponse
+	ch chan *pdpb.RegionHeartbeatResponse
 }
 
 // NewHeartbeatStream creates a new HeartbeatStream.
 func NewHeartbeatStream() HeartbeatStream {
 	return HeartbeatStream{
-		ch: make(chan core.RegionHeartbeatResponse),
+		ch: make(chan *pdpb.RegionHeartbeatResponse),
 	}
 }
 
 // Send mocks method.
-func (s HeartbeatStream) Send(m core.RegionHeartbeatResponse) error {
+func (s HeartbeatStream) Send(m *pdpb.RegionHeartbeatResponse) error {
 	select {
 	case <-time.After(time.Second):
 		return errors.New("timeout")
@@ -52,7 +52,7 @@ func (s HeartbeatStream) SendMsg(region *core.RegionInfo, msg *pdpb.RegionHeartb
 func (s HeartbeatStream) BindStream(storeID uint64, stream hbstream.HeartbeatStream) {}
 
 // Recv mocks method.
-func (s HeartbeatStream) Recv() core.RegionHeartbeatResponse {
+func (s HeartbeatStream) Recv() *pdpb.RegionHeartbeatResponse {
 	select {
 	case <-time.After(time.Millisecond * 10):
 		return nil

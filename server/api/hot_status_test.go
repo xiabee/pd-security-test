@@ -17,23 +17,22 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
 	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/tikv/pd/pkg/schedule/handler"
-	"github.com/tikv/pd/pkg/storage"
-	"github.com/tikv/pd/pkg/storage/kv"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
+	_ "github.com/tikv/pd/server/schedulers"
+	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/server/storage/kv"
 )
 
 type hotStatusTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
@@ -57,13 +56,13 @@ func (suite *hotStatusTestSuite) TearDownSuite() {
 }
 
 func (suite *hotStatusTestSuite) TestGetHotStore() {
-	stat := handler.HotStoreStats{}
+	stat := HotStoreStats{}
 	err := tu.ReadGetJSON(suite.Require(), testDialClient, suite.urlPrefix+"/stores", &stat)
 	suite.NoError(err)
 }
 
 func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsBasic() {
-	request := server.HistoryHotRegionsRequest{
+	request := HistoryHotRegionsRequest{
 		StartTime: 0,
 		EndTime:   time.Now().AddDate(0, 2, 0).UnixNano() / int64(time.Millisecond),
 	}
@@ -90,11 +89,11 @@ func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsTimeRange() {
 			UpdateTime: now.Add(10*time.Minute).UnixNano() / int64(time.Millisecond),
 		},
 	}
-	request := server.HistoryHotRegionsRequest{
+	request := HistoryHotRegionsRequest{
 		StartTime: now.UnixNano() / int64(time.Millisecond),
 		EndTime:   now.Add(10*time.Second).UnixNano() / int64(time.Millisecond),
 	}
-	check := func(res []byte, statusCode int, _ http.Header) {
+	check := func(res []byte, statusCode int) {
 		suite.Equal(200, statusCode)
 		historyHotRegions := &storage.HistoryHotRegions{}
 		json.Unmarshal(res, historyHotRegions)
@@ -170,7 +169,7 @@ func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsIDAndTypes() {
 			UpdateTime:    now.Add(50*time.Second).UnixNano() / int64(time.Millisecond),
 		},
 	}
-	request := server.HistoryHotRegionsRequest{
+	request := HistoryHotRegionsRequest{
 		RegionIDs:      []uint64{1},
 		StoreIDs:       []uint64{1},
 		PeerIDs:        []uint64{1},
@@ -179,7 +178,7 @@ func (suite *hotStatusTestSuite) TestGetHistoryHotRegionsIDAndTypes() {
 		IsLearners:     []bool{false},
 		EndTime:        now.Add(10*time.Minute).UnixNano() / int64(time.Millisecond),
 	}
-	check := func(res []byte, statusCode int, _ http.Header) {
+	check := func(res []byte, statusCode int) {
 		suite.Equal(200, statusCode)
 		historyHotRegions := &storage.HistoryHotRegions{}
 		json.Unmarshal(res, historyHotRegions)

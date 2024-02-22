@@ -23,8 +23,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tikv/pd/pkg/utils/syncutil"
-	"go.uber.org/zap"
+	"github.com/tikv/pd/pkg/syncutil"
 )
 
 // TransferCounter is to count transfer schedule for judging whether redundant
@@ -97,7 +96,7 @@ func (c *TransferCounter) AddSource(regionID, sourceStoreID uint64) {
 		}
 		delete(c.regionMap, regionID)
 	} else {
-		log.Fatal("error when add sourceStore in transfer region map", zap.Uint64("source-store", sourceStoreID), zap.Uint64("region", regionID))
+		log.Fatal("Error when add sourceStore in transfer region map. SourceStoreID: ", sourceStoreID, " regionID: ", regionID)
 	}
 }
 
@@ -221,20 +220,20 @@ func (c *TransferCounter) printGraph() {
 func (c *TransferCounter) PrintResult() {
 	c.prepare()
 	// Output log
-	log.Println("total schedules graph: ")
+	log.Println("Total Schedules Graph: ")
 	c.printGraph()
 	// Solve data
 	c.Result()
 	// Output log
-	log.Println("redundant loop: ")
+	log.Println("Redundant Loop: ")
 	for index, value := range c.loopResultPath {
 		fmt.Println(index, value, c.loopResultCount[index])
 	}
-	log.Println("necessary schedules graph: ")
+	log.Println("Necessary Schedules Graph: ")
 	c.printGraph()
-	log.Println("scheduled store: ", c.scheduledStoreNum)
-	log.Println("redundant schedules: ", c.Redundant)
-	log.Println("necessary schedules: ", c.Necessary)
+	log.Println("Scheduled Store: ", c.scheduledStoreNum)
+	log.Println("Redundant Schedules: ", c.Redundant)
+	log.Println("Necessary Schedules: ", c.Necessary)
 
 	// Output csv file
 	fd, err := os.OpenFile("result.txt", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0600)
@@ -243,7 +242,7 @@ func (c *TransferCounter) PrintResult() {
 	}
 	defer func() {
 		if err := fd.Close(); err != nil {
-			log.Printf("error closing file: %s\n", err)
+			log.Printf("Error closing file: %s\n", err)
 		}
 	}()
 	fdContent := strings.Join([]string{

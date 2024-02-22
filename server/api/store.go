@@ -26,15 +26,13 @@ import (
 	"github.com/pingcap/errcode"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/core/constant"
-	"github.com/tikv/pd/pkg/core/storelimit"
+	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
-	sc "github.com/tikv/pd/pkg/schedule/config"
-	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/core/storelimit"
 	"github.com/unrolled/render"
 )
 
@@ -42,25 +40,6 @@ import (
 type MetaStore struct {
 	*metapb.Store
 	StateName string `json:"state_name"`
-}
-
-// SlowTrend contains slow trend information about a store.
-type SlowTrend struct {
-	// CauseValue is the slow trend detecting raw input, it changes by the performance and pressure along time of the store.
-	// The value itself is not important, what matter is:
-	//   - The comparition result from store to store.
-	//   - The change magnitude along time (represented by CauseRate).
-	// Currently it's one of store's internal latency (duration of waiting in the task queue of raftstore.store).
-	CauseValue float64 `json:"cause_value"`
-	// CauseRate is for mesuring the change magnitude of CauseValue of the store,
-	//   - CauseRate > 0 means the store is become slower currently
-	//   - CauseRate < 0 means the store is become faster currently
-	//   - CauseRate == 0 means the store's performance and pressure does not have significant changes
-	CauseRate float64 `json:"cause_rate"`
-	// ResultValue is the current gRPC QPS of the store.
-	ResultValue float64 `json:"result_value"`
-	// ResultRate is for mesuring the change magnitude of ResultValue of the store.
-	ResultRate float64 `json:"result_rate"`
 }
 
 // StoreStatus contains status about a store.
@@ -79,7 +58,6 @@ type StoreStatus struct {
 	LearnerCount       int                `json:"learner_count,omitempty"`
 	WitnessCount       int                `json:"witness_count,omitempty"`
 	SlowScore          uint64             `json:"slow_score,omitempty"`
-	SlowTrend          *SlowTrend         `json:"slow_trend,omitempty"`
 	SendingSnapCount   uint32             `json:"sending_snap_count,omitempty"`
 	ReceivingSnapCount uint32             `json:"receiving_snap_count,omitempty"`
 	IsBusy             bool               `json:"is_busy,omitempty"`
@@ -99,12 +77,7 @@ const (
 	downStateName    = "Down"
 )
 
-func newStoreInfo(opt *sc.ScheduleConfig, store *core.StoreInfo) *StoreInfo {
-	var slowTrend *SlowTrend
-	coreSlowTrend := store.GetSlowTrend()
-	if coreSlowTrend != nil {
-		slowTrend = &SlowTrend{coreSlowTrend.CauseValue, coreSlowTrend.CauseRate, coreSlowTrend.ResultValue, coreSlowTrend.ResultRate}
-	}
+func newStoreInfo(opt *config.ScheduleConfig, store *core.StoreInfo) *StoreInfo {
 	s := &StoreInfo{
 		Store: &MetaStore{
 			Store:     store.GetMeta(),
@@ -116,7 +89,7 @@ func newStoreInfo(opt *sc.ScheduleConfig, store *core.StoreInfo) *StoreInfo {
 			UsedSize:           typeutil.ByteSize(store.GetUsedSize()),
 			LeaderCount:        store.GetLeaderCount(),
 			LeaderWeight:       store.GetLeaderWeight(),
-			LeaderScore:        store.LeaderScore(constant.StringToSchedulePolicy(opt.LeaderSchedulePolicy), 0),
+			LeaderScore:        store.LeaderScore(core.StringToSchedulePolicy(opt.LeaderSchedulePolicy), 0),
 			LeaderSize:         store.GetLeaderSize(),
 			RegionCount:        store.GetRegionCount(),
 			RegionWeight:       store.GetRegionWeight(),
@@ -125,7 +98,6 @@ func newStoreInfo(opt *sc.ScheduleConfig, store *core.StoreInfo) *StoreInfo {
 			LearnerCount:       store.GetLearnerCount(),
 			WitnessCount:       store.GetWitnessCount(),
 			SlowScore:          store.GetSlowScore(),
-			SlowTrend:          slowTrend,
 			SendingSnapCount:   store.GetSendingSnapCount(),
 			ReceivingSnapCount: store.GetReceivingSnapCount(),
 			IsBusy:             store.IsBusy(),
@@ -192,7 +164,7 @@ func (h *storeHandler) GetStore(w http.ResponseWriter, r *http.Request) {
 
 	store := rc.GetStore(storeID)
 	if store == nil {
-		h.rd.JSON(w, http.StatusNotFound, errs.ErrStoreNotFound.FastGenByArgs(storeID).Error())
+		h.rd.JSON(w, http.StatusNotFound, server.ErrStoreNotFound(storeID).Error())
 		return
 	}
 
@@ -315,7 +287,7 @@ func (h *storeHandler) SetStoreLabel(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if err := sc.ValidateLabels(labels); err != nil {
+	if err := config.ValidateLabels(labels); err != nil {
 		apiutil.ErrorResp(h.rd, w, errcode.NewInvalidInputErr(err))
 		return
 	}
@@ -351,7 +323,7 @@ func (h *storeHandler) DeleteStoreLabel(w http.ResponseWriter, r *http.Request) 
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &labelKey); err != nil {
 		return
 	}
-	if err := sc.ValidateLabelKey(labelKey); err != nil {
+	if err := config.ValidateLabelKey(labelKey); err != nil {
 		apiutil.ErrorResp(h.rd, w, errcode.NewInvalidInputErr(err))
 		return
 	}
@@ -438,7 +410,7 @@ func (h *storeHandler) SetStoreLimit(w http.ResponseWriter, r *http.Request) {
 
 	store := rc.GetStore(storeID)
 	if store == nil {
-		h.rd.JSON(w, http.StatusInternalServerError, errs.ErrStoreNotFound.FastGenByArgs(storeID).Error())
+		h.rd.JSON(w, http.StatusInternalServerError, server.ErrStoreNotFound(storeID).Error())
 		return
 	}
 
@@ -585,7 +557,7 @@ func (h *storesHandler) SetAllStoresLimit(w http.ResponseWriter, r *http.Request
 			})
 		}
 
-		if err := sc.ValidateLabels(labels); err != nil {
+		if err := config.ValidateLabels(labels); err != nil {
 			apiutil.ErrorResp(h.rd, w, errcode.NewInvalidInputErr(err))
 			return
 		}
@@ -620,7 +592,7 @@ func (h *storesHandler) GetAllStoresLimit(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if !includeTombstone {
-		returned := make(map[uint64]sc.StoreLimitConfig, len(limits))
+		returned := make(map[uint64]config.StoreLimitConfig, len(limits))
 		rc := getCluster(r)
 		for storeID, v := range limits {
 			store := rc.GetStore(storeID)
@@ -735,14 +707,13 @@ func (h *storesHandler) GetStoresProgress(w http.ResponseWriter, r *http.Request
 }
 
 // @Tags     store
-// @Summary  Get all stores in the cluster.
+// @Summary  Get stores in the cluster.
 // @Param    state  query  array  true  "Specify accepted store states."
 // @Produce  json
 // @Success  200  {object}  StoresInfo
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /stores [get]
-// @Deprecated Better to use /stores/check instead.
-func (h *storesHandler) GetAllStores(w http.ResponseWriter, r *http.Request) {
+func (h *storesHandler) GetStores(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
 	stores := rc.GetMetaStores()
 	StoresInfo := &StoresInfo{
@@ -755,67 +726,16 @@ func (h *storesHandler) GetAllStores(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stores = urlFilter.filter(stores)
+	stores = urlFilter.filter(rc.GetMetaStores())
 	for _, s := range stores {
 		storeID := s.GetId()
 		store := rc.GetStore(storeID)
 		if store == nil {
-			h.rd.JSON(w, http.StatusInternalServerError, errs.ErrStoreNotFound.FastGenByArgs(storeID).Error())
+			h.rd.JSON(w, http.StatusInternalServerError, server.ErrStoreNotFound(storeID).Error())
 			return
 		}
 
 		storeInfo := newStoreInfo(h.GetScheduleConfig(), store)
-		StoresInfo.Stores = append(StoresInfo.Stores, storeInfo)
-	}
-	StoresInfo.Count = len(StoresInfo.Stores)
-
-	h.rd.JSON(w, http.StatusOK, StoresInfo)
-}
-
-// @Tags     store
-// @Summary  Get all stores by states in the cluster.
-// @Param    state  query  array  true  "Specify accepted store states."
-// @Produce  json
-// @Success  200  {object}  StoresInfo
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /stores/check [get]
-func (h *storesHandler) GetStoresByState(w http.ResponseWriter, r *http.Request) {
-	rc := getCluster(r)
-	stores := rc.GetMetaStores()
-	StoresInfo := &StoresInfo{
-		Stores: make([]*StoreInfo, 0, len(stores)),
-	}
-
-	lowerStateName := []string{strings.ToLower(downStateName), strings.ToLower(disconnectedName)}
-	for _, v := range metapb.StoreState_name {
-		lowerStateName = append(lowerStateName, strings.ToLower(v))
-	}
-
-	var queryStates []string
-	if v, ok := r.URL.Query()["state"]; ok {
-		for _, s := range v {
-			stateName := strings.ToLower(s)
-			if stateName != "" && !slice.Contains(lowerStateName, stateName) {
-				h.rd.JSON(w, http.StatusBadRequest, "unknown StoreState: "+s)
-				return
-			} else if stateName != "" {
-				queryStates = append(queryStates, stateName)
-			}
-		}
-	}
-
-	for _, s := range stores {
-		storeID := s.GetId()
-		store := rc.GetStore(storeID)
-		if store == nil {
-			h.rd.JSON(w, http.StatusInternalServerError, errs.ErrStoreNotFound.FastGenByArgs(storeID).Error())
-			return
-		}
-
-		storeInfo := newStoreInfo(h.GetScheduleConfig(), store)
-		if queryStates != nil && !slice.Contains(queryStates, strings.ToLower(storeInfo.Store.StateName)) {
-			continue
-		}
 		StoresInfo.Stores = append(StoresInfo.Stores, storeInfo)
 	}
 	StoresInfo.Count = len(StoresInfo.Stores)

@@ -20,10 +20,11 @@ import (
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/pingcap/log"
 	"github.com/pingcap/tidb-dashboard/pkg/apiserver"
+
+	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/logutil"
+	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/cluster"
 )
@@ -191,9 +192,9 @@ func (m *Manager) startService() {
 		return
 	}
 	if err := m.service.Start(m.ctx); err != nil {
-		log.Error("can not start dashboard server", errs.ZapError(errs.ErrDashboardStart, err))
+		log.Error("Can not start dashboard server", errs.ZapError(errs.ErrDashboardStart, err))
 	} else {
-		log.Info("dashboard server is started")
+		log.Info("Dashboard server is started")
 	}
 }
 
@@ -202,8 +203,8 @@ func (m *Manager) stopService() {
 		return
 	}
 	if err := m.service.Stop(context.Background()); err != nil {
-		log.Error("stop dashboard server error", errs.ZapError(errs.ErrDashboardStop, err))
+		log.Error("Stop dashboard server error", errs.ZapError(errs.ErrDashboardStop, err))
 	} else {
-		log.Info("dashboard server is stopped")
+		log.Info("Dashboard server is stopped")
 	}
 }

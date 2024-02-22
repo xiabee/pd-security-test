@@ -25,16 +25,17 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/replication"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/apiutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/replication"
 )
 
 type adminTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
@@ -271,8 +272,9 @@ func (suite *adminTestSuite) TestMarkSnapshotRecovering() {
 	suite.NoError(err2)
 	suite.True(resp.Marked)
 	// unmark
-	err := tu.CheckDelete(testDialClient, url, tu.StatusOK(re))
+	code, err := apiutil.DoDelete(testDialClient, url)
 	suite.NoError(err)
+	suite.Equal(200, code)
 	suite.NoError(tu.CheckGetJSON(testDialClient, url, nil,
 		tu.StatusOK(re), tu.StringContain(re, "false")))
 }
@@ -309,8 +311,9 @@ func (suite *adminTestSuite) TestRecoverAllocID() {
 	suite.NoError(err2)
 	suite.Equal(id, uint64(99000001))
 	// unmark
-	err := tu.CheckDelete(testDialClient, markRecoveringURL, tu.StatusOK(re))
+	code, err := apiutil.DoDelete(testDialClient, markRecoveringURL)
 	suite.NoError(err)
+	suite.Equal(200, code)
 	suite.NoError(tu.CheckGetJSON(testDialClient, markRecoveringURL, nil,
 		tu.StatusOK(re), tu.StringContain(re, "false")))
 	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "100000"}`),

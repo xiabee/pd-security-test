@@ -25,10 +25,9 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/require"
-	sc "github.com/tikv/pd/pkg/schedule/config"
-	"github.com/tikv/pd/pkg/schedule/placement"
-	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
@@ -37,10 +36,10 @@ import (
 type testCase struct {
 	name  string
 	value interface{}
-	read  func(scheduleConfig *sc.ScheduleConfig) interface{}
+	read  func(scheduleConfig *config.ScheduleConfig) interface{}
 }
 
-func (t *testCase) judge(re *require.Assertions, scheduleConfigs ...*sc.ScheduleConfig) {
+func (t *testCase) judge(re *require.Assertions, scheduleConfigs ...*config.ScheduleConfig) {
 	value := t.value
 	for _, scheduleConfig := range scheduleConfigs {
 		re.NotNil(scheduleConfig)
@@ -64,10 +63,10 @@ func TestConfig(t *testing.T) {
 		Id:    1,
 		State: metapb.StoreState_Up,
 	}
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 	svr := leaderServer.GetServer()
-	tests.MustPutStore(re, cluster, store)
+	pdctl.MustPutStore(re, svr, store)
 	defer cluster.Destroy()
 
 	// config show
@@ -88,6 +87,7 @@ func TestConfig(t *testing.T) {
 	scheduleConfig.EnableMakeUpReplica = false
 	scheduleConfig.EnableRemoveExtraReplica = false
 	scheduleConfig.EnableLocationReplacement = false
+	scheduleConfig.StoreLimitMode = ""
 	re.Equal(uint64(0), scheduleConfig.MaxMergeRegionKeys)
 	// The result of config show doesn't be 0.
 	scheduleConfig.MaxMergeRegionKeys = scheduleConfig.GetMaxMergeRegionKeys()
@@ -113,7 +113,7 @@ func TestConfig(t *testing.T) {
 	args = []string{"-u", pdAddr, "config", "show", "schedule"}
 	output, err = pdctl.ExecuteCommand(cmd, args...)
 	re.NoError(err)
-	scheduleCfg := sc.ScheduleConfig{}
+	scheduleCfg := config.ScheduleConfig{}
 	re.NoError(json.Unmarshal(output, &scheduleCfg))
 	scheduleConfig = svr.GetScheduleConfig()
 	scheduleConfig.MaxMergeRegionKeys = scheduleConfig.GetMaxMergeRegionKeys()
@@ -136,21 +136,11 @@ func TestConfig(t *testing.T) {
 	re.Equal(20*10000, int(svr.GetScheduleConfig().MaxMergeRegionKeys))
 	re.Equal(20*10000, int(svr.GetScheduleConfig().GetMaxMergeRegionKeys()))
 
-	// set store limit v2
-	args = []string{"-u", pdAddr, "config", "set", "store-limit-version", "v2"}
-	_, err = pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
-	re.Equal("v2", svr.GetScheduleConfig().StoreLimitVersion)
-	args = []string{"-u", pdAddr, "config", "set", "store-limit-version", "v1"}
-	_, err = pdctl.ExecuteCommand(cmd, args...)
-	re.NoError(err)
-	re.Equal("v1", svr.GetScheduleConfig().StoreLimitVersion)
-
 	// config show replication
 	args = []string{"-u", pdAddr, "config", "show", "replication"}
 	output, err = pdctl.ExecuteCommand(cmd, args...)
 	re.NoError(err)
-	replicationCfg := sc.ReplicationConfig{}
+	replicationCfg := config.ReplicationConfig{}
 	re.NoError(json.Unmarshal(output, &replicationCfg))
 	re.Equal(svr.GetReplicationConfig(), &replicationCfg)
 
@@ -222,20 +212,20 @@ func TestConfig(t *testing.T) {
 
 	// test config read and write
 	testCases := []testCase{
-		{"leader-schedule-limit", uint64(64), func(scheduleConfig *sc.ScheduleConfig) interface{} {
+		{"leader-schedule-limit", uint64(64), func(scheduleConfig *config.ScheduleConfig) interface{} {
 			return scheduleConfig.LeaderScheduleLimit
-		}}, {"hot-region-schedule-limit", uint64(64), func(scheduleConfig *sc.ScheduleConfig) interface{} {
+		}}, {"hot-region-schedule-limit", uint64(64), func(scheduleConfig *config.ScheduleConfig) interface{} {
 			return scheduleConfig.HotRegionScheduleLimit
-		}}, {"hot-region-cache-hits-threshold", uint64(5), func(scheduleConfig *sc.ScheduleConfig) interface{} {
+		}}, {"hot-region-cache-hits-threshold", uint64(5), func(scheduleConfig *config.ScheduleConfig) interface{} {
 			return scheduleConfig.HotRegionCacheHitsThreshold
-		}}, {"enable-remove-down-replica", false, func(scheduleConfig *sc.ScheduleConfig) interface{} {
+		}}, {"enable-remove-down-replica", false, func(scheduleConfig *config.ScheduleConfig) interface{} {
 			return scheduleConfig.EnableRemoveDownReplica
 		}},
-		{"enable-debug-metrics", true, func(scheduleConfig *sc.ScheduleConfig) interface{} {
+		{"enable-debug-metrics", true, func(scheduleConfig *config.ScheduleConfig) interface{} {
 			return scheduleConfig.EnableDebugMetrics
 		}},
 		// set again
-		{"enable-debug-metrics", true, func(scheduleConfig *sc.ScheduleConfig) interface{} {
+		{"enable-debug-metrics", true, func(scheduleConfig *config.ScheduleConfig) interface{} {
 			return scheduleConfig.EnableDebugMetrics
 		}},
 	}
@@ -300,9 +290,10 @@ func TestPlacementRules(t *testing.T) {
 		State:         metapb.StoreState_Up,
 		LastHeartbeat: time.Now().UnixNano(),
 	}
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
-	tests.MustPutStore(re, cluster, store)
+	svr := leaderServer.GetServer()
+	pdctl.MustPutStore(re, svr, store)
 	defer cluster.Destroy()
 
 	output, err := pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "enable")
@@ -320,7 +311,6 @@ func TestPlacementRules(t *testing.T) {
 	f, _ := os.CreateTemp("/tmp", "pd_tests")
 	fname := f.Name()
 	f.Close()
-	defer os.RemoveAll(fname)
 
 	// test load
 	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "load", "--out="+fname)
@@ -357,7 +347,7 @@ func TestPlacementRules(t *testing.T) {
 	re.Equal([2]string{"pd", "test1"}, rules2[1].Key())
 
 	// test rule region detail
-	tests.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"))
+	pdctl.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"))
 	fit := &placement.RegionFit{}
 	// need clear up args, so create new a cobra.Command. Otherwise gourp still exists.
 	cmd2 := pdctlCmd.GetRootCmd()
@@ -397,9 +387,10 @@ func TestPlacementRuleGroups(t *testing.T) {
 		State:         metapb.StoreState_Up,
 		LastHeartbeat: time.Now().UnixNano(),
 	}
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
-	tests.MustPutStore(re, cluster, store)
+	svr := leaderServer.GetServer()
+	pdctl.MustPutStore(re, svr, store)
 	defer cluster.Destroy()
 
 	output, err := pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "enable")
@@ -420,9 +411,6 @@ func TestPlacementRuleGroups(t *testing.T) {
 	output, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "set", "group2", "100", "false")
 	re.NoError(err)
 	re.Contains(string(output), "Success!")
-	output, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "set", "group3", "200", "false")
-	re.NoError(err)
-	re.Contains(string(output), "Success!")
 
 	// show all
 	var groups []placement.RuleGroup
@@ -432,24 +420,15 @@ func TestPlacementRuleGroups(t *testing.T) {
 	re.Equal([]placement.RuleGroup{
 		{ID: "pd", Index: 42, Override: true},
 		{ID: "group2", Index: 100, Override: false},
-		{ID: "group3", Index: 200, Override: false},
 	}, groups)
 
 	// delete
 	output, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "delete", "group2")
 	re.NoError(err)
-	re.Contains(string(output), "Delete group and rules successfully.")
+	re.Contains(string(output), "Success!")
 
 	// show again
 	output, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "show", "group2")
-	re.NoError(err)
-	re.Contains(string(output), "404")
-
-	// delete using regex
-	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "delete", "--regexp", ".*3")
-	re.NoError(err)
-
-	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "show", "group3")
 	re.NoError(err)
 	re.Contains(string(output), "404")
 }
@@ -471,9 +450,10 @@ func TestPlacementRuleBundle(t *testing.T) {
 		State:         metapb.StoreState_Up,
 		LastHeartbeat: time.Now().UnixNano(),
 	}
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
-	tests.MustPutStore(re, cluster, store)
+	svr := leaderServer.GetServer()
+	pdctl.MustPutStore(re, svr, store)
 	defer cluster.Destroy()
 
 	output, err := pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "enable")
@@ -491,7 +471,9 @@ func TestPlacementRuleBundle(t *testing.T) {
 	re.NoError(err)
 	fname := f.Name()
 	f.Close()
-	defer os.RemoveAll(fname)
+	defer func() {
+		os.RemoveAll(fname)
+	}()
 
 	// test load
 	var bundles []placement.GroupBundle
@@ -606,9 +588,10 @@ func TestReplicationMode(t *testing.T) {
 		State:         metapb.StoreState_Up,
 		LastHeartbeat: time.Now().UnixNano(),
 	}
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
-	tests.MustPutStore(re, cluster, store)
+	svr := leaderServer.GetServer()
+	pdctl.MustPutStore(re, svr, store)
 	defer cluster.Destroy()
 
 	conf := config.ReplicationModeConfig{
@@ -664,16 +647,17 @@ func TestUpdateDefaultReplicaConfig(t *testing.T) {
 		Id:    1,
 		State: metapb.StoreState_Up,
 	}
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
-	tests.MustPutStore(re, cluster, store)
+	svr := leaderServer.GetServer()
+	pdctl.MustPutStore(re, svr, store)
 	defer cluster.Destroy()
 
 	checkMaxReplicas := func(expect uint64) {
 		args := []string{"-u", pdAddr, "config", "show", "replication"}
 		output, err := pdctl.ExecuteCommand(cmd, args...)
 		re.NoError(err)
-		replicationCfg := sc.ReplicationConfig{}
+		replicationCfg := config.ReplicationConfig{}
 		re.NoError(json.Unmarshal(output, &replicationCfg))
 		re.Equal(expect, replicationCfg.MaxReplicas)
 	}
@@ -682,7 +666,7 @@ func TestUpdateDefaultReplicaConfig(t *testing.T) {
 		args := []string{"-u", pdAddr, "config", "show", "replication"}
 		output, err := pdctl.ExecuteCommand(cmd, args...)
 		re.NoError(err)
-		replicationCfg := sc.ReplicationConfig{}
+		replicationCfg := config.ReplicationConfig{}
 		re.NoError(json.Unmarshal(output, &replicationCfg))
 		re.Len(replicationCfg.LocationLabels, expect)
 	}
@@ -691,7 +675,7 @@ func TestUpdateDefaultReplicaConfig(t *testing.T) {
 		args := []string{"-u", pdAddr, "config", "show", "replication"}
 		output, err := pdctl.ExecuteCommand(cmd, args...)
 		re.NoError(err)
-		replicationCfg := sc.ReplicationConfig{}
+		replicationCfg := config.ReplicationConfig{}
 		re.NoError(json.Unmarshal(output, &replicationCfg))
 		re.Equal(replicationCfg.IsolationLevel, expect)
 	}
@@ -808,9 +792,10 @@ func TestPDServerConfig(t *testing.T) {
 		State:         metapb.StoreState_Up,
 		LastHeartbeat: time.Now().UnixNano(),
 	}
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
-	tests.MustPutStore(re, cluster, store)
+	svr := leaderServer.GetServer()
+	pdctl.MustPutStore(re, svr, store)
 	defer cluster.Destroy()
 
 	output, err := pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "show", "server")

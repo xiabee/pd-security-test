@@ -26,11 +26,14 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/tikv/pd/pkg/dashboard"
-	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
+
+	// Register schedulers.
+	_ "github.com/tikv/pd/server/schedulers"
 )
 
 func TestMain(m *testing.M) {
@@ -86,8 +89,7 @@ func (suite *dashboardTestSuite) checkRespCode(url string, code int) {
 }
 
 func waitForConfigSync() {
-	// Need to wait dashboard service start.
-	time.Sleep(3 * time.Second)
+	time.Sleep(time.Second)
 }
 
 func (suite *dashboardTestSuite) checkServiceIsStarted(internalProxy bool, servers map[string]*tests.TestServer, leader *tests.TestServer) string {
@@ -135,7 +137,7 @@ func (suite *dashboardTestSuite) testDashboard(internalProxy bool) {
 
 	cluster.WaitLeader()
 	servers := cluster.GetServers()
-	leader := cluster.GetLeaderServer()
+	leader := cluster.GetServer(cluster.GetLeader())
 	leaderAddr := leader.GetAddr()
 
 	// auto select node
