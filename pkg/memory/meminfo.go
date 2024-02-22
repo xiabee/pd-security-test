@@ -15,6 +15,7 @@
 package memory
 
 import (
+	"sync"
 	"time"
 
 	"github.com/pingcap/failpoint"
@@ -22,7 +23,6 @@ import (
 	"github.com/pingcap/sysutil"
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/tikv/pd/pkg/cgroup"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 	"go.uber.org/zap"
 	"golang.org/x/exp/constraints"
 )
@@ -80,7 +80,7 @@ func MemUsedNormal() (uint64, error) {
 
 type memInfoCache struct {
 	updateTime time.Time
-	mu         *syncutil.RWMutex
+	mu         *sync.RWMutex
 	mem        uint64
 }
 
@@ -172,13 +172,13 @@ func init() {
 		MemUsed = MemUsedNormal
 	}
 	memLimit = &memInfoCache{
-		mu: &syncutil.RWMutex{},
+		mu: &sync.RWMutex{},
 	}
 	memUsage = &memInfoCache{
-		mu: &syncutil.RWMutex{},
+		mu: &sync.RWMutex{},
 	}
 	serverMemUsage = &memInfoCache{
-		mu: &syncutil.RWMutex{},
+		mu: &sync.RWMutex{},
 	}
 	_, err := MemTotal()
 	mustNil(err)

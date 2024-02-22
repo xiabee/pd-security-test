@@ -76,8 +76,8 @@ func TestRegistryService(t *testing.T) {
 	err = cluster.RunInitialServers()
 	re.NoError(err)
 
-	re.NotEmpty(cluster.WaitLeader())
-	leader := cluster.GetLeaderServer()
+	leaderName := cluster.WaitLeader()
+	leader := cluster.GetServer(leaderName)
 
 	// Test registered GRPC Service
 	cc, err := grpc.DialContext(ctx, strings.TrimPrefix(leader.GetAddr(), "http://"), grpc.WithInsecure())

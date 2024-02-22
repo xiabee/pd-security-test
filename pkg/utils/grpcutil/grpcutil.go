@@ -19,23 +19,17 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net/url"
-	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/logutil"
 	"go.etcd.io/etcd/pkg/transport"
-	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 )
 
-const (
-	// ForwardMetadataKey is used to record the forwarded host of PD.
-	ForwardMetadataKey = "pd-forwarded-host"
-)
+// ForwardMetadataKey is used to record the forwarded host of PD.
+const ForwardMetadataKey = "pd-forwarded-host"
 
 // TLSConfig is the configuration for supporting tls.
 type TLSConfig struct {
@@ -51,24 +45,6 @@ type TLSConfig struct {
 	SSLCABytes   []byte
 	SSLCertBytes []byte
 	SSLKEYBytes  []byte
-}
-
-// ToTLSInfo converts TLSConfig to transport.TLSInfo.
-func (s TLSConfig) ToTLSInfo() (*transport.TLSInfo, error) {
-	if len(s.CertPath) == 0 && len(s.KeyPath) == 0 {
-		return nil, nil
-	}
-	allowedCN, err := s.GetOneAllowedCN()
-	if err != nil {
-		return nil, err
-	}
-
-	return &transport.TLSInfo{
-		CertFile:      s.CertPath,
-		KeyFile:       s.KeyPath,
-		TrustedCAFile: s.CAPath,
-		AllowedCN:     allowedCN,
-	}, nil
 }
 
 // ToTLSConfig generates tls config.
@@ -92,12 +68,19 @@ func (s TLSConfig) ToTLSConfig() (*tls.Config, error) {
 		}, nil
 	}
 
-	tlsInfo, err := s.ToTLSInfo()
-	if tlsInfo == nil {
+	if len(s.CertPath) == 0 && len(s.KeyPath) == 0 {
 		return nil, nil
 	}
+	allowedCN, err := s.GetOneAllowedCN()
 	if err != nil {
-		return nil, errs.ErrEtcdTLSConfig.Wrap(err).GenWithStackByCause()
+		return nil, err
+	}
+
+	tlsInfo := transport.TLSInfo{
+		CertFile:      s.CertPath,
+		KeyFile:       s.KeyPath,
+		TrustedCAFile: s.CAPath,
+		AllowedCN:     allowedCN,
 	}
 
 	tlsConfig, err := tlsInfo.ClientConfig()
@@ -176,59 +159,4 @@ func GetForwardedHost(ctx context.Context) string {
 		return t[0]
 	}
 	return ""
-}
-
-func establish(ctx context.Context, addr string, tlsConfig *TLSConfig, do ...grpc.DialOption) (*grpc.ClientConn, error) {
-	tlsCfg, err := tlsConfig.ToTLSConfig()
-	if err != nil {
-		return nil, err
-	}
-	cc, err := GetClientConn(
-		ctx,
-		addr,
-		tlsCfg,
-		do...,
-	)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-	return cc, nil
-}
-
-// CreateClientConn creates a client connection to the given target.
-func CreateClientConn(ctx context.Context, addr string, tlsConfig *TLSConfig, do ...grpc.DialOption) *grpc.ClientConn {
-	var (
-		conn *grpc.ClientConn
-		err  error
-	)
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		conn, err = establish(ctx, addr, tlsConfig, do...)
-		if err != nil {
-			log.Error("cannot establish connection", zap.String("addr", addr), errs.ZapError(err))
-			continue
-		}
-		break
-	}
-	return conn
-}
-
-// CheckStream checks stream status, if stream is not created successfully in time, cancel context.
-// TODO: If goroutine here timeout when tso stream created successfully, we need to handle it correctly.
-func CheckStream(ctx context.Context, cancel context.CancelFunc, done chan struct{}) {
-	defer logutil.LogPanic()
-	timer := time.NewTimer(3 * time.Second)
-	defer timer.Stop()
-	select {
-	case <-done:
-		return
-	case <-timer.C:
-		cancel()
-	case <-ctx.Done():
-	}
-	<-done
 }

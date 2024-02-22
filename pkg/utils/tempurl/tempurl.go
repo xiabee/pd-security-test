@@ -17,15 +17,15 @@ package tempurl
 import (
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 )
 
 var (
-	testAddrMutex syncutil.Mutex
+	testAddrMutex sync.Mutex
 	testAddrMap   = make(map[string]struct{})
 )
 

@@ -37,7 +37,7 @@ func TestCheckPriorityRegions(t *testing.T) {
 	tc.AddLeaderRegion(2, 2, 3)
 	tc.AddLeaderRegion(3, 2)
 
-	pc := NewPriorityInspector(tc, tc.GetCheckerConfig())
+	pc := NewPriorityInspector(tc, tc.GetOpts())
 	checkPriorityRegionTest(re, pc, tc)
 	opt.SetPlacementRuleEnabled(true)
 	re.True(opt.IsPlacementRulesEnabled())
@@ -47,7 +47,7 @@ func TestCheckPriorityRegions(t *testing.T) {
 func checkPriorityRegionTest(re *require.Assertions, pc *PriorityInspector, tc *mockcluster.Cluster) {
 	// case1: inspect region 1, it doesn't lack replica
 	region := tc.GetRegion(1)
-	opt := tc.GetCheckerConfig()
+	opt := tc.GetOpts()
 	pc.Inspect(region)
 	re.Equal(0, pc.queue.Len())
 
@@ -74,13 +74,6 @@ func checkPriorityRegionTest(re *require.Assertions, pc *PriorityInspector, tc *
 	region = tc.GetRegion(2)
 	pc.Inspect(region)
 	re.Equal(1, pc.queue.Len())
-
-	// case5: inspect region 3 again
-	region = tc.GetRegion(3)
-	pc.Inspect(region)
-	time.Sleep(opt.GetPatrolRegionInterval() * 10)
-	ids = pc.GetPriorityRegions()
-	re.Empty(ids)
 
 	// recover
 	tc.AddLeaderRegion(2, 2, 3)

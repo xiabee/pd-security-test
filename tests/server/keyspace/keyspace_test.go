@@ -59,7 +59,7 @@ func (suite *keyspaceTestSuite) SetupTest() {
 	suite.NoError(err)
 	suite.NoError(cluster.RunInitialServers())
 	suite.NotEmpty(cluster.WaitLeader())
-	suite.server = cluster.GetLeaderServer()
+	suite.server = cluster.GetServer(cluster.GetLeader())
 	suite.manager = suite.server.GetKeyspaceManager()
 	suite.NoError(suite.server.BootstrapCluster())
 }
@@ -83,7 +83,6 @@ func (suite *keyspaceTestSuite) TestRegionLabeler() {
 		keyspaces[i], err = manager.CreateKeyspace(&keyspace.CreateKeyspaceRequest{
 			Name:       fmt.Sprintf("test_keyspace_%d", i),
 			CreateTime: now,
-			IsPreAlloc: true, // skip wait region split
 		})
 		re.NoError(err)
 	}

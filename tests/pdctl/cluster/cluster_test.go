@@ -39,7 +39,7 @@ func TestClusterAndPing(t *testing.T) {
 	err = cluster.RunInitialServers()
 	re.NoError(err)
 	cluster.WaitLeader()
-	err = cluster.GetLeaderServer().BootstrapCluster()
+	err = cluster.GetServer(cluster.GetLeader()).BootstrapCluster()
 	re.NoError(err)
 	pdAddr := cluster.GetConfig().GetClientURL()
 	i := strings.Index(pdAddr, "//")

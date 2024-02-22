@@ -27,11 +27,9 @@ import (
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/mock/mockid"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/storage/kv"
-	"github.com/tikv/pd/pkg/utils/typeutil"
 )
 
 const (
@@ -52,35 +50,18 @@ func TestKeyspaceTestSuite(t *testing.T) {
 }
 
 type mockConfig struct {
-	PreAlloc                 []string
-	WaitRegionSplit          bool
-	WaitRegionSplitTimeout   typeutil.Duration
-	CheckRegionSplitInterval typeutil.Duration
+	PreAlloc []string
 }
 
-func (m *mockConfig) GetPreAlloc() []string {
-	return m.PreAlloc
-}
-
-func (m *mockConfig) ToWaitRegionSplit() bool {
-	return m.WaitRegionSplit
-}
-
-func (m *mockConfig) GetWaitRegionSplitTimeout() time.Duration {
-	return m.WaitRegionSplitTimeout.Duration
-}
-
-func (m *mockConfig) GetCheckRegionSplitInterval() time.Duration {
-	return m.CheckRegionSplitInterval.Duration
-}
+func (m *mockConfig) GetPreAlloc() []string { return m.PreAlloc }
 
 func (suite *keyspaceTestSuite) SetupTest() {
 	suite.ctx, suite.cancel = context.WithCancel(context.Background())
 	store := endpoint.NewStorageEndpoint(kv.NewMemoryKV(), nil)
 	allocator := mockid.NewIDAllocator()
 	kgm := NewKeyspaceGroupManager(suite.ctx, store, nil, 0)
-	suite.manager = NewKeyspaceManager(suite.ctx, store, nil, allocator, &mockConfig{}, kgm)
-	suite.NoError(kgm.Bootstrap(suite.ctx))
+	suite.manager = NewKeyspaceManager(store, nil, allocator, &mockConfig{}, kgm)
+	suite.NoError(kgm.Bootstrap())
 	suite.NoError(suite.manager.Bootstrap())
 }
 
@@ -107,7 +88,6 @@ func makeCreateKeyspaceRequests(count int) []*CreateKeyspaceRequest {
 				testConfig2: "200",
 			},
 			CreateTime: now,
-			IsPreAlloc: true, // skip wait region split
 		}
 	}
 	return requests
@@ -183,7 +163,7 @@ func (suite *keyspaceTestSuite) TestUpdateKeyspaceConfig() {
 		re.Error(err)
 	}
 	// Changing config of DEFAULT keyspace is allowed.
-	updated, err := manager.UpdateKeyspaceConfig(utils.DefaultKeyspaceName, mutations)
+	updated, err := manager.UpdateKeyspaceConfig(DefaultKeyspaceName, mutations)
 	re.NoError(err)
 	// remove auto filled fields
 	delete(updated.Config, TSOKeyspaceGroupIDKey)
@@ -223,7 +203,7 @@ func (suite *keyspaceTestSuite) TestUpdateKeyspaceState() {
 		_, err = manager.UpdateKeyspaceState(createRequest.Name, keyspacepb.KeyspaceState_ENABLED, newTime)
 		re.Error(err)
 		// Changing state of DEFAULT keyspace is not allowed.
-		_, err = manager.UpdateKeyspaceState(utils.DefaultKeyspaceName, keyspacepb.KeyspaceState_DISABLED, newTime)
+		_, err = manager.UpdateKeyspaceState(DefaultKeyspaceName, keyspacepb.KeyspaceState_DISABLED, newTime)
 		re.Error(err)
 	}
 }
@@ -373,151 +353,4 @@ func updateKeyspaceConfig(re *require.Assertions, manager *Manager, name string,
 		checkMutations(re, oldMeta.GetConfig(), updatedMeta.GetConfig(), mutations)
 		oldMeta = updatedMeta
 	}
-}
-
-func (suite *keyspaceTestSuite) TestPatrolKeyspaceAssignment() {
-	re := suite.Require()
-	// Create a keyspace without any keyspace group.
-	now := time.Now().Unix()
-	err := suite.manager.saveNewKeyspace(&keyspacepb.KeyspaceMeta{
-		Id:             111,
-		Name:           "111",
-		State:          keyspacepb.KeyspaceState_ENABLED,
-		CreatedAt:      now,
-		StateChangedAt: now,
-	})
-	re.NoError(err)
-	// Check if the keyspace is not attached to the default group.
-	defaultKeyspaceGroup, err := suite.manager.kgm.GetKeyspaceGroupByID(utils.DefaultKeyspaceGroupID)
-	re.NoError(err)
-	re.NotNil(defaultKeyspaceGroup)
-	re.NotContains(defaultKeyspaceGroup.Keyspaces, uint32(111))
-	// Patrol the keyspace assignment.
-	err = suite.manager.PatrolKeyspaceAssignment(0, 0)
-	re.NoError(err)
-	// Check if the keyspace is attached to the default group.
-	defaultKeyspaceGroup, err = suite.manager.kgm.GetKeyspaceGroupByID(utils.DefaultKeyspaceGroupID)
-	re.NoError(err)
-	re.NotNil(defaultKeyspaceGroup)
-	re.Contains(defaultKeyspaceGroup.Keyspaces, uint32(111))
-}
-
-func (suite *keyspaceTestSuite) TestPatrolKeyspaceAssignmentInBatch() {
-	re := suite.Require()
-	// Create some keyspaces without any keyspace group.
-	for i := 1; i < MaxEtcdTxnOps*2+1; i++ {
-		now := time.Now().Unix()
-		err := suite.manager.saveNewKeyspace(&keyspacepb.KeyspaceMeta{
-			Id:             uint32(i),
-			Name:           strconv.Itoa(i),
-			State:          keyspacepb.KeyspaceState_ENABLED,
-			CreatedAt:      now,
-			StateChangedAt: now,
-		})
-		re.NoError(err)
-	}
-	// Check if all the keyspaces are not attached to the default group.
-	defaultKeyspaceGroup, err := suite.manager.kgm.GetKeyspaceGroupByID(utils.DefaultKeyspaceGroupID)
-	re.NoError(err)
-	re.NotNil(defaultKeyspaceGroup)
-	for i := 1; i < MaxEtcdTxnOps*2+1; i++ {
-		re.NotContains(defaultKeyspaceGroup.Keyspaces, uint32(i))
-	}
-	// Patrol the keyspace assignment.
-	err = suite.manager.PatrolKeyspaceAssignment(0, 0)
-	re.NoError(err)
-	// Check if all the keyspaces are attached to the default group.
-	defaultKeyspaceGroup, err = suite.manager.kgm.GetKeyspaceGroupByID(utils.DefaultKeyspaceGroupID)
-	re.NoError(err)
-	re.NotNil(defaultKeyspaceGroup)
-	for i := 1; i < MaxEtcdTxnOps*2+1; i++ {
-		re.Contains(defaultKeyspaceGroup.Keyspaces, uint32(i))
-	}
-}
-
-func (suite *keyspaceTestSuite) TestPatrolKeyspaceAssignmentWithRange() {
-	re := suite.Require()
-	// Create some keyspaces without any keyspace group.
-	for i := 1; i < MaxEtcdTxnOps*2+1; i++ {
-		now := time.Now().Unix()
-		err := suite.manager.saveNewKeyspace(&keyspacepb.KeyspaceMeta{
-			Id:             uint32(i),
-			Name:           strconv.Itoa(i),
-			State:          keyspacepb.KeyspaceState_ENABLED,
-			CreatedAt:      now,
-			StateChangedAt: now,
-		})
-		re.NoError(err)
-	}
-	// Check if all the keyspaces are not attached to the default group.
-	defaultKeyspaceGroup, err := suite.manager.kgm.GetKeyspaceGroupByID(utils.DefaultKeyspaceGroupID)
-	re.NoError(err)
-	re.NotNil(defaultKeyspaceGroup)
-	for i := 1; i < MaxEtcdTxnOps*2+1; i++ {
-		re.NotContains(defaultKeyspaceGroup.Keyspaces, uint32(i))
-	}
-	// Patrol the keyspace assignment with range [MaxEtcdTxnOps/2, MaxEtcdTxnOps/2+MaxEtcdTxnOps+1]
-	// to make sure the range crossing the boundary of etcd transaction operation limit.
-	var (
-		startKeyspaceID = uint32(MaxEtcdTxnOps / 2)
-		endKeyspaceID   = startKeyspaceID + MaxEtcdTxnOps + 1
-	)
-	err = suite.manager.PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID)
-	re.NoError(err)
-	// Check if only the keyspaces within the range are attached to the default group.
-	defaultKeyspaceGroup, err = suite.manager.kgm.GetKeyspaceGroupByID(utils.DefaultKeyspaceGroupID)
-	re.NoError(err)
-	re.NotNil(defaultKeyspaceGroup)
-	for i := 1; i < MaxEtcdTxnOps*2+1; i++ {
-		keyspaceID := uint32(i)
-		if keyspaceID >= startKeyspaceID && keyspaceID <= endKeyspaceID {
-			re.Contains(defaultKeyspaceGroup.Keyspaces, keyspaceID)
-		} else {
-			re.NotContains(defaultKeyspaceGroup.Keyspaces, keyspaceID)
-		}
-	}
-}
-
-// Benchmark the keyspace assignment patrol.
-func BenchmarkPatrolKeyspaceAssignment1000(b *testing.B) {
-	benchmarkPatrolKeyspaceAssignmentN(1000, b)
-}
-
-func BenchmarkPatrolKeyspaceAssignment10000(b *testing.B) {
-	benchmarkPatrolKeyspaceAssignmentN(10000, b)
-}
-
-func BenchmarkPatrolKeyspaceAssignment100000(b *testing.B) {
-	benchmarkPatrolKeyspaceAssignmentN(100000, b)
-}
-
-func benchmarkPatrolKeyspaceAssignmentN(
-	n int, b *testing.B,
-) {
-	suite := new(keyspaceTestSuite)
-	suite.SetT(&testing.T{})
-	suite.SetupSuite()
-	suite.SetupTest()
-	re := suite.Require()
-	// Create some keyspaces without any keyspace group.
-	for i := 1; i <= n; i++ {
-		now := time.Now().Unix()
-		err := suite.manager.saveNewKeyspace(&keyspacepb.KeyspaceMeta{
-			Id:             uint32(i),
-			Name:           strconv.Itoa(i),
-			State:          keyspacepb.KeyspaceState_ENABLED,
-			CreatedAt:      now,
-			StateChangedAt: now,
-		})
-		re.NoError(err)
-	}
-	// Benchmark the keyspace assignment patrol.
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		err := suite.manager.PatrolKeyspaceAssignment(0, 0)
-		re.NoError(err)
-	}
-	b.StopTimer()
-	suite.TearDownTest()
-	suite.TearDownSuite()
 }

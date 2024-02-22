@@ -18,11 +18,11 @@ import (
 	"os"
 	"time"
 
-	sigar "github.com/cloudfoundry/gosigar"
+	"github.com/elastic/gosigar"
+	"github.com/pingcap/log"
 	"go.uber.org/zap"
 
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
-	"github.com/pingcap/log"
 )
 
 // RequestUnit is the basic unit of the resource request management, which has two types:
@@ -35,7 +35,6 @@ type RequestUnit float64
 type RequestInfo interface {
 	IsWrite() bool
 	WriteBytes() uint64
-	ReplicaNumber() int64
 	StoreID() uint64
 }
 
@@ -88,19 +87,14 @@ func (kc *KVCalculator) BeforeKVRequest(consumption *rmpb.Consumption, req Reque
 		consumption.KvReadRpcCount += 1
 		// Read bytes could not be known before the request is executed,
 		// so we only add the base cost here.
-		consumption.RRU += float64(kc.ReadBaseCost) + float64(kc.ReadPerBatchBaseCost)*defaultAvgBatchProportion
+		consumption.RRU += float64(kc.ReadBaseCost)
 	}
 }
 
 func (kc *KVCalculator) calculateWriteCost(consumption *rmpb.Consumption, req RequestInfo) {
 	writeBytes := float64(req.WriteBytes())
 	consumption.WriteBytes += writeBytes
-	// write request cost need consider the replicas, due to write data will be replicate to all replicas.
-	replicaNums := float64(req.ReplicaNumber())
-	if replicaNums == 0 {
-		replicaNums = 1
-	}
-	consumption.WRU += (float64(kc.WriteBaseCost) + float64(kc.WritePerBatchBaseCost)*defaultAvgBatchProportion + float64(kc.WriteBytesCost)*writeBytes) * replicaNums
+	consumption.WRU += float64(kc.WriteBaseCost) + float64(kc.WriteBytesCost)*writeBytes
 }
 
 // AfterKVRequest ...
@@ -302,7 +296,7 @@ func getSQLProcessCPUTime(isSingleGroupByKeyspace bool) float64 {
 
 func getSysProcessCPUTime() float64 {
 	pid := os.Getpid()
-	cpuTime := sigar.ProcTime{}
+	cpuTime := gosigar.ProcTime{}
 	if err := cpuTime.Get(pid); err != nil {
 		log.Error("getCPUTime get pid failed", zap.Error(err))
 	}

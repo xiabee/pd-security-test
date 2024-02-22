@@ -14,14 +14,11 @@
 
 package statistics
 
-import (
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/statistics/utils"
-)
+import "github.com/tikv/pd/pkg/core"
 
 // RegionStatInformer provides access to a shared informer of statistics.
 type RegionStatInformer interface {
-	GetHotPeerStat(rw utils.RWType, regionID, storeID uint64) *HotPeerStat
+	GetHotPeerStat(rw RWType, regionID, storeID uint64) *HotPeerStat
 	IsRegionHot(region *core.RegionInfo) bool
 	// RegionWriteStats return the storeID -> write stat of peers on this store.
 	// The result only includes peers that are hot enough.

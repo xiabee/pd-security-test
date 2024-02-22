@@ -23,13 +23,11 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/docker/go-units"
 	"github.com/gogo/protobuf/proto"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/replication_modepb"
@@ -69,7 +67,6 @@ type RegionInfo struct {
 	readBytes         uint64
 	readKeys          uint64
 	approximateSize   int64
-	approximateKvSize int64
 	approximateKeys   int64
 	interval          *pdpb.TimeInterval
 	replicationStatus *replication_modepb.RegionReplicationStatus
@@ -96,12 +93,6 @@ const (
 // LoadedFromStorage means this region's meta info loaded from storage.
 func (r *RegionInfo) LoadedFromStorage() bool {
 	return r.source == Storage
-}
-
-// LoadedFromSync means this region's meta info loaded from region syncer.
-// Only used for test.
-func (r *RegionInfo) LoadedFromSync() bool {
-	return r.source == Sync
 }
 
 // NewRegionInfo creates RegionInfo with region's meta and leader peer.
@@ -172,31 +163,8 @@ const (
 	InitClusterRegionThreshold = 100
 )
 
-// RegionHeartbeatResponse is the interface for region heartbeat response.
-type RegionHeartbeatResponse interface {
-	GetTargetPeer() *metapb.Peer
-	GetRegionId() uint64
-}
-
-// RegionHeartbeatRequest is the interface for region heartbeat request.
-type RegionHeartbeatRequest interface {
-	GetTerm() uint64
-	GetRegion() *metapb.Region
-	GetLeader() *metapb.Peer
-	GetDownPeers() []*pdpb.PeerStats
-	GetPendingPeers() []*metapb.Peer
-	GetBytesWritten() uint64
-	GetKeysWritten() uint64
-	GetBytesRead() uint64
-	GetKeysRead() uint64
-	GetInterval() *pdpb.TimeInterval
-	GetQueryStats() *pdpb.QueryStats
-	GetApproximateSize() uint64
-	GetApproximateKeys() uint64
-}
-
 // RegionFromHeartbeat constructs a Region from region heartbeat.
-func RegionFromHeartbeat(heartbeat RegionHeartbeatRequest, opts ...RegionCreateOption) *RegionInfo {
+func RegionFromHeartbeat(heartbeat *pdpb.RegionHeartbeatRequest, opts ...RegionCreateOption) *RegionInfo {
 	// Convert unit to MB.
 	// If region isn't empty and less than 1MB, use 1MB instead.
 	// The size of empty region will be correct by the previous RegionInfo.
@@ -206,27 +174,22 @@ func RegionFromHeartbeat(heartbeat RegionHeartbeatRequest, opts ...RegionCreateO
 	}
 
 	region := &RegionInfo{
-		term:            heartbeat.GetTerm(),
-		meta:            heartbeat.GetRegion(),
-		leader:          heartbeat.GetLeader(),
-		downPeers:       heartbeat.GetDownPeers(),
-		pendingPeers:    heartbeat.GetPendingPeers(),
-		writtenBytes:    heartbeat.GetBytesWritten(),
-		writtenKeys:     heartbeat.GetKeysWritten(),
-		readBytes:       heartbeat.GetBytesRead(),
-		readKeys:        heartbeat.GetKeysRead(),
-		approximateSize: int64(regionSize),
-		approximateKeys: int64(heartbeat.GetApproximateKeys()),
-		interval:        heartbeat.GetInterval(),
-		queryStats:      heartbeat.GetQueryStats(),
-		source:          Heartbeat,
-	}
-
-	// scheduling service doesn't need the following fields.
-	if h, ok := heartbeat.(*pdpb.RegionHeartbeatRequest); ok {
-		region.approximateKvSize = int64(h.GetApproximateKvSize() / units.MiB)
-		region.replicationStatus = h.GetReplicationStatus()
-		region.cpuUsage = h.GetCpuUsage()
+		term:              heartbeat.GetTerm(),
+		meta:              heartbeat.GetRegion(),
+		leader:            heartbeat.GetLeader(),
+		downPeers:         heartbeat.GetDownPeers(),
+		pendingPeers:      heartbeat.GetPendingPeers(),
+		cpuUsage:          heartbeat.GetCpuUsage(),
+		writtenBytes:      heartbeat.GetBytesWritten(),
+		writtenKeys:       heartbeat.GetKeysWritten(),
+		readBytes:         heartbeat.GetBytesRead(),
+		readKeys:          heartbeat.GetKeysRead(),
+		approximateSize:   int64(regionSize),
+		approximateKeys:   int64(heartbeat.GetApproximateKeys()),
+		interval:          heartbeat.GetInterval(),
+		replicationStatus: heartbeat.GetReplicationStatus(),
+		queryStats:        heartbeat.GetQueryStats(),
+		source:            Heartbeat,
 	}
 
 	for _, opt := range opts {
@@ -289,7 +252,6 @@ func (r *RegionInfo) Clone(opts ...RegionCreateOption) *RegionInfo {
 		readBytes:         r.readBytes,
 		readKeys:          r.readKeys,
 		approximateSize:   r.approximateSize,
-		approximateKvSize: r.approximateKvSize,
 		approximateKeys:   r.approximateKeys,
 		interval:          typeutil.DeepClone(r.interval, TimeIntervalFactory),
 		replicationStatus: r.replicationStatus,
@@ -580,11 +542,6 @@ func (r *RegionInfo) GetStorePeerApproximateKeys(storeID uint64) int64 {
 	return r.approximateKeys
 }
 
-// GetApproximateKvSize returns the approximate kv size of the region.
-func (r *RegionInfo) GetApproximateKvSize() int64 {
-	return r.approximateKvSize
-}
-
 // GetApproximateKeys returns the approximate keys of the region.
 func (r *RegionInfo) GetApproximateKeys() int64 {
 	return r.approximateKeys
@@ -711,7 +668,7 @@ func (r *RegionInfo) isRegionRecreated() bool {
 
 // RegionGuideFunc is a function that determines which follow-up operations need to be performed based on the origin
 // and new region information.
-type RegionGuideFunc func(region, origin *RegionInfo) (saveKV, saveCache, needSync bool)
+type RegionGuideFunc func(region, origin *RegionInfo) (isNew, saveKV, saveCache, needSync bool)
 
 // GenerateRegionGuideFunc is used to generate a RegionGuideFunc. Control the log output by specifying the log function.
 // nil means do not print the log.
@@ -724,15 +681,19 @@ func GenerateRegionGuideFunc(enableLog bool) RegionGuideFunc {
 	}
 	// Save to storage if meta is updated.
 	// Save to cache if meta or leader is updated, or contains any down/pending peer.
-	return func(region, origin *RegionInfo) (saveKV, saveCache, needSync bool) {
+	// Mark isNew if the region in cache does not have leader.
+	return func(region, origin *RegionInfo) (isNew, saveKV, saveCache, needSync bool) {
 		if origin == nil {
 			if log.GetLevel() <= zap.DebugLevel {
 				debug("insert new region",
 					zap.Uint64("region-id", region.GetID()),
 					logutil.ZapRedactStringer("meta-region", RegionToHexMeta(region.GetMeta())))
 			}
-			saveKV, saveCache = true, true
+			saveKV, saveCache, isNew = true, true, true
 		} else {
+			if origin.LoadedFromStorage() {
+				isNew = true
+			}
 			r := region.GetRegionEpoch()
 			o := origin.GetRegionEpoch()
 			if r.GetVersion() > o.GetVersion() {
@@ -758,7 +719,9 @@ func GenerateRegionGuideFunc(enableLog bool) RegionGuideFunc {
 				saveKV, saveCache = true, true
 			}
 			if region.GetLeader().GetId() != origin.GetLeader().GetId() {
-				if origin.GetLeader().GetId() != 0 && log.GetLevel() <= zap.InfoLevel {
+				if origin.GetLeader().GetId() == 0 {
+					isNew = true
+				} else if log.GetLevel() <= zap.InfoLevel {
 					info("leader changed",
 						zap.Uint64("region-id", region.GetID()),
 						zap.Uint64("from", origin.GetLeader().GetStoreId()),
@@ -1015,11 +978,6 @@ func (r *RegionsInfo) setRegionLocked(region *RegionInfo, withOverlaps bool, ol 
 
 // UpdateSubTree updates the subtree.
 func (r *RegionsInfo) UpdateSubTree(region, origin *RegionInfo, overlaps []*RegionInfo, rangeChanged bool) {
-	failpoint.Inject("UpdateSubTree", func() {
-		if origin == nil {
-			time.Sleep(time.Second)
-		}
-	})
 	r.st.Lock()
 	defer r.st.Unlock()
 	if origin != nil {
@@ -1028,17 +986,8 @@ func (r *RegionsInfo) UpdateSubTree(region, origin *RegionInfo, overlaps []*Regi
 			// TODO: Improve performance by deleting only the different peers.
 			r.removeRegionFromSubTreeLocked(origin)
 		} else {
-			// The region tree and the subtree update is not atomic and the region tree is updated first.
-			// If there are two thread needs to update region tree,
-			// t1: thread-A  update region tree
-			// 										t2: thread-B: update region tree again
-			//										t3: thread-B: update subtree
-			// t4: thread-A: update region subtree
-			// to keep region tree consistent with subtree, we need to drop this update.
-			if tree, ok := r.subRegions[region.GetID()]; ok {
-				r.updateSubTreeStat(origin, region)
-				tree.RegionInfo = region
-			}
+			r.updateSubTreeStat(origin, region)
+			r.subRegions[region.GetID()].RegionInfo = region
 			return
 		}
 	}
@@ -1340,23 +1289,11 @@ func (r *RegionsInfo) GetStoreWriteRate(storeID uint64) (bytesRate, keysRate flo
 	return
 }
 
-// GetClusterNotFromStorageRegionsCnt gets the `NotFromStorageRegionsCnt` count of regions that not loaded from storage anymore.
+// GetClusterNotFromStorageRegionsCnt gets the total count of regions that not loaded from storage anymore
 func (r *RegionsInfo) GetClusterNotFromStorageRegionsCnt() int {
-	r.st.RLock()
-	defer r.st.RUnlock()
-	return r.tree.notFromStorageRegionsCount()
-}
-
-// GetNotFromStorageRegionsCntByStore gets the `NotFromStorageRegionsCnt` count of a store's leader, follower and learner by storeID.
-func (r *RegionsInfo) GetNotFromStorageRegionsCntByStore(storeID uint64) int {
-	r.st.RLock()
-	defer r.st.RUnlock()
-	return r.getNotFromStorageRegionsCntByStoreLocked(storeID)
-}
-
-// getNotFromStorageRegionsCntByStoreLocked gets the `NotFromStorageRegionsCnt` count of a store's leader, follower and learner by storeID.
-func (r *RegionsInfo) getNotFromStorageRegionsCntByStoreLocked(storeID uint64) int {
-	return r.leaders[storeID].notFromStorageRegionsCount() + r.followers[storeID].notFromStorageRegionsCount() + r.learners[storeID].notFromStorageRegionsCount()
+	r.t.RLock()
+	defer r.t.RUnlock()
+	return r.tree.notFromStorageRegionsCnt
 }
 
 // GetMetaRegions gets a set of metapb.Region from regionMap
@@ -1378,8 +1315,8 @@ func (r *RegionsInfo) GetStoreStats(storeID uint64) (leader, region, witness, le
 		r.learners[storeID].length(), r.pendingPeers[storeID].length(), r.leaders[storeID].TotalSize(), r.getStoreRegionSizeLocked(storeID)
 }
 
-// GetTotalRegionCount gets the total count of RegionInfo of regionMap
-func (r *RegionsInfo) GetTotalRegionCount() int {
+// GetRegionCount gets the total count of RegionInfo of regionMap
+func (r *RegionsInfo) GetRegionCount() int {
 	r.t.RLock()
 	defer r.t.RUnlock()
 	return len(r.regions)
@@ -1392,7 +1329,7 @@ func (r *RegionsInfo) GetStoreRegionCount(storeID uint64) int {
 	return r.getStoreRegionCountLocked(storeID)
 }
 
-// getStoreRegionCountLocked gets the total count of a store's leader, follower and learner RegionInfo by storeID
+// GetStoreRegionCount gets the total count of a store's leader, follower and learner RegionInfo by storeID
 func (r *RegionsInfo) getStoreRegionCountLocked(storeID uint64) int {
 	return r.leaders[storeID].length() + r.followers[storeID].length() + r.learners[storeID].length()
 }
@@ -1573,8 +1510,8 @@ func (r *RegionInfo) GetWriteLoads() []float64 {
 	}
 }
 
-// GetRegionCount returns the number of regions that overlap with the range [startKey, endKey).
-func (r *RegionsInfo) GetRegionCount(startKey, endKey []byte) int {
+// GetRangeCount returns the number of regions that overlap with the range [startKey, endKey).
+func (r *RegionsInfo) GetRangeCount(startKey, endKey []byte) int {
 	r.t.RLock()
 	defer r.t.RUnlock()
 	start := &regionItem{&RegionInfo{meta: &metapb.Region{StartKey: startKey}}}
@@ -1596,9 +1533,9 @@ func (r *RegionsInfo) GetRegionCount(startKey, endKey []byte) int {
 	return endIndex - startIndex + 1
 }
 
-// ScanRegions scans regions intersecting [start key, end key), returns at most
+// ScanRange scans regions intersecting [start key, end key), returns at most
 // `limit` regions. limit <= 0 means no limit.
-func (r *RegionsInfo) ScanRegions(startKey, endKey []byte, limit int) []*RegionInfo {
+func (r *RegionsInfo) ScanRange(startKey, endKey []byte, limit int) []*RegionInfo {
 	r.t.RLock()
 	defer r.t.RUnlock()
 	var res []*RegionInfo
@@ -1615,9 +1552,9 @@ func (r *RegionsInfo) ScanRegions(startKey, endKey []byte, limit int) []*RegionI
 	return res
 }
 
-// ScanRegionWithIterator scans from the first region containing or behind start key,
+// ScanRangeWithIterator scans from the first region containing or behind start key,
 // until iterator returns false.
-func (r *RegionsInfo) ScanRegionWithIterator(startKey []byte, iterator func(region *RegionInfo) bool) {
+func (r *RegionsInfo) ScanRangeWithIterator(startKey []byte, iterator func(region *RegionInfo) bool) {
 	r.t.RLock()
 	defer r.t.RUnlock()
 	r.tree.scanRange(startKey, iterator)
@@ -1753,11 +1690,15 @@ func DiffRegionKeyInfo(origin *RegionInfo, other *RegionInfo) string {
 }
 
 // String converts slice of bytes to string without copy.
-func String(b []byte) string {
+func String(b []byte) (s string) {
 	if len(b) == 0 {
 		return ""
 	}
-	return unsafe.String(unsafe.SliceData(b), len(b))
+	pbytes := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	pstring := (*reflect.StringHeader)(unsafe.Pointer(&s))
+	pstring.Data = pbytes.Data
+	pstring.Len = pbytes.Len
+	return
 }
 
 // ToUpperASCIIInplace bytes.ToUpper but zero-cost

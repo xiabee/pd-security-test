@@ -71,11 +71,6 @@ error = '''
 get member failed
 '''
 
-["PD:client:ErrClientGetMinTSO"]
-error = '''
-get min TSO failed, %v
-'''
-
 ["PD:client:ErrClientGetTSO"]
 error = '''
 get TSO failed
@@ -96,11 +91,6 @@ error = '''
 TiKV cluster not bootstrapped, please start TiKV first
 '''
 
-["PD:cluster:ErrSchedulingIsHalted"]
-error = '''
-scheduling is halted
-'''
-
 ["PD:cluster:ErrStoreIsUp"]
 error = '''
 store is still up, please remove store gracefully
@@ -109,11 +99,6 @@ store is still up, please remove store gracefully
 ["PD:common:ErrGetSourceStore"]
 error = '''
 failed to get the source store
-'''
-
-["PD:common:ErrGetTargetStore"]
-error = '''
-failed to get the target store
 '''
 
 ["PD:common:ErrIncorrectSystemTime"]
@@ -496,11 +481,6 @@ error = '''
 init file log error, %s
 '''
 
-["PD:member:ErrCheckCampaign"]
-error = '''
-check campaign failed
-'''
-
 ["PD:member:ErrEtcdLeaderNotFound"]
 error = '''
 etcd leader not found
@@ -511,24 +491,14 @@ error = '''
 marshal leader failed
 '''
 
+["PD:member:ErrPreCheckCampaign"]
+error = '''
+pre-check campaign failed
+'''
+
 ["PD:netstat:ErrNetstatTCPSocks"]
 error = '''
 TCP socks error
-'''
-
-["PD:operator:ErrAddOperator"]
-error = '''
-failed to add operator, maybe already have one
-'''
-
-["PD:operator:ErrOperatorNotFound"]
-error = '''
-operator not found
-'''
-
-["PD:operator:ErrPluginNotFound"]
-error = '''
-plugin is not found: %s
 '''
 
 ["PD:os:ErrOSOpen"]
@@ -599,21 +569,6 @@ failed to marshal proto
 ["PD:proto:ErrProtoUnmarshal"]
 error = '''
 failed to unmarshal proto
-'''
-
-["PD:region:ErrRegionAbnormalPeer"]
-error = '''
-region %v has abnormal peer
-'''
-
-["PD:region:ErrRegionNotAdjacent"]
-error = '''
-two regions are not adjacent
-'''
-
-["PD:region:ErrRegionNotFound"]
-error = '''
-region %v not found
 '''
 
 ["PD:region:ErrRegionRuleContent"]
@@ -731,19 +686,9 @@ error = '''
 cannot set invalid configuration
 '''
 
-["PD:server:ErrLeaderFrequentlyChange"]
-error = '''
-leader %s frequently changed, leader-key is [%s]
-'''
-
 ["PD:server:ErrLeaderNil"]
 error = '''
 leader is nil
-'''
-
-["PD:server:ErrRateLimitExceeded"]
-error = '''
-rate limit exceeded
 '''
 
 ["PD:server:ErrServerNotStarted"]
@@ -796,19 +741,9 @@ error = '''
 get local allocator failed, %s
 '''
 
-["PD:tso:ErrGetMinTS"]
-error = '''
-get min ts failed, %s
-'''
-
 ["PD:tso:ErrKeyspaceGroupIDInvalid"]
 error = '''
 the keyspace group id is invalid, %s
-'''
-
-["PD:tso:ErrKeyspaceGroupIsMerging"]
-error = '''
-the keyspace group %d is merging
 '''
 
 ["PD:tso:ErrKeyspaceGroupNotInitialized"]
@@ -859,11 +794,6 @@ set local tso config failed, %s
 ["PD:tso:ErrSyncMaxTS"]
 error = '''
 sync max ts failed, %s
-'''
-
-["PD:tso:ErrUpdateTimestamp"]
-error = '''
-update timestamp failed, %s
 '''
 
 ["PD:typeutil:ErrBytesToUint64"]

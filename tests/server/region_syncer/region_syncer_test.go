@@ -49,7 +49,7 @@ func TestRegionSyncer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/storage/regionStorageFastFlush", `return(true)`))
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/syncer/noFastExitSync", `return(true)`))
+	re.NoError(failpoint.Enable("github.com/tikv/pd/server/syncer/noFastExitSync", `return(true)`))
 
 	cluster, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, serverName string) { conf.PDServerCfg.UseRegionStorage = true })
 	defer cluster.Destroy()
@@ -57,7 +57,7 @@ func TestRegionSyncer(t *testing.T) {
 
 	re.NoError(cluster.RunInitialServers())
 	cluster.WaitLeader()
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 	rc := leaderServer.GetServer().GetRaftCluster()
 	re.NotNil(rc)
@@ -140,7 +140,7 @@ func TestRegionSyncer(t *testing.T) {
 	err = leaderServer.Stop()
 	re.NoError(err)
 	cluster.WaitLeader()
-	leaderServer = cluster.GetLeaderServer()
+	leaderServer = cluster.GetServer(cluster.GetLeader())
 	re.NotNil(leaderServer)
 	loadRegions := leaderServer.GetServer().GetRaftCluster().GetRegions()
 	re.Len(loadRegions, regionLen)
@@ -151,7 +151,7 @@ func TestRegionSyncer(t *testing.T) {
 		re.Equal(region.GetLeader(), r.GetLeader())
 		re.Equal(region.GetBuckets(), r.GetBuckets())
 	}
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/syncer/noFastExitSync"))
+	re.NoError(failpoint.Disable("github.com/tikv/pd/server/syncer/noFastExitSync"))
 	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/storage/regionStorageFastFlush"))
 }
 
@@ -166,7 +166,7 @@ func TestFullSyncWithAddMember(t *testing.T) {
 	err = cluster.RunInitialServers()
 	re.NoError(err)
 	cluster.WaitLeader()
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 	rc := leaderServer.GetServer().GetRaftCluster()
 	re.NotNil(rc)
@@ -202,7 +202,7 @@ func TestPrepareChecker(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/changeCoordinatorTicker", `return(true)`))
+	re.NoError(failpoint.Enable("github.com/tikv/pd/server/cluster/changeCoordinatorTicker", `return(true)`))
 	cluster, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, serverName string) { conf.PDServerCfg.UseRegionStorage = true })
 	defer cluster.Destroy()
 	re.NoError(err)
@@ -210,7 +210,7 @@ func TestPrepareChecker(t *testing.T) {
 	err = cluster.RunInitialServers()
 	re.NoError(err)
 	cluster.WaitLeader()
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 	rc := leaderServer.GetServer().GetRaftCluster()
 	re.NotNil(rc)
@@ -235,7 +235,7 @@ func TestPrepareChecker(t *testing.T) {
 	err = cluster.ResignLeader()
 	re.NoError(err)
 	re.Equal("pd2", cluster.WaitLeader())
-	leaderServer = cluster.GetLeaderServer()
+	leaderServer = cluster.GetServer(cluster.GetLeader())
 	rc = leaderServer.GetServer().GetRaftCluster()
 	for _, region := range regions {
 		err = rc.HandleRegionHeartbeat(region)
@@ -243,7 +243,7 @@ func TestPrepareChecker(t *testing.T) {
 	}
 	time.Sleep(time.Second)
 	re.True(rc.IsPrepared())
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/schedule/changeCoordinatorTicker"))
+	re.NoError(failpoint.Disable("github.com/tikv/pd/server/cluster/changeCoordinatorTicker"))
 }
 
 // ref: https://github.com/tikv/pd/issues/6988

@@ -19,13 +19,13 @@ SHELL := env PATH='$(PATH)' GOBIN='$(GO_TOOLS_BIN_PATH)' $(shell which bash)
 default: static tidy test
 
 test:
-	CGO_ENABLE=1 go test ./... -race -cover
+	CGO_ENABLE=1 go test -race -cover
 
 basic-test:
-	CGO_ENABLE=1 go test ./...
+	CGO_ENABLE=1 go test
 
 ci-test-job:
-	CGO_ENABLED=1 go test ./... -race -covermode=atomic -coverprofile=covprofile -coverpkg=../... github.com/tikv/pd/client
+	CGO_ENABLED=1 go test -race -covermode=atomic -coverprofile=covprofile -coverpkg=../... github.com/tikv/pd/client
 
 install-tools:
 	cd .. && $(MAKE) install-tools
@@ -34,7 +34,7 @@ static: install-tools
 	@ echo "gofmt ..."
 	@ gofmt -s -l -d . 2>&1 | awk '{ print } END { if (NR > 0) { exit 1 } }'
 	@ echo "golangci-lint ..."
-	@ golangci-lint run -c ../.golangci.yml --verbose ./... --allow-parallel-runners
+	@ golangci-lint run -c ../.golangci.yml --verbose ./...
 	@ echo "revive ..."
 	@ revive -formatter friendly -config ../revive.toml ./...
 

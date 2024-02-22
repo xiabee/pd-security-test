@@ -21,7 +21,7 @@ static: install-tools
 	@ echo "gofmt ..."
 	@ gofmt -s -l -d . 2>&1 | awk '{ print } END { if (NR > 0) { exit 1 } }'
 	@ echo "golangci-lint ..."
-	@ golangci-lint run -c $(ROOT_PATH)/.golangci.yml --verbose ./... --allow-parallel-runners
+	@ golangci-lint run -c $(ROOT_PATH)/.golangci.yml --verbose ./...
 	@ echo "revive ..."
 	@ revive -formatter friendly -config $(ROOT_PATH)/revive.toml ./...
 
@@ -35,7 +35,7 @@ test: failpoint-enable
 	$(MAKE) failpoint-disable
 
 ci-test-job:
-	CGO_ENABLED=1 go test -v -tags deadlock -race -covermode=atomic -coverprofile=covprofile -coverpkg=$(ROOT_PATH)/... github.com/tikv/pd/tests/integrations/client
+	CGO_ENABLED=1 go test -tags deadlock -race -covermode=atomic -coverprofile=covprofile -coverpkg=$(ROOT_PATH)/... github.com/tikv/pd/tests/integrations/client
 
 install-tools:
 	cd $(ROOT_PATH) && $(MAKE) install-tools

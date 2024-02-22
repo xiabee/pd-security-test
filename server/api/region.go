@@ -33,8 +33,6 @@ import (
 	"github.com/pingcap/kvproto/pkg/replication_modepb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/keyspace"
 	"github.com/tikv/pd/pkg/schedule/filter"
 	"github.com/tikv/pd/pkg/statistics"
 	"github.com/tikv/pd/pkg/utils/apiutil"
@@ -283,17 +281,6 @@ func (h *regionHandler) GetRegion(w http.ResponseWriter, r *http.Request) {
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// decode hex if query has params with hex format
-	formatStr := r.URL.Query().Get("format")
-	if formatStr == "hex" {
-		keyBytes, err := hex.DecodeString(key)
-		if err != nil {
-			h.rd.JSON(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		key = string(keyBytes)
-	}
-
 	regionInfo := rc.GetRegionByKey([]byte(key))
 	b, err := marshalRegionInfoJSON(r.Context(), regionInfo)
 	if err != nil {
@@ -485,7 +472,7 @@ func (h *regionsHandler) ScanRegions(w http.ResponseWriter, r *http.Request) {
 // @Router   /regions/count [get]
 func (h *regionsHandler) GetRegionCount(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
-	count := rc.GetTotalRegionCount()
+	count := rc.GetRegionCount()
 	h.rd.JSON(w, http.StatusOK, &RegionsInfo{Count: count})
 }
 
@@ -506,60 +493,6 @@ func (h *regionsHandler) GetStoreRegions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	regions := rc.GetStoreRegions(uint64(id))
-	b, err := marshalRegionsInfoJSON(r.Context(), regions)
-	if err != nil {
-		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	h.rd.Data(w, http.StatusOK, b)
-}
-
-// @Tags     region
-// @Summary  List regions belongs to the given keyspace ID.
-// @Param    keyspace_id  query  string   true   "Keyspace ID"
-// @Param    limit        query  integer  false  "Limit count"  default(16)
-// @Produce  json
-// @Success  200  {object}  RegionsInfo
-// @Failure  400  {string}  string  "The input is invalid."
-// @Router   /regions/keyspace/id/{id} [get]
-func (h *regionsHandler) GetKeyspaceRegions(w http.ResponseWriter, r *http.Request) {
-	rc := getCluster(r)
-	vars := mux.Vars(r)
-	keyspaceIDStr := vars["id"]
-	if keyspaceIDStr == "" {
-		h.rd.JSON(w, http.StatusBadRequest, "keyspace id is empty")
-		return
-	}
-
-	keyspaceID64, err := strconv.ParseUint(keyspaceIDStr, 10, 32)
-	if err != nil {
-		h.rd.JSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	keyspaceID := uint32(keyspaceID64)
-	keyspaceManager := h.svr.GetKeyspaceManager()
-	if _, err := keyspaceManager.LoadKeyspaceByID(keyspaceID); err != nil {
-		h.rd.JSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	limit := defaultRegionLimit
-	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil {
-			h.rd.JSON(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	if limit > maxRegionLimit {
-		limit = maxRegionLimit
-	}
-	regionBound := keyspace.MakeRegionBound(keyspaceID)
-	regions := rc.ScanRegions(regionBound.RawLeftBound, regionBound.RawRightBound, limit)
-	if limit <= 0 || limit > len(regions) {
-		txnRegion := rc.ScanRegions(regionBound.TxnLeftBound, regionBound.TxnRightBound, limit-len(regions))
-		regions = append(regions, txnRegion...)
-	}
 	b, err := marshalRegionsInfoJSON(r.Context(), regions)
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
@@ -809,7 +742,7 @@ func (h *regionsHandler) GetRegionSiblings(w http.ResponseWriter, r *http.Reques
 	}
 	region := rc.GetRegion(uint64(id))
 	if region == nil {
-		h.rd.JSON(w, http.StatusNotFound, errs.ErrRegionNotFound.FastGenByArgs(uint64(id)).Error())
+		h.rd.JSON(w, http.StatusNotFound, server.ErrRegionNotFound(uint64(id)).Error())
 		return
 	}
 
@@ -1083,7 +1016,7 @@ func (h *regionsHandler) ScatterRegions(w http.ResponseWriter, r *http.Request) 
 			h.rd.JSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		opsCount, failures, err = rc.GetRegionScatterer().ScatterRegionsByRange(startKey, endKey, group, retryLimit)
+		opsCount, failures, err = rc.GetRegionScatter().ScatterRegionsByRange(startKey, endKey, group, retryLimit)
 		if err != nil {
 			h.rd.JSON(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1094,7 +1027,7 @@ func (h *regionsHandler) ScatterRegions(w http.ResponseWriter, r *http.Request) 
 			h.rd.JSON(w, http.StatusBadRequest, "regions_id is invalid")
 			return
 		}
-		opsCount, failures, err = rc.GetRegionScatterer().ScatterRegionsByID(ids, group, retryLimit, false)
+		opsCount, failures, err = rc.GetRegionScatter().ScatterRegionsByID(ids, group, retryLimit)
 		if err != nil {
 			h.rd.JSON(w, http.StatusInternalServerError, err.Error())
 			return
