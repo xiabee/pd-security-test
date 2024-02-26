@@ -246,9 +246,21 @@ func (bc *BasicCluster) GetStoresWriteRate() (storeIDs []uint64, bytesRates, key
 	return bc.getWriteRate(bc.RegionsInfo.GetStoreWriteRate)
 }
 
+// UpdateAllStoreStatus updates the information of all stores.
+func (bc *BasicCluster) UpdateAllStoreStatus() {
+	// Update related stores.
+	stores := bc.GetStores()
+	for _, store := range stores {
+		if store.IsRemoved() {
+			continue
+		}
+		bc.UpdateStoreStatus(store.GetID())
+	}
+}
+
 // RegionSetInformer provides access to a shared informer of regions.
 type RegionSetInformer interface {
-	GetRegionCount() int
+	GetTotalRegionCount() int
 	RandFollowerRegions(storeID uint64, ranges []KeyRange) []*RegionInfo
 	RandLeaderRegions(storeID uint64, ranges []KeyRange) []*RegionInfo
 	RandLearnerRegions(storeID uint64, ranges []KeyRange) []*RegionInfo
@@ -296,4 +308,25 @@ func NewKeyRange(startKey, endKey string) KeyRange {
 		StartKey: []byte(startKey),
 		EndKey:   []byte(endKey),
 	}
+}
+
+// KeyRanges is a slice of KeyRange.
+type KeyRanges struct {
+	krs []*KeyRange
+}
+
+// Append appends a KeyRange.
+func (rs *KeyRanges) Append(startKey, endKey []byte) {
+	rs.krs = append(rs.krs, &KeyRange{
+		StartKey: startKey,
+		EndKey:   endKey,
+	})
+}
+
+// Ranges returns the slice of KeyRange.
+func (rs *KeyRanges) Ranges() []*KeyRange {
+	if rs == nil {
+		return nil
+	}
+	return rs.krs
 }

@@ -20,7 +20,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
-	"github.com/tikv/pd/pkg/schedule"
+	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/filter"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
@@ -51,7 +51,7 @@ type shuffleRegionScheduler struct {
 
 // newShuffleRegionScheduler creates an admin scheduler that shuffles regions
 // between stores.
-func newShuffleRegionScheduler(opController *schedule.OperatorController, conf *shuffleRegionSchedulerConfig) schedule.Scheduler {
+func newShuffleRegionScheduler(opController *operator.Controller, conf *shuffleRegionSchedulerConfig) Scheduler {
 	filters := []filter.Filter{
 		&filter.StoreStateFilter{ActionScope: ShuffleRegionName, MoveRegion: true, OperatorLevel: constant.Low},
 		filter.NewSpecialUseFilter(ShuffleRegionName),
@@ -80,15 +80,34 @@ func (s *shuffleRegionScheduler) EncodeConfig() ([]byte, error) {
 	return s.conf.EncodeConfig()
 }
 
-func (s *shuffleRegionScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
-	allowed := s.OpController.OperatorCount(operator.OpRegion) < cluster.GetOpts().GetRegionScheduleLimit()
+func (s *shuffleRegionScheduler) ReloadConfig() error {
+	s.conf.Lock()
+	defer s.conf.Unlock()
+	cfgData, err := s.conf.storage.LoadSchedulerConfig(s.GetName())
+	if err != nil {
+		return err
+	}
+	if len(cfgData) == 0 {
+		return nil
+	}
+	newCfg := &shuffleRegionSchedulerConfig{}
+	if err := DecodeConfig([]byte(cfgData), newCfg); err != nil {
+		return err
+	}
+	s.conf.Roles = newCfg.Roles
+	s.conf.Ranges = newCfg.Ranges
+	return nil
+}
+
+func (s *shuffleRegionScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
+	allowed := s.OpController.OperatorCount(operator.OpRegion) < cluster.GetSchedulerConfig().GetRegionScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpRegion.String()).Inc()
 	}
 	return allowed
 }
 
-func (s *shuffleRegionScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (s *shuffleRegionScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	shuffleRegionCounter.Inc()
 	region, oldPeer := s.scheduleRemovePeer(cluster)
 	if region == nil {
@@ -112,26 +131,27 @@ func (s *shuffleRegionScheduler) Schedule(cluster schedule.Cluster, dryRun bool)
 	return []*operator.Operator{op}, nil
 }
 
-func (s *shuffleRegionScheduler) scheduleRemovePeer(cluster schedule.Cluster) (*core.RegionInfo, *metapb.Peer) {
+func (s *shuffleRegionScheduler) scheduleRemovePeer(cluster sche.SchedulerCluster) (*core.RegionInfo, *metapb.Peer) {
 	candidates := filter.NewCandidates(cluster.GetStores()).
-		FilterSource(cluster.GetOpts(), nil, nil, s.filters...).
+		FilterSource(cluster.GetSchedulerConfig(), nil, nil, s.filters...).
 		Shuffle()
 
 	pendingFilter := filter.NewRegionPendingFilter()
 	downFilter := filter.NewRegionDownFilter()
 	replicaFilter := filter.NewRegionReplicatedFilter(cluster)
+	ranges := s.conf.GetRanges()
 	for _, source := range candidates.Stores {
 		var region *core.RegionInfo
 		if s.conf.IsRoleAllow(roleFollower) {
-			region = filter.SelectOneRegion(cluster.RandFollowerRegions(source.GetID(), s.conf.Ranges), nil,
+			region = filter.SelectOneRegion(cluster.RandFollowerRegions(source.GetID(), ranges), nil,
 				pendingFilter, downFilter, replicaFilter)
 		}
 		if region == nil && s.conf.IsRoleAllow(roleLeader) {
-			region = filter.SelectOneRegion(cluster.RandLeaderRegions(source.GetID(), s.conf.Ranges), nil,
+			region = filter.SelectOneRegion(cluster.RandLeaderRegions(source.GetID(), ranges), nil,
 				pendingFilter, downFilter, replicaFilter)
 		}
 		if region == nil && s.conf.IsRoleAllow(roleLearner) {
-			region = filter.SelectOneRegion(cluster.RandLearnerRegions(source.GetID(), s.conf.Ranges), nil,
+			region = filter.SelectOneRegion(cluster.RandLearnerRegions(source.GetID(), ranges), nil,
 				pendingFilter, downFilter, replicaFilter)
 		}
 		if region != nil {
@@ -144,16 +164,16 @@ func (s *shuffleRegionScheduler) scheduleRemovePeer(cluster schedule.Cluster) (*
 	return nil, nil
 }
 
-func (s *shuffleRegionScheduler) scheduleAddPeer(cluster schedule.Cluster, region *core.RegionInfo, oldPeer *metapb.Peer) *metapb.Peer {
+func (s *shuffleRegionScheduler) scheduleAddPeer(cluster sche.SchedulerCluster, region *core.RegionInfo, oldPeer *metapb.Peer) *metapb.Peer {
 	store := cluster.GetStore(oldPeer.GetStoreId())
 	if store == nil {
 		return nil
 	}
-	scoreGuard := filter.NewPlacementSafeguard(s.GetName(), cluster.GetOpts(), cluster.GetBasicCluster(), cluster.GetRuleManager(), region, store, nil)
+	scoreGuard := filter.NewPlacementSafeguard(s.GetName(), cluster.GetSchedulerConfig(), cluster.GetBasicCluster(), cluster.GetRuleManager(), region, store, nil)
 	excludedFilter := filter.NewExcludedFilter(s.GetName(), nil, region.GetStoreIDs())
 
 	target := filter.NewCandidates(cluster.GetStores()).
-		FilterTarget(cluster.GetOpts(), nil, nil, append(s.filters, scoreGuard, excludedFilter)...).
+		FilterTarget(cluster.GetSchedulerConfig(), nil, nil, append(s.filters, scoreGuard, excludedFilter)...).
 		RandomPick()
 	if target == nil {
 		return nil

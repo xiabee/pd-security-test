@@ -20,14 +20,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/pingcap/failpoint"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/storage"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/storage/kv"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
 )
 
 func TestAdjustRule(t *testing.T) {
@@ -38,7 +41,7 @@ func TestAdjustRule(t *testing.T) {
 			{Key: "k1", Value: "v1"},
 		},
 		RuleType: "key-range",
-		Data:     makeKeyRanges("12abcd", "34cdef", "56abcd", "78cdef"),
+		Data:     MakeKeyRanges("12abcd", "34cdef", "56abcd", "78cdef"),
 	}
 	err := rule.checkAndAdjust()
 	re.NoError(err)
@@ -94,9 +97,9 @@ func TestGetSetRule(t *testing.T) {
 	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
 	re.NoError(err)
 	rules := []*LabelRule{
-		{ID: "rule1", Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: makeKeyRanges("1234", "5678")},
-		{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: makeKeyRanges("ab12", "cd12")},
-		{ID: "rule3", Labels: []RegionLabel{{Key: "k3", Value: "v3"}}, RuleType: "key-range", Data: makeKeyRanges("abcd", "efef")},
+		{ID: "rule1", Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: MakeKeyRanges("1234", "5678")},
+		{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: MakeKeyRanges("ab12", "cd12")},
+		{ID: "rule3", Labels: []RegionLabel{{Key: "k3", Value: "v3"}}, RuleType: "key-range", Data: MakeKeyRanges("abcd", "efef")},
 	}
 	for _, r := range rules {
 		err := labeler.SetLabelRule(r)
@@ -121,7 +124,7 @@ func TestGetSetRule(t *testing.T) {
 	// patch
 	patch := LabelRulePatch{
 		SetRules: []*LabelRule{
-			{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: makeKeyRanges("ab12", "cd12")},
+			{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: MakeKeyRanges("ab12", "cd12")},
 		},
 		DeleteRules: []string{"rule1"},
 	}
@@ -132,6 +135,78 @@ func TestGetSetRule(t *testing.T) {
 	for id, rule := range allRules {
 		expectSameRules(re, rule, rules[id+1])
 	}
+
+	for _, r := range rules {
+		labeler.DeleteLabelRule(r.ID)
+	}
+	re.Empty(labeler.GetAllLabelRules())
+}
+
+func TestTxnWithEtcd(t *testing.T) {
+	re := require.New(t)
+	_, client, clean := etcdutil.NewTestEtcdCluster(t, 1)
+	defer clean()
+	store := storage.NewStorageWithEtcdBackend(client, "")
+	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
+	re.NoError(err)
+	// test patch rules in batch
+	rulesNum := 200
+	patch := LabelRulePatch{}
+	for i := 1; i <= rulesNum; i++ {
+		patch.SetRules = append(patch.SetRules, &LabelRule{
+			ID: fmt.Sprintf("rule_%d", i),
+			Labels: []RegionLabel{
+				{Key: fmt.Sprintf("k_%d", i), Value: fmt.Sprintf("v_%d", i)},
+			},
+			RuleType: "key-range",
+			Data:     MakeKeyRanges("", ""),
+		})
+	}
+	err = labeler.Patch(patch)
+	re.NoError(err)
+	allRules := labeler.GetAllLabelRules()
+	re.Len(allRules, rulesNum)
+	sort.Slice(allRules, func(i, j int) bool {
+		i1, err := strconv.Atoi(allRules[i].ID[5:])
+		re.NoError(err)
+		j1, err := strconv.Atoi(allRules[j].ID[5:])
+		re.NoError(err)
+		return i1 < j1
+	})
+	for id, rule := range allRules {
+		expectSameRules(re, rule, patch.SetRules[id])
+	}
+	patch.SetRules = patch.SetRules[:0]
+	patch.DeleteRules = patch.DeleteRules[:0]
+	for i := 1; i <= rulesNum; i++ {
+		patch.DeleteRules = append(patch.DeleteRules, fmt.Sprintf("rule_%d", i))
+	}
+	err = labeler.Patch(patch)
+	re.NoError(err)
+	allRules = labeler.GetAllLabelRules()
+	re.Empty(allRules)
+
+	// test patch rules in batch with duplicated rule id
+	patch.SetRules = patch.SetRules[:0]
+	patch.DeleteRules = patch.DeleteRules[:0]
+	for i := 0; i <= 3; i++ {
+		patch.SetRules = append(patch.SetRules, &LabelRule{
+			ID: "rule_1",
+			Labels: []RegionLabel{
+				{Key: fmt.Sprintf("k_%d", i), Value: fmt.Sprintf("v_%d", i)},
+			},
+			RuleType: "key-range",
+			Data:     MakeKeyRanges("", ""),
+		})
+	}
+	patch.DeleteRules = append(patch.DeleteRules, "rule_1")
+	err = labeler.Patch(patch)
+	re.NoError(err)
+	allRules = labeler.GetAllLabelRules()
+	re.Len(allRules, 1)
+	re.Equal("rule_1", allRules[0].ID)
+	re.Len(allRules[0].Labels, 1)
+	re.Equal("k_3", allRules[0].Labels[0].Key)
 }
 
 func TestIndex(t *testing.T) {
@@ -140,10 +215,10 @@ func TestIndex(t *testing.T) {
 	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
 	re.NoError(err)
 	rules := []*LabelRule{
-		{ID: "rule0", Labels: []RegionLabel{{Key: "k1", Value: "v0"}}, RuleType: "key-range", Data: makeKeyRanges("", "")},
-		{ID: "rule1", Index: 1, Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: makeKeyRanges("1234", "5678")},
-		{ID: "rule2", Index: 2, Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: makeKeyRanges("ab12", "cd12")},
-		{ID: "rule3", Index: 1, Labels: []RegionLabel{{Key: "k2", Value: "v3"}}, RuleType: "key-range", Data: makeKeyRanges("abcd", "efef")},
+		{ID: "rule0", Labels: []RegionLabel{{Key: "k1", Value: "v0"}}, RuleType: "key-range", Data: MakeKeyRanges("", "")},
+		{ID: "rule1", Index: 1, Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: MakeKeyRanges("1234", "5678")},
+		{ID: "rule2", Index: 2, Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: MakeKeyRanges("ab12", "cd12")},
+		{ID: "rule3", Index: 1, Labels: []RegionLabel{{Key: "k2", Value: "v3"}}, RuleType: "key-range", Data: MakeKeyRanges("abcd", "efef")},
 	}
 	for _, r := range rules {
 		err := labeler.SetLabelRule(r)
@@ -182,9 +257,9 @@ func TestSaveLoadRule(t *testing.T) {
 	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
 	re.NoError(err)
 	rules := []*LabelRule{
-		{ID: "rule1", Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: makeKeyRanges("1234", "5678")},
-		{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: makeKeyRanges("ab12", "cd12")},
-		{ID: "rule3", Labels: []RegionLabel{{Key: "k3", Value: "v3"}}, RuleType: "key-range", Data: makeKeyRanges("abcd", "efef")},
+		{ID: "rule1", Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: MakeKeyRanges("1234", "5678")},
+		{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: MakeKeyRanges("ab12", "cd12")},
+		{ID: "rule3", Labels: []RegionLabel{{Key: "k3", Value: "v3"}}, RuleType: "key-range", Data: MakeKeyRanges("abcd", "efef")},
 	}
 	for _, r := range rules {
 		err := labeler.SetLabelRule(r)
@@ -227,9 +302,9 @@ func TestKeyRange(t *testing.T) {
 	labeler, err := NewRegionLabeler(context.Background(), store, time.Millisecond*10)
 	re.NoError(err)
 	rules := []*LabelRule{
-		{ID: "rule1", Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: makeKeyRanges("1234", "5678")},
-		{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: makeKeyRanges("ab12", "cd12")},
-		{ID: "rule3", Labels: []RegionLabel{{Key: "k3", Value: "v3"}}, RuleType: "key-range", Data: makeKeyRanges("abcd", "efef")},
+		{ID: "rule1", Labels: []RegionLabel{{Key: "k1", Value: "v1"}}, RuleType: "key-range", Data: MakeKeyRanges("1234", "5678")},
+		{ID: "rule2", Labels: []RegionLabel{{Key: "k2", Value: "v2"}}, RuleType: "key-range", Data: MakeKeyRanges("ab12", "cd12")},
+		{ID: "rule3", Labels: []RegionLabel{{Key: "k3", Value: "v3"}}, RuleType: "key-range", Data: MakeKeyRanges("abcd", "efef")},
 	}
 	for _, r := range rules {
 		err := labeler.SetLabelRule(r)
@@ -274,7 +349,7 @@ func TestLabelerRuleTTL(t *testing.T) {
 				{Key: "k1", Value: "v1"},
 			},
 			RuleType: "key-range",
-			Data:     makeKeyRanges("1234", "5678")},
+			Data:     MakeKeyRanges("1234", "5678")},
 		{
 			ID: "rule2",
 			Labels: []RegionLabel{
@@ -282,13 +357,13 @@ func TestLabelerRuleTTL(t *testing.T) {
 			},
 			RuleType: "key-range",
 
-			Data: makeKeyRanges("1234", "5678")},
+			Data: MakeKeyRanges("1234", "5678")},
 
 		{
 			ID:       "rule3",
 			Labels:   []RegionLabel{{Key: "k3", Value: "v3", TTL: "1h"}},
 			RuleType: "key-range",
-			Data:     makeKeyRanges("1234", "5678")},
+			Data:     MakeKeyRanges("1234", "5678")},
 	}
 
 	start, _ := hex.DecodeString("1234")
@@ -354,7 +429,7 @@ func TestGC(t *testing.T) {
 			ID:       fmt.Sprintf("rule%d", id),
 			Labels:   labels,
 			RuleType: "key-range",
-			Data:     makeKeyRanges("1234", "5678")}
+			Data:     MakeKeyRanges("1234", "5678")}
 		err := labeler.SetLabelRule(rule)
 		re.NoError(err)
 	}
@@ -379,12 +454,4 @@ func TestGC(t *testing.T) {
 	currentRuleLen := len(labeler.labelRules)
 	labeler.RUnlock()
 	re.LessOrEqual(currentRuleLen, 5)
-}
-
-func makeKeyRanges(keys ...string) []interface{} {
-	var res []interface{}
-	for i := 0; i < len(keys); i += 2 {
-		res = append(res, map[string]interface{}{"start_key": keys[i], "end_key": keys[i+1]})
-	}
-	return res
 }

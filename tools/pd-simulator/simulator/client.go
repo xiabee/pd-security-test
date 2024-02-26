@@ -149,21 +149,22 @@ func (c *client) createHeartbeatStream() (pdpb.PD_RegionHeartbeatClient, context
 		cancel context.CancelFunc
 		ctx    context.Context
 	)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 	for {
 		ctx, cancel = context.WithCancel(c.ctx)
 		stream, err = c.pdClient().RegionHeartbeat(ctx)
-		if err != nil {
-			simutil.Logger.Error("create region heartbeat stream error", zap.String("tag", c.tag), zap.Error(err))
-			cancel()
-			select {
-			case <-time.After(time.Second):
-				continue
-			case <-c.ctx.Done():
-				simutil.Logger.Info("cancel create stream loop")
-				return nil, ctx, cancel
-			}
+		if err == nil {
+			break
 		}
-		break
+		simutil.Logger.Error("create region heartbeat stream error", zap.String("tag", c.tag), zap.Error(err))
+		cancel()
+		select {
+		case <-c.ctx.Done():
+			simutil.Logger.Info("cancel create stream loop")
+			return nil, ctx, cancel
+		case <-ticker.C:
+		}
 	}
 	return stream, ctx, cancel
 }
@@ -339,7 +340,7 @@ func (c *client) PutPDConfig(config *PDConfig) error {
 	}
 	if len(config.LocationLabels) > 0 {
 		path := fmt.Sprintf("%s/%s/config", c.url, httpPrefix)
-		data := make(map[string]interface{})
+		data := make(map[string]any)
 		data["location-labels"] = config.LocationLabels
 		content, err := json.Marshal(data)
 		if err != nil {

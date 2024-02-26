@@ -19,10 +19,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/keyspace"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server/apiv2/handlers"
 	"github.com/tikv/pd/tests"
@@ -45,20 +46,24 @@ func TestKeyspaceTestSuite(t *testing.T) {
 }
 
 func (suite *keyspaceTestSuite) SetupTest() {
+	re := suite.Require()
 	ctx, cancel := context.WithCancel(context.Background())
 	suite.cleanup = cancel
 	cluster, err := tests.NewTestCluster(ctx, 1)
 	suite.cluster = cluster
-	suite.NoError(err)
-	suite.NoError(cluster.RunInitialServers())
-	suite.NotEmpty(cluster.WaitLeader())
-	suite.server = cluster.GetServer(cluster.GetLeader())
-	suite.NoError(suite.server.BootstrapCluster())
+	re.NoError(err)
+	re.NoError(cluster.RunInitialServers())
+	re.NotEmpty(cluster.WaitLeader())
+	suite.server = cluster.GetLeaderServer()
+	re.NoError(suite.server.BootstrapCluster())
+	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion", "return(true)"))
 }
 
 func (suite *keyspaceTestSuite) TearDownTest() {
+	re := suite.Require()
 	suite.cleanup()
 	suite.cluster.Destroy()
+	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion"))
 }
 
 func (suite *keyspaceTestSuite) TestCreateLoadKeyspace() {
@@ -68,8 +73,8 @@ func (suite *keyspaceTestSuite) TestCreateLoadKeyspace() {
 		loaded := mustLoadKeyspaces(re, suite.server, created.Name)
 		re.Equal(created, loaded)
 	}
-	defaultKeyspace := mustLoadKeyspaces(re, suite.server, keyspace.DefaultKeyspaceName)
-	re.Equal(keyspace.DefaultKeyspaceName, defaultKeyspace.Name)
+	defaultKeyspace := mustLoadKeyspaces(re, suite.server, utils.DefaultKeyspaceName)
+	re.Equal(utils.DefaultKeyspaceName, defaultKeyspace.Name)
 	re.Equal(keyspacepb.KeyspaceState_ENABLED, defaultKeyspace.State)
 }
 
@@ -120,7 +125,7 @@ func (suite *keyspaceTestSuite) TestUpdateKeyspaceState() {
 		re.Equal(keyspacepb.KeyspaceState_TOMBSTONE, tombstone.State)
 	}
 	// Changing default keyspace's state is NOT allowed.
-	success, _ := sendUpdateStateRequest(re, suite.server, keyspace.DefaultKeyspaceName, &handlers.UpdateStateParam{State: "disabled"})
+	success, _ := sendUpdateStateRequest(re, suite.server, utils.DefaultKeyspaceName, &handlers.UpdateStateParam{State: "disabled"})
 	re.False(success)
 }
 
@@ -130,11 +135,11 @@ func (suite *keyspaceTestSuite) TestLoadRangeKeyspace() {
 	loadResponse := sendLoadRangeRequest(re, suite.server, "", "")
 	re.Empty(loadResponse.NextPageToken) // Load response should contain no more pages.
 	// Load response should contain all created keyspace and a default.
-	re.Equal(len(keyspaces)+1, len(loadResponse.Keyspaces))
+	re.Len(loadResponse.Keyspaces, len(keyspaces)+1)
 	for i, created := range keyspaces {
 		re.Equal(created, loadResponse.Keyspaces[i+1].KeyspaceMeta)
 	}
-	re.Equal(keyspace.DefaultKeyspaceName, loadResponse.Keyspaces[0].Name)
+	re.Equal(utils.DefaultKeyspaceName, loadResponse.Keyspaces[0].Name)
 	re.Equal(keyspacepb.KeyspaceState_ENABLED, loadResponse.Keyspaces[0].State)
 }
 
@@ -149,7 +154,7 @@ func mustMakeTestKeyspaces(re *require.Assertions, server *tests.TestServer, cou
 			Name:   fmt.Sprintf("test_keyspace_%d", i),
 			Config: testConfig,
 		}
-		resultMeta[i] = mustCreateKeyspace(re, server, createRequest)
+		resultMeta[i] = MustCreateKeyspace(re, server, createRequest)
 	}
 	return resultMeta
 }

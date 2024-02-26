@@ -49,14 +49,27 @@ var ControllerConfigPathPrefixBytes = []byte(controllerConfigPathPrefix)
 
 // ResourceManagerClient manages resource group info and token request.
 type ResourceManagerClient interface {
-	ListResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, error)
-	GetResourceGroup(ctx context.Context, resourceGroupName string) (*rmpb.ResourceGroup, error)
+	ListResourceGroups(ctx context.Context, opts ...GetResourceGroupOption) ([]*rmpb.ResourceGroup, error)
+	GetResourceGroup(ctx context.Context, resourceGroupName string, opts ...GetResourceGroupOption) (*rmpb.ResourceGroup, error)
 	AddResourceGroup(ctx context.Context, metaGroup *rmpb.ResourceGroup) (string, error)
 	ModifyResourceGroup(ctx context.Context, metaGroup *rmpb.ResourceGroup) (string, error)
 	DeleteResourceGroup(ctx context.Context, resourceGroupName string) (string, error)
 	LoadResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, int64, error)
 	AcquireTokenBuckets(ctx context.Context, request *rmpb.TokenBucketsRequest) ([]*rmpb.TokenBucketResponse, error)
 	Watch(ctx context.Context, key []byte, opts ...OpOption) (chan []*meta_storagepb.Event, error)
+}
+
+// GetResourceGroupOp represents available options when getting resource group.
+type GetResourceGroupOp struct {
+	withRUStats bool
+}
+
+// GetResourceGroupOption configures GetResourceGroupOp.
+type GetResourceGroupOption func(*GetResourceGroupOp)
+
+// WithRUStats specifies to return resource group with ru statistics data.
+func WithRUStats(op *GetResourceGroupOp) {
+	op.withRUStats = true
 }
 
 // resourceManagerClient gets the ResourceManager client of current PD leader.
@@ -76,12 +89,18 @@ func (c *client) gRPCErrorHandler(err error) {
 }
 
 // ListResourceGroups loads and returns all metadata of resource groups.
-func (c *client) ListResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, error) {
+func (c *client) ListResourceGroups(ctx context.Context, ops ...GetResourceGroupOption) ([]*rmpb.ResourceGroup, error) {
 	cc, err := c.resourceManagerClient()
 	if err != nil {
 		return nil, err
 	}
-	req := &rmpb.ListResourceGroupsRequest{}
+	getOp := &GetResourceGroupOp{}
+	for _, op := range ops {
+		op(getOp)
+	}
+	req := &rmpb.ListResourceGroupsRequest{
+		WithRuStats: getOp.withRUStats,
+	}
 	resp, err := cc.ListResourceGroups(ctx, req)
 	if err != nil {
 		c.gRPCErrorHandler(err)
@@ -94,13 +113,18 @@ func (c *client) ListResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup,
 	return resp.GetGroups(), nil
 }
 
-func (c *client) GetResourceGroup(ctx context.Context, resourceGroupName string) (*rmpb.ResourceGroup, error) {
+func (c *client) GetResourceGroup(ctx context.Context, resourceGroupName string, ops ...GetResourceGroupOption) (*rmpb.ResourceGroup, error) {
 	cc, err := c.resourceManagerClient()
 	if err != nil {
 		return nil, err
 	}
+	getOp := &GetResourceGroupOp{}
+	for _, op := range ops {
+		op(getOp)
+	}
 	req := &rmpb.GetResourceGroupRequest{
 		ResourceGroupName: resourceGroupName,
+		WithRuStats:       getOp.withRUStats,
 	}
 	resp, err := cc.GetResourceGroup(ctx, req)
 	if err != nil {
@@ -261,11 +285,16 @@ func (c *client) createTokenDispatcher() {
 		tokenBatchController: newTokenBatchController(
 			make(chan *tokenRequest, 1)),
 	}
+	c.wg.Add(1)
 	go c.handleResourceTokenDispatcher(dispatcherCtx, dispatcher.tokenBatchController)
 	c.tokenDispatcher = dispatcher
 }
 
 func (c *client) handleResourceTokenDispatcher(dispatcherCtx context.Context, tbc *tokenBatchController) {
+	defer func() {
+		log.Info("[resource manager] exit resource token dispatcher")
+		c.wg.Done()
+	}()
 	var (
 		connection   resourceManagerConnectionContext
 		firstRequest *tokenRequest
@@ -348,6 +377,8 @@ func (c *client) tryResourceManagerConnect(ctx context.Context, connection *reso
 		err    error
 		stream rmpb.ResourceManager_AcquireTokenBucketsClient
 	)
+	ticker := time.NewTicker(retryInterval)
+	defer ticker.Stop()
 	for i := 0; i < maxRetryTimes; i++ {
 		cc, err := c.resourceManagerClient()
 		if err != nil {
@@ -365,7 +396,7 @@ func (c *client) tryResourceManagerConnect(ctx context.Context, connection *reso
 		select {
 		case <-ctx.Done():
 			return err
-		case <-time.After(retryInterval):
+		case <-ticker.C:
 		}
 	}
 	return err

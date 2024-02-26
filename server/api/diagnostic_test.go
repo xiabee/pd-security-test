@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -24,10 +25,8 @@ import (
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
-	"github.com/tikv/pd/pkg/utils/apiutil"
 	tu "github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 )
 
@@ -65,10 +64,12 @@ func (suite *diagnosticTestSuite) TearDownSuite() {
 
 func (suite *diagnosticTestSuite) checkStatus(status string, url string) {
 	re := suite.Require()
+	err := tu.CheckGetUntilStatusCode(re, testDialClient, url, http.StatusOK)
+	re.NoError(err)
 	suite.Eventually(func() bool {
-		result := &cluster.DiagnosticResult{}
+		result := &schedulers.DiagnosticResult{}
 		err := tu.ReadGetJSON(re, testDialClient, url, result)
-		suite.NoError(err)
+		re.NoError(err)
 		return result.Status == status
 	}, time.Second, time.Millisecond*50)
 }
@@ -78,59 +79,59 @@ func (suite *diagnosticTestSuite) TestSchedulerDiagnosticAPI() {
 	addr := suite.configPrefix
 	cfg := &config.Config{}
 	err := tu.ReadGetJSON(re, testDialClient, addr, cfg)
-	suite.NoError(err)
+	re.NoError(err)
 
-	suite.NoError(tu.ReadGetJSON(re, testDialClient, addr, cfg))
-	suite.True(cfg.Schedule.EnableDiagnostic)
+	re.NoError(tu.ReadGetJSON(re, testDialClient, addr, cfg))
+	re.True(cfg.Schedule.EnableDiagnostic)
 
-	ms := map[string]interface{}{
+	ms := map[string]any{
 		"enable-diagnostic": "true",
 		"max-replicas":      1,
 	}
 	postData, err := json.Marshal(ms)
-	suite.NoError(err)
-	suite.NoError(tu.CheckPostJSON(testDialClient, addr, postData, tu.StatusOK(re)))
+	re.NoError(err)
+	re.NoError(tu.CheckPostJSON(testDialClient, addr, postData, tu.StatusOK(re)))
 	cfg = &config.Config{}
-	suite.NoError(tu.ReadGetJSON(re, testDialClient, addr, cfg))
-	suite.True(cfg.Schedule.EnableDiagnostic)
+	re.NoError(tu.ReadGetJSON(re, testDialClient, addr, cfg))
+	re.True(cfg.Schedule.EnableDiagnostic)
 
 	balanceRegionURL := suite.urlPrefix + "/" + schedulers.BalanceRegionName
-	result := &cluster.DiagnosticResult{}
+	result := &schedulers.DiagnosticResult{}
 	err = tu.ReadGetJSON(re, testDialClient, balanceRegionURL, result)
-	suite.NoError(err)
-	suite.Equal("disabled", result.Status)
+	re.NoError(err)
+	re.Equal("disabled", result.Status)
 
 	evictLeaderURL := suite.urlPrefix + "/" + schedulers.EvictLeaderName
-	suite.NoError(tu.CheckGetJSON(testDialClient, evictLeaderURL, nil, tu.StatusNotOK(re)))
+	re.NoError(tu.CheckGetJSON(testDialClient, evictLeaderURL, nil, tu.StatusNotOK(re)))
 
-	input := make(map[string]interface{})
+	input := make(map[string]any)
 	input["name"] = schedulers.BalanceRegionName
 	body, err := json.Marshal(input)
-	suite.NoError(err)
-	err = tu.CheckPostJSON(testDialClient, suite.schedulerPrifex, body, tu.StatusOK(suite.Require()))
-	suite.NoError(err)
+	re.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, suite.schedulerPrifex, body, tu.StatusOK(re))
+	re.NoError(err)
 	suite.checkStatus("pending", balanceRegionURL)
 
-	input = make(map[string]interface{})
+	input = make(map[string]any)
 	input["delay"] = 30
 	pauseArgs, err := json.Marshal(input)
-	suite.NoError(err)
+	re.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, suite.schedulerPrifex+"/"+schedulers.BalanceRegionName, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	re.NoError(err)
 	suite.checkStatus("paused", balanceRegionURL)
 
 	input["delay"] = 0
 	pauseArgs, err = json.Marshal(input)
-	suite.NoError(err)
+	re.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, suite.schedulerPrifex+"/"+schedulers.BalanceRegionName, pauseArgs, tu.StatusOK(re))
-	suite.NoError(err)
+	re.NoError(err)
 	suite.checkStatus("pending", balanceRegionURL)
 
 	mustPutRegion(re, suite.svr, 1000, 1, []byte("a"), []byte("b"), core.SetApproximateSize(60))
 	suite.checkStatus("normal", balanceRegionURL)
 
 	deleteURL := fmt.Sprintf("%s/%s", suite.schedulerPrifex, schedulers.BalanceRegionName)
-	_, err = apiutil.DoDelete(testDialClient, deleteURL)
-	suite.NoError(err)
+	err = tu.CheckDelete(testDialClient, deleteURL, tu.StatusOK(re))
+	re.NoError(err)
 	suite.checkStatus("disabled", balanceRegionURL)
 }

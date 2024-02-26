@@ -42,7 +42,7 @@ var dialClient = &http.Client{
 
 func sendLoadRangeRequest(re *require.Assertions, server *tests.TestServer, token, limit string) *handlers.LoadAllKeyspacesResponse {
 	// Construct load range request.
-	httpReq, err := http.NewRequest(http.MethodGet, server.GetAddr()+keyspacesPrefix, nil)
+	httpReq, err := http.NewRequest(http.MethodGet, server.GetAddr()+keyspacesPrefix, http.NoBody)
 	re.NoError(err)
 	query := httpReq.URL.Query()
 	query.Add("page_token", token)
@@ -79,7 +79,8 @@ func sendUpdateStateRequest(re *require.Assertions, server *tests.TestServer, na
 	return true, meta.KeyspaceMeta
 }
 
-func mustCreateKeyspace(re *require.Assertions, server *tests.TestServer, request *handlers.CreateKeyspaceParams) *keyspacepb.KeyspaceMeta {
+// MustCreateKeyspace creates a keyspace with HTTP API.
+func MustCreateKeyspace(re *require.Assertions, server *tests.TestServer, request *handlers.CreateKeyspaceParams) *keyspacepb.KeyspaceMeta {
 	data, err := json.Marshal(request)
 	re.NoError(err)
 	httpReq, err := http.NewRequest(http.MethodPost, server.GetAddr()+keyspacesPrefix, bytes.NewBuffer(data))
@@ -131,9 +132,10 @@ func mustLoadKeyspaces(re *require.Assertions, server *tests.TestServer, name st
 	return meta.KeyspaceMeta
 }
 
-func sendLoadKeyspaceGroupRequest(re *require.Assertions, server *tests.TestServer, token, limit string) []*endpoint.KeyspaceGroup {
+// MustLoadKeyspaceGroups loads all keyspace groups from the server.
+func MustLoadKeyspaceGroups(re *require.Assertions, server *tests.TestServer, token, limit string) []*endpoint.KeyspaceGroup {
 	// Construct load range request.
-	httpReq, err := http.NewRequest(http.MethodGet, server.GetAddr()+keyspaceGroupsPrefix, nil)
+	httpReq, err := http.NewRequest(http.MethodGet, server.GetAddr()+keyspaceGroupsPrefix, http.NoBody)
 	re.NoError(err)
 	query := httpReq.URL.Query()
 	query.Add("page_token", token)
@@ -143,16 +145,15 @@ func sendLoadKeyspaceGroupRequest(re *require.Assertions, server *tests.TestServ
 	httpResp, err := dialClient.Do(httpReq)
 	re.NoError(err)
 	defer httpResp.Body.Close()
-	re.Equal(http.StatusOK, httpResp.StatusCode)
-	// Receive & decode response.
 	data, err := io.ReadAll(httpResp.Body)
 	re.NoError(err)
+	re.Equal(http.StatusOK, httpResp.StatusCode, string(data))
 	var resp []*endpoint.KeyspaceGroup
 	re.NoError(json.Unmarshal(data, &resp))
 	return resp
 }
 
-func tryCreateKeyspaceGroup(re *require.Assertions, server *tests.TestServer, request *handlers.CreateKeyspaceGroupParams) int {
+func tryCreateKeyspaceGroup(re *require.Assertions, server *tests.TestServer, request *handlers.CreateKeyspaceGroupParams) (int, string) {
 	data, err := json.Marshal(request)
 	re.NoError(err)
 	httpReq, err := http.NewRequest(http.MethodPost, server.GetAddr()+keyspaceGroupsPrefix, bytes.NewBuffer(data))
@@ -160,37 +161,61 @@ func tryCreateKeyspaceGroup(re *require.Assertions, server *tests.TestServer, re
 	resp, err := dialClient.Do(httpReq)
 	re.NoError(err)
 	defer resp.Body.Close()
-	return resp.StatusCode
+	data, err = io.ReadAll(resp.Body)
+	re.NoError(err)
+	return resp.StatusCode, string(data)
 }
 
 // MustLoadKeyspaceGroupByID loads the keyspace group by ID with HTTP API.
 func MustLoadKeyspaceGroupByID(re *require.Assertions, server *tests.TestServer, id uint32) *endpoint.KeyspaceGroup {
-	httpReq, err := http.NewRequest(http.MethodGet, server.GetAddr()+keyspaceGroupsPrefix+fmt.Sprintf("/%d", id), nil)
+	kg, code := TryLoadKeyspaceGroupByID(re, server, id)
+	re.Equal(http.StatusOK, code)
+	return kg
+}
+
+// TryLoadKeyspaceGroupByID loads the keyspace group by ID with HTTP API.
+func TryLoadKeyspaceGroupByID(re *require.Assertions, server *tests.TestServer, id uint32) (*endpoint.KeyspaceGroup, int) {
+	httpReq, err := http.NewRequest(http.MethodGet, server.GetAddr()+keyspaceGroupsPrefix+fmt.Sprintf("/%d", id), http.NoBody)
 	re.NoError(err)
 	resp, err := dialClient.Do(httpReq)
 	re.NoError(err)
 	defer resp.Body.Close()
-	re.Equal(http.StatusOK, resp.StatusCode)
 	data, err := io.ReadAll(resp.Body)
 	re.NoError(err)
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.StatusCode
+	}
+
 	var kg endpoint.KeyspaceGroup
 	re.NoError(json.Unmarshal(data, &kg))
-	return &kg
+	return &kg, resp.StatusCode
 }
 
 // MustCreateKeyspaceGroup creates a keyspace group with HTTP API.
 func MustCreateKeyspaceGroup(re *require.Assertions, server *tests.TestServer, request *handlers.CreateKeyspaceGroupParams) {
-	code := tryCreateKeyspaceGroup(re, server, request)
-	re.Equal(http.StatusOK, code)
+	code, data := tryCreateKeyspaceGroup(re, server, request)
+	re.Equal(http.StatusOK, code, data)
 }
 
 // FailCreateKeyspaceGroupWithCode fails to create a keyspace group with HTTP API.
 func FailCreateKeyspaceGroupWithCode(re *require.Assertions, server *tests.TestServer, request *handlers.CreateKeyspaceGroupParams, expect int) {
-	code := tryCreateKeyspaceGroup(re, server, request)
-	re.Equal(expect, code)
+	code, data := tryCreateKeyspaceGroup(re, server, request)
+	re.Equal(expect, code, data)
 }
 
-// MustSplitKeyspaceGroup updates a keyspace group with HTTP API.
+// MustDeleteKeyspaceGroup deletes a keyspace group with HTTP API.
+func MustDeleteKeyspaceGroup(re *require.Assertions, server *tests.TestServer, id uint32) {
+	httpReq, err := http.NewRequest(http.MethodDelete, server.GetAddr()+keyspaceGroupsPrefix+fmt.Sprintf("/%d", id), http.NoBody)
+	re.NoError(err)
+	resp, err := dialClient.Do(httpReq)
+	re.NoError(err)
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	re.NoError(err)
+	re.Equal(http.StatusOK, resp.StatusCode, string(data))
+}
+
+// MustSplitKeyspaceGroup splits a keyspace group with HTTP API.
 func MustSplitKeyspaceGroup(re *require.Assertions, server *tests.TestServer, id uint32, request *handlers.SplitKeyspaceGroupByIDParams) {
 	data, err := json.Marshal(request)
 	re.NoError(err)
@@ -200,16 +225,35 @@ func MustSplitKeyspaceGroup(re *require.Assertions, server *tests.TestServer, id
 	resp, err := dialClient.Do(httpReq)
 	re.NoError(err)
 	defer resp.Body.Close()
-	re.Equal(http.StatusOK, resp.StatusCode)
+	data, err = io.ReadAll(resp.Body)
+	re.NoError(err)
+	re.Equal(http.StatusOK, resp.StatusCode, string(data))
 }
 
 // MustFinishSplitKeyspaceGroup finishes a keyspace group split with HTTP API.
 func MustFinishSplitKeyspaceGroup(re *require.Assertions, server *tests.TestServer, id uint32) {
-	httpReq, err := http.NewRequest(http.MethodDelete, server.GetAddr()+keyspaceGroupsPrefix+fmt.Sprintf("/%d/split", id), nil)
+	httpReq, err := http.NewRequest(http.MethodDelete, server.GetAddr()+keyspaceGroupsPrefix+fmt.Sprintf("/%d/split", id), http.NoBody)
 	re.NoError(err)
 	// Send request.
 	resp, err := dialClient.Do(httpReq)
 	re.NoError(err)
 	defer resp.Body.Close()
-	re.Equal(http.StatusOK, resp.StatusCode)
+	data, err := io.ReadAll(resp.Body)
+	re.NoError(err)
+	re.Equal(http.StatusOK, resp.StatusCode, string(data))
+}
+
+// MustMergeKeyspaceGroup merges keyspace groups with HTTP API.
+func MustMergeKeyspaceGroup(re *require.Assertions, server *tests.TestServer, id uint32, request *handlers.MergeKeyspaceGroupsParams) {
+	data, err := json.Marshal(request)
+	re.NoError(err)
+	httpReq, err := http.NewRequest(http.MethodPost, server.GetAddr()+keyspaceGroupsPrefix+fmt.Sprintf("/%d/merge", id), bytes.NewBuffer(data))
+	re.NoError(err)
+	// Send request.
+	resp, err := dialClient.Do(httpReq)
+	re.NoError(err)
+	defer resp.Body.Close()
+	data, err = io.ReadAll(resp.Body)
+	re.NoError(err)
+	re.Equal(http.StatusOK, resp.StatusCode, string(data))
 }

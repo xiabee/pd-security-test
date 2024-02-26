@@ -18,16 +18,16 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/tsopb"
 	"github.com/pingcap/log"
-	"github.com/pkg/errors"
 	bs "github.com/tikv/pd/pkg/basicserver"
 	"github.com/tikv/pd/pkg/mcs/registry"
 	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/grpcutil"
-	"github.com/tikv/pd/pkg/utils/tsoutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -35,7 +35,8 @@ import (
 
 // gRPC errors
 var (
-	ErrNotStarted = status.Errorf(codes.Unavailable, "server not started")
+	ErrNotStarted        = status.Errorf(codes.Unavailable, "server not started")
+	ErrClusterMismatched = status.Errorf(codes.Unavailable, "cluster mismatched")
 )
 
 var _ tsopb.TSOServer = (*Service)(nil)
@@ -52,13 +53,17 @@ func (d dummyRestService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("not implemented"))
 }
 
+// ConfigProvider is used to get tso config from the given
+// `bs.server` without modifying its interface.
+type ConfigProvider any
+
 // Service is the TSO grpc service.
 type Service struct {
 	*Server
 }
 
 // NewService creates a new TSO service.
-func NewService(svr bs.Server) registry.RegistrableService {
+func NewService[T ConfigProvider](svr bs.Server) registry.RegistrableService {
 	server, ok := svr.(*Server)
 	if !ok {
 		log.Fatal("create tso server failed")
@@ -81,21 +86,9 @@ func (s *Service) RegisterRESTHandler(userDefineHandlers map[string]http.Handler
 
 // Tso returns a stream of timestamps
 func (s *Service) Tso(stream tsopb.TSO_TsoServer) error {
-	var (
-		doneCh chan struct{}
-		errCh  chan error
-	)
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
 	for {
-		// Prevent unnecessary performance overhead of the channel.
-		if errCh != nil {
-			select {
-			case err := <-errCh:
-				return errors.WithStack(err)
-			default:
-			}
-		}
 		request, err := stream.Recv()
 		if err == io.EOF {
 			return nil
@@ -104,43 +97,31 @@ func (s *Service) Tso(stream tsopb.TSO_TsoServer) error {
 			return errors.WithStack(err)
 		}
 
-		streamCtx := stream.Context()
-		forwardedHost := grpcutil.GetForwardedHost(streamCtx)
-		if !s.IsLocalRequest(forwardedHost) {
-			clientConn, err := s.GetDelegateClient(s.ctx, forwardedHost)
-			if err != nil {
-				return errors.WithStack(err)
-			}
-
-			if errCh == nil {
-				doneCh = make(chan struct{})
-				defer close(doneCh)
-				errCh = make(chan error)
-			}
-
-			tsoProtoFactory := s.tsoProtoFactory
-			tsoRequest := tsoutil.NewTSOProtoRequest(forwardedHost, clientConn, request, stream)
-			s.tsoDispatcher.DispatchRequest(ctx, tsoRequest, tsoProtoFactory, doneCh, errCh)
-			continue
-		}
-
 		start := time.Now()
 		// TSO uses leader lease to determine validity. No need to check leader here.
 		if s.IsClosed() {
 			return status.Errorf(codes.Unknown, "server not started")
 		}
-		if request.GetHeader().GetClusterId() != s.clusterID {
+		header := request.GetHeader()
+		clusterID := header.GetClusterId()
+		if clusterID != s.clusterID {
 			return status.Errorf(
 				codes.FailedPrecondition, "mismatch cluster id, need %d but got %d",
-				s.clusterID, request.GetHeader().GetClusterId())
+				s.clusterID, clusterID)
 		}
+		keyspaceID := header.GetKeyspaceId()
+		keyspaceGroupID := header.GetKeyspaceGroupId()
+		dcLocation := request.GetDcLocation()
 		count := request.GetCount()
 		ts, keyspaceGroupBelongTo, err := s.keyspaceGroupManager.HandleTSORequest(
-			request.Header.KeyspaceId, request.Header.KeyspaceGroupId, request.GetDcLocation(), count)
+			ctx,
+			keyspaceID, keyspaceGroupID,
+			dcLocation, count)
 		if err != nil {
 			return status.Errorf(codes.Unknown, err.Error())
 		}
-		tsoHandleDuration.Observe(time.Since(start).Seconds())
+		keyspaceGroupIDStr := strconv.FormatUint(uint64(keyspaceGroupID), 10)
+		tsoHandleDuration.WithLabelValues(keyspaceGroupIDStr).Observe(time.Since(start).Seconds())
 		response := &tsopb.TsoResponse{
 			Header:    s.header(keyspaceGroupBelongTo),
 			Timestamp: &ts,
@@ -150,6 +131,100 @@ func (s *Service) Tso(stream tsopb.TSO_TsoServer) error {
 			return errors.WithStack(err)
 		}
 	}
+}
+
+// FindGroupByKeyspaceID returns the keyspace group that the keyspace belongs to.
+func (s *Service) FindGroupByKeyspaceID(
+	ctx context.Context, request *tsopb.FindGroupByKeyspaceIDRequest,
+) (*tsopb.FindGroupByKeyspaceIDResponse, error) {
+	respKeyspaceGroup := request.GetHeader().GetKeyspaceGroupId()
+	if errorType, err := s.validRequest(request.GetHeader()); err != nil {
+		return &tsopb.FindGroupByKeyspaceIDResponse{
+			Header: s.wrapErrorToHeader(errorType, err.Error(), respKeyspaceGroup),
+		}, nil
+	}
+
+	keyspaceID := request.GetKeyspaceId()
+	am, keyspaceGroup, keyspaceGroupID, err := s.keyspaceGroupManager.FindGroupByKeyspaceID(keyspaceID)
+	if err != nil {
+		return &tsopb.FindGroupByKeyspaceIDResponse{
+			Header: s.wrapErrorToHeader(tsopb.ErrorType_UNKNOWN, err.Error(), keyspaceGroupID),
+		}, nil
+	}
+	if keyspaceGroup == nil {
+		return &tsopb.FindGroupByKeyspaceIDResponse{
+			Header: s.wrapErrorToHeader(
+				tsopb.ErrorType_UNKNOWN, "keyspace group not found", keyspaceGroupID),
+		}, nil
+	}
+
+	members := make([]*tsopb.KeyspaceGroupMember, 0, len(keyspaceGroup.Members))
+	for _, member := range keyspaceGroup.Members {
+		members = append(members, &tsopb.KeyspaceGroupMember{
+			Address: member.Address,
+			// TODO: watch the keyspace groups' primary serving address changes
+			// to get the latest primary serving addresses of all keyspace groups.
+			IsPrimary: strings.EqualFold(member.Address, am.GetLeaderAddr()),
+		})
+	}
+
+	var splitState *tsopb.SplitState
+	if keyspaceGroup.SplitState != nil {
+		splitState = &tsopb.SplitState{
+			SplitSource: keyspaceGroup.SplitState.SplitSource,
+		}
+	}
+
+	return &tsopb.FindGroupByKeyspaceIDResponse{
+		Header: s.header(keyspaceGroupID),
+		KeyspaceGroup: &tsopb.KeyspaceGroup{
+			Id:         keyspaceGroupID,
+			UserKind:   keyspaceGroup.UserKind,
+			SplitState: splitState,
+			Members:    members,
+		},
+	}, nil
+}
+
+// GetMinTS gets the minimum timestamp across all keyspace groups served by the TSO server
+// who receives and handles the request.
+func (s *Service) GetMinTS(
+	ctx context.Context, request *tsopb.GetMinTSRequest,
+) (*tsopb.GetMinTSResponse, error) {
+	respKeyspaceGroup := request.GetHeader().GetKeyspaceGroupId()
+	if errorType, err := s.validRequest(request.GetHeader()); err != nil {
+		return &tsopb.GetMinTSResponse{
+			Header: s.wrapErrorToHeader(errorType, err.Error(), respKeyspaceGroup),
+		}, nil
+	}
+
+	minTS, kgAskedCount, kgTotalCount, err := s.keyspaceGroupManager.GetMinTS(request.GetDcLocation())
+	if err != nil {
+		return &tsopb.GetMinTSResponse{
+			Header: s.wrapErrorToHeader(
+				tsopb.ErrorType_UNKNOWN, err.Error(), respKeyspaceGroup),
+			Timestamp:             &minTS,
+			KeyspaceGroupsServing: kgAskedCount,
+			KeyspaceGroupsTotal:   kgTotalCount,
+		}, nil
+	}
+
+	return &tsopb.GetMinTSResponse{
+		Header:                s.header(respKeyspaceGroup),
+		Timestamp:             &minTS,
+		KeyspaceGroupsServing: kgAskedCount,
+		KeyspaceGroupsTotal:   kgTotalCount,
+	}, nil
+}
+
+func (s *Service) validRequest(header *tsopb.RequestHeader) (tsopb.ErrorType, error) {
+	if s.IsClosed() || s.keyspaceGroupManager == nil {
+		return tsopb.ErrorType_NOT_BOOTSTRAPPED, ErrNotStarted
+	}
+	if header == nil || header.GetClusterId() != s.clusterID {
+		return tsopb.ErrorType_CLUSTER_MISMATCHED, ErrClusterMismatched
+	}
+	return tsopb.ErrorType_OK, nil
 }
 
 func (s *Service) header(keyspaceGroupBelongTo uint32) *tsopb.ResponseHeader {
