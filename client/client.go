@@ -76,9 +76,9 @@ type Client interface {
 	GetClusterID(ctx context.Context) uint64
 	// GetAllMembers gets the members Info from PD
 	GetAllMembers(ctx context.Context) ([]*pdpb.Member, error)
-	// GetLeaderAddr returns current leader's address. It returns "" before
+	// GetLeaderURL returns current leader's URL. It returns "" before
 	// syncing leader from server.
-	GetLeaderAddr() string
+	GetLeaderURL() string
 	// GetRegion gets a region and its leader Peer from PD by key.
 	// The region may expire after split. Caller is responsible for caching and
 	// taking care of region change.
@@ -519,7 +519,7 @@ func newClientWithKeyspaceName(
 		return nil
 	}
 
-	// Create a PD service discovery with null keyspace id, then query the real id wth the keyspace name,
+	// Create a PD service discovery with null keyspace id, then query the real id with the keyspace name,
 	// finally update the keyspace id to the PD service discovery for the following interactions.
 	c.pdSvcDiscovery = newPDServiceDiscovery(
 		clientCtx, clientCancel, &c.wg, c.setServiceMode, updateKeyspaceIDCb, nullKeyspaceID, c.svrUrls, c.tlsCfg, c.option)
@@ -575,7 +575,7 @@ func (c *client) setup() error {
 	}
 
 	// Register callbacks
-	c.pdSvcDiscovery.AddServingAddrSwitchedCallback(c.scheduleUpdateTokenConnection)
+	c.pdSvcDiscovery.AddServingURLSwitchedCallback(c.scheduleUpdateTokenConnection)
 
 	// Create dispatchers
 	c.createTokenDispatcher()
@@ -680,9 +680,9 @@ func (c *client) GetClusterID(context.Context) uint64 {
 	return c.pdSvcDiscovery.GetClusterID()
 }
 
-// GetLeaderAddr returns the leader address.
-func (c *client) GetLeaderAddr() string {
-	return c.pdSvcDiscovery.GetServingAddr()
+// GetLeaderURL returns the leader URL.
+func (c *client) GetLeaderURL() string {
+	return c.pdSvcDiscovery.GetServingURL()
 }
 
 // GetServiceDiscovery returns the client-side service discovery object
@@ -745,7 +745,7 @@ func (c *client) GetAllMembers(ctx context.Context) ([]*pdpb.Member, error) {
 // follower pd client and the context which holds forward information.
 func (c *client) getClientAndContext(ctx context.Context) (pdpb.PDClient, context.Context) {
 	serviceClient := c.pdSvcDiscovery.GetServiceClient()
-	if serviceClient == nil {
+	if serviceClient == nil || serviceClient.GetClientConn() == nil {
 		return nil, ctx
 	}
 	return pdpb.NewPDClient(serviceClient.GetClientConn()), serviceClient.BuildGRPCTargetContext(ctx, true)
@@ -762,7 +762,7 @@ func (c *client) getRegionAPIClientAndContext(ctx context.Context, allowFollower
 		}
 	}
 	serviceClient = c.pdSvcDiscovery.GetServiceClient()
-	if serviceClient == nil {
+	if serviceClient == nil || serviceClient.GetClientConn() == nil {
 		return nil, ctx
 	}
 	return serviceClient, serviceClient.BuildGRPCTargetContext(ctx, !allowFollower)
@@ -773,10 +773,10 @@ func (c *client) GetTSAsync(ctx context.Context) TSFuture {
 }
 
 func (c *client) GetLocalTSAsync(ctx context.Context, dcLocation string) TSFuture {
-	defer trace.StartRegion(ctx, "GetLocalTSAsync").End()
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("GetLocalTSAsync", opentracing.ChildOf(span.Context()))
-		ctx = opentracing.ContextWithSpan(ctx, span)
+	defer trace.StartRegion(ctx, "pdclient.GetLocalTSAsync").End()
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.GetLocalTSAsync", opentracing.ChildOf(span.Context()))
+		defer span.Finish()
 	}
 
 	req := tsoReqPool.Get().(*tsoRequest)
@@ -791,10 +791,10 @@ func (c *client) GetLocalTSAsync(ctx context.Context, dcLocation string) TSFutur
 		return req
 	}
 
-	if err := tsoClient.dispatchRequest(dcLocation, req); err != nil {
+	if err := tsoClient.dispatchRequest(ctx, dcLocation, req); err != nil {
 		// Wait for a while and try again
 		time.Sleep(50 * time.Millisecond)
-		if err = tsoClient.dispatchRequest(dcLocation, req); err != nil {
+		if err = tsoClient.dispatchRequest(ctx, dcLocation, req); err != nil {
 			req.done <- err
 		}
 	}
@@ -875,8 +875,8 @@ func handleRegionResponse(res *pdpb.GetRegionResponse) *Region {
 }
 
 func (c *client) GetRegionFromMember(ctx context.Context, key []byte, memberURLs []string, opts ...GetRegionOption) (*Region, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.GetRegionFromMember", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.GetRegionFromMember", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -913,8 +913,8 @@ func (c *client) GetRegionFromMember(ctx context.Context, key []byte, memberURLs
 }
 
 func (c *client) GetRegion(ctx context.Context, key []byte, opts ...GetRegionOption) (*Region, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.GetRegion", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.GetRegion", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -951,8 +951,8 @@ func (c *client) GetRegion(ctx context.Context, key []byte, opts ...GetRegionOpt
 }
 
 func (c *client) GetPrevRegion(ctx context.Context, key []byte, opts ...GetRegionOption) (*Region, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.GetPrevRegion", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.GetPrevRegion", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -989,8 +989,8 @@ func (c *client) GetPrevRegion(ctx context.Context, key []byte, opts ...GetRegio
 }
 
 func (c *client) GetRegionByID(ctx context.Context, regionID uint64, opts ...GetRegionOption) (*Region, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.GetRegionByID", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.GetRegionByID", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -1027,8 +1027,8 @@ func (c *client) GetRegionByID(ctx context.Context, regionID uint64, opts ...Get
 }
 
 func (c *client) ScanRegions(ctx context.Context, key, endKey []byte, limit int, opts ...GetRegionOption) ([]*Region, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.ScanRegions", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.ScanRegions", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -1102,8 +1102,8 @@ func handleRegionsResponse(resp *pdpb.ScanRegionsResponse) []*Region {
 }
 
 func (c *client) GetStore(ctx context.Context, storeID uint64) (*metapb.Store, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.GetStore", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.GetStore", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -1146,8 +1146,8 @@ func (c *client) GetAllStores(ctx context.Context, opts ...GetStoreOption) ([]*m
 		opt(options)
 	}
 
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.GetAllStores", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.GetAllStores", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -1173,8 +1173,8 @@ func (c *client) GetAllStores(ctx context.Context, opts ...GetStoreOption) ([]*m
 }
 
 func (c *client) UpdateGCSafePoint(ctx context.Context, safePoint uint64) (uint64, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.UpdateGCSafePoint", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.UpdateGCSafePoint", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -1204,8 +1204,8 @@ func (c *client) UpdateGCSafePoint(ctx context.Context, safePoint uint64) (uint6
 // determine the safepoint for multiple services, it does not trigger a GC
 // job. Use UpdateGCSafePoint to trigger the GC job if needed.
 func (c *client) UpdateServiceGCSafePoint(ctx context.Context, serviceID string, ttl int64, safePoint uint64) (uint64, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.UpdateServiceGCSafePoint", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.UpdateServiceGCSafePoint", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 
@@ -1234,8 +1234,8 @@ func (c *client) UpdateServiceGCSafePoint(ctx context.Context, serviceID string,
 }
 
 func (c *client) ScatterRegion(ctx context.Context, regionID uint64) error {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.ScatterRegion", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.ScatterRegion", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	return c.scatterRegionsWithGroup(ctx, regionID, "")
@@ -1268,16 +1268,16 @@ func (c *client) scatterRegionsWithGroup(ctx context.Context, regionID uint64, g
 }
 
 func (c *client) ScatterRegions(ctx context.Context, regionsID []uint64, opts ...RegionsOption) (*pdpb.ScatterRegionResponse, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.ScatterRegions", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.ScatterRegions", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	return c.scatterRegionsWithOptions(ctx, regionsID, opts...)
 }
 
 func (c *client) SplitAndScatterRegions(ctx context.Context, splitKeys [][]byte, opts ...RegionsOption) (*pdpb.SplitAndScatterRegionsResponse, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.SplitAndScatterRegions", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.SplitAndScatterRegions", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -1304,8 +1304,8 @@ func (c *client) SplitAndScatterRegions(ctx context.Context, splitKeys [][]byte,
 }
 
 func (c *client) GetOperator(ctx context.Context, regionID uint64) (*pdpb.GetOperatorResponse, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.GetOperator", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.GetOperator", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -1327,8 +1327,8 @@ func (c *client) GetOperator(ctx context.Context, regionID uint64) (*pdpb.GetOpe
 
 // SplitRegions split regions by given split keys
 func (c *client) SplitRegions(ctx context.Context, splitKeys [][]byte, opts ...RegionsOption) (*pdpb.SplitRegionsResponse, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("pdclient.SplitRegions", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("pdclient.SplitRegions", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -1402,9 +1402,14 @@ func IsLeaderChange(err error) bool {
 		strings.Contains(errMsg, errs.NotServedErr)
 }
 
+const (
+	httpSchemePrefix  = "http://"
+	httpsSchemePrefix = "https://"
+)
+
 func trimHTTPPrefix(str string) string {
-	str = strings.TrimPrefix(str, "http://")
-	str = strings.TrimPrefix(str, "https://")
+	str = strings.TrimPrefix(str, httpSchemePrefix)
+	str = strings.TrimPrefix(str, httpsSchemePrefix)
 	return str
 }
 

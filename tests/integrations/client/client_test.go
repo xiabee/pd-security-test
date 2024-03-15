@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/docker/go-units"
+	"github.com/opentracing/basictracer-go"
+	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/meta_storagepb"
 	"github.com/pingcap/kvproto/pkg/metapb"
@@ -107,7 +109,12 @@ func TestClientLeaderChange(t *testing.T) {
 	defer cluster.Destroy()
 
 	endpoints := runServer(re, cluster)
-	cli := setupCli(re, ctx, endpoints)
+	endpointsWithWrongURL := append([]string{}, endpoints...)
+	// inject wrong http scheme
+	for i := range endpointsWithWrongURL {
+		endpointsWithWrongURL[i] = "https://" + strings.TrimPrefix(endpointsWithWrongURL[i], "http://")
+	}
+	cli := setupCli(re, ctx, endpointsWithWrongURL)
 	defer cli.Close()
 	innerCli, ok := cli.(interface{ GetServiceDiscovery() pd.ServiceDiscovery })
 	re.True(ok)
@@ -125,14 +132,14 @@ func TestClientLeaderChange(t *testing.T) {
 	re.True(cluster.CheckTSOUnique(ts1))
 
 	leader := cluster.GetLeader()
-	waitLeader(re, innerCli.GetServiceDiscovery(), cluster.GetServer(leader).GetConfig().ClientUrls)
+	waitLeader(re, innerCli.GetServiceDiscovery(), cluster.GetServer(leader))
 
 	err = cluster.GetServer(leader).Stop()
 	re.NoError(err)
 	leader = cluster.WaitLeader()
 	re.NotEmpty(leader)
 
-	waitLeader(re, innerCli.GetServiceDiscovery(), cluster.GetServer(leader).GetConfig().ClientUrls)
+	waitLeader(re, innerCli.GetServiceDiscovery(), cluster.GetServer(leader))
 
 	// Check TS won't fall back after leader changed.
 	testutil.Eventually(re, func() bool {
@@ -469,6 +476,22 @@ func TestGlobalAndLocalTSO(t *testing.T) {
 	re.NoError(err)
 	re.NoError(failpoint.Disable("github.com/tikv/pd/client/skipUpdateMember"))
 
+	recorder := basictracer.NewInMemoryRecorder()
+	tracer := basictracer.New(recorder)
+	span := tracer.StartSpan("trace")
+	ctx = opentracing.ContextWithSpan(ctx, span)
+	future := cli.GetLocalTSAsync(ctx, "error-dc")
+	spans := recorder.GetSpans()
+	re.Len(spans, 1)
+	_, _, err = future.Wait()
+	re.Error(err)
+	spans = recorder.GetSpans()
+	re.Len(spans, 1)
+	_, _, err = cli.GetTS(ctx)
+	re.NoError(err)
+	spans = recorder.GetSpans()
+	re.Len(spans, 3)
+
 	// Test the TSO follower proxy while enabling the Local TSO.
 	cli.UpdateOption(pd.EnableTSOFollowerProxy, true)
 	// Sleep a while here to prevent from canceling the ongoing TSO request.
@@ -764,6 +787,45 @@ func (suite *followerForwardAndHandleTestSuite) TestGetTsoAndRegionByFollowerFor
 	})
 }
 
+func (suite *followerForwardAndHandleTestSuite) TestGetRegionFromLeaderWhenNetworkErr() {
+	re := suite.Require()
+	ctx, cancel := context.WithCancel(suite.ctx)
+	defer cancel()
+
+	cluster := suite.cluster
+	re.NotEmpty(cluster.WaitLeader())
+	leader := cluster.GetLeaderServer()
+
+	follower := cluster.GetServer(cluster.GetFollower())
+	re.NoError(failpoint.Enable("github.com/tikv/pd/client/grpcutil/unreachableNetwork2", fmt.Sprintf("return(\"%s\")", follower.GetAddr())))
+
+	cli := setupCli(re, ctx, suite.endpoints)
+	defer cli.Close()
+
+	cluster.GetLeaderServer().GetServer().GetMember().ResignEtcdLeader(ctx, leader.GetServer().Name(), follower.GetServer().Name())
+	re.NotEmpty(cluster.WaitLeader())
+
+	// here is just for trigger the leader change.
+	cli.GetRegion(context.Background(), []byte("a"))
+
+	testutil.Eventually(re, func() bool {
+		return cli.GetLeaderURL() == follower.GetAddr()
+	})
+	r, err := cli.GetRegion(context.Background(), []byte("a"))
+	re.Error(err)
+	re.Nil(r)
+
+	re.NoError(failpoint.Disable("github.com/tikv/pd/client/grpcutil/unreachableNetwork2"))
+	cli.GetServiceDiscovery().CheckMemberChanged()
+	testutil.Eventually(re, func() bool {
+		r, err = cli.GetRegion(context.Background(), []byte("a"))
+		if err == nil && r != nil {
+			return true
+		}
+		return false
+	})
+}
+
 func (suite *followerForwardAndHandleTestSuite) TestGetRegionFromFollower() {
 	re := suite.Require()
 	ctx, cancel := context.WithCancel(suite.ctx)
@@ -858,6 +920,51 @@ func (suite *followerForwardAndHandleTestSuite) TestGetRegionFromFollower() {
 	re.NoError(failpoint.Disable("github.com/tikv/pd/client/fastCheckAvailable"))
 }
 
+func (suite *followerForwardAndHandleTestSuite) TestGetTSFuture() {
+	re := suite.Require()
+	ctx, cancel := context.WithCancel(suite.ctx)
+	defer cancel()
+
+	re.NoError(failpoint.Enable("github.com/tikv/pd/client/shortDispatcherChannel", "return(true)"))
+
+	cli := setupCli(re, ctx, suite.endpoints)
+
+	ctxs := make([]context.Context, 20)
+	cancels := make([]context.CancelFunc, 20)
+	for i := 0; i < 20; i++ {
+		ctxs[i], cancels[i] = context.WithCancel(ctx)
+	}
+	start := time.Now()
+	wg1 := sync.WaitGroup{}
+	wg2 := sync.WaitGroup{}
+	wg3 := sync.WaitGroup{}
+	wg1.Add(1)
+	go func() {
+		<-time.After(time.Second)
+		for i := 0; i < 20; i++ {
+			cancels[i]()
+		}
+		wg1.Done()
+	}()
+	wg2.Add(1)
+	go func() {
+		cli.Close()
+		wg2.Done()
+	}()
+	wg3.Add(1)
+	go func() {
+		for i := 0; i < 20; i++ {
+			cli.GetTSAsync(ctxs[i])
+		}
+		wg3.Done()
+	}()
+	wg1.Wait()
+	wg2.Wait()
+	wg3.Wait()
+	re.Less(time.Since(start), time.Second*2)
+	re.NoError(failpoint.Disable("github.com/tikv/pd/client/shortDispatcherChannel"))
+}
+
 func checkTS(re *require.Assertions, cli pd.Client, lastTS uint64) uint64 {
 	for i := 0; i < tsoRequestRound; i++ {
 		physical, logical, err := cli.GetTS(context.TODO())
@@ -892,10 +999,10 @@ func setupCli(re *require.Assertions, ctx context.Context, endpoints []string, o
 	return cli
 }
 
-func waitLeader(re *require.Assertions, cli pd.ServiceDiscovery, leader string) {
+func waitLeader(re *require.Assertions, cli pd.ServiceDiscovery, leader *tests.TestServer) {
 	testutil.Eventually(re, func() bool {
 		cli.ScheduleCheckMemberChanged()
-		return cli.GetServingAddr() == leader
+		return cli.GetServingURL() == leader.GetConfig().ClientUrls && leader.GetAddr() == cli.GetServingURL()
 	})
 }
 
@@ -1790,7 +1897,7 @@ func (suite *clientTestSuite) TestMemberUpdateBackOff() {
 	re.True(ok)
 
 	leader := cluster.GetLeader()
-	waitLeader(re, innerCli.GetServiceDiscovery(), cluster.GetServer(leader).GetConfig().ClientUrls)
+	waitLeader(re, innerCli.GetServiceDiscovery(), cluster.GetServer(leader))
 	memberID := cluster.GetServer(leader).GetLeader().GetMemberId()
 
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/leaderLoopCheckAgain", fmt.Sprintf("return(\"%d\")", memberID)))
