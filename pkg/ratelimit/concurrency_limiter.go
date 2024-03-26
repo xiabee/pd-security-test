@@ -14,32 +14,24 @@
 
 package ratelimit
 
-import "github.com/tikv/pd/pkg/utils/syncutil"
+import "github.com/tikv/pd/pkg/syncutil"
 
 type concurrencyLimiter struct {
 	mu      syncutil.RWMutex
 	current uint64
 	limit   uint64
-
-	// statistic
-	maxLimit uint64
 }
 
 func newConcurrencyLimiter(limit uint64) *concurrencyLimiter {
 	return &concurrencyLimiter{limit: limit}
 }
 
-const unlimit = uint64(0)
-
 func (l *concurrencyLimiter) allow() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.limit == unlimit || l.current+1 <= l.limit {
+	if l.current+1 <= l.limit {
 		l.current++
-		if l.current > l.maxLimit {
-			l.maxLimit = l.current
-		}
 		return true
 	}
 	return false
@@ -73,14 +65,4 @@ func (l *concurrencyLimiter) getCurrent() uint64 {
 	defer l.mu.RUnlock()
 
 	return l.current
-}
-
-func (l *concurrencyLimiter) getMaxConcurrency() uint64 {
-	l.mu.Lock()
-	defer func() {
-		l.maxLimit = l.current
-		l.mu.Unlock()
-	}()
-
-	return l.maxLimit
 }

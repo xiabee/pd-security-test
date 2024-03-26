@@ -20,11 +20,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/versioninfo"
+	"github.com/tikv/pd/server/versioninfo"
 )
 
 func checkStatusResponse(re *require.Assertions, body []byte) {
-	got := versioninfo.Status{}
+	got := status{}
 	re.NoError(json.Unmarshal(body, &got))
 	re.Equal(versioninfo.PDBuildTS, got.BuildTS)
 	re.Equal(versioninfo.PDGitHash, got.GitHash)

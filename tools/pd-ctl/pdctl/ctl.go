@@ -21,10 +21,10 @@ import (
 	"strings"
 
 	"github.com/chzyer/readline"
-	shellwords "github.com/mattn/go-shellwords"
+	"github.com/mattn/go-shellwords"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/tikv/pd/pkg/versioninfo"
+	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/tools/pd-ctl/pdctl/command"
 )
 
@@ -35,18 +35,14 @@ func init() {
 // GetRootCmd is exposed for integration tests. But it can be embedded into another suite, too.
 func GetRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:               "pd-ctl",
-		Short:             "Placement Driver control",
-		PersistentPreRunE: command.RequireHTTPSClient,
-		SilenceErrors:     true,
+		Use:   "pd-ctl",
+		Short: "Placement Driver control",
 	}
 
-	rootCmd.PersistentFlags().StringP("pd", "u", "http://127.0.0.1:2379", "address of PD")
+	rootCmd.PersistentFlags().StringP("pd", "u", "http://127.0.0.1:2379", "address of pd")
 	rootCmd.PersistentFlags().String("cacert", "", "path of file that contains list of trusted SSL CAs")
 	rootCmd.PersistentFlags().String("cert", "", "path of file that contains X509 certificate in PEM format")
 	rootCmd.PersistentFlags().String("key", "", "path of file that contains X509 key in PEM format")
-
-	rootCmd.Flags().ParseErrorsWhitelist.UnknownFlags = true
 
 	rootCmd.AddCommand(
 		command.NewConfigCommand(),
@@ -69,10 +65,31 @@ func GetRootCmd() *cobra.Command {
 		command.NewMinResolvedTSCommand(),
 		command.NewCompletionCommand(),
 		command.NewUnsafeCommand(),
-		command.NewKeyspaceGroupCommand(),
-		command.NewKeyspaceCommand(),
-		command.NewResourceManagerCommand(),
 	)
+
+	rootCmd.Flags().ParseErrorsWhitelist.UnknownFlags = true
+	rootCmd.SilenceErrors = true
+
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		CAPath, err := cmd.Flags().GetString("cacert")
+		if err == nil && len(CAPath) != 0 {
+			certPath, err := cmd.Flags().GetString("cert")
+			if err != nil {
+				return err
+			}
+
+			keyPath, err := cmd.Flags().GetString("key")
+			if err != nil {
+				return err
+			}
+
+			if err := command.InitHTTPSClient(CAPath, certPath, keyPath); err != nil {
+				rootCmd.Println(err)
+				return err
+			}
+		}
+		return nil
+	}
 
 	return rootCmd
 }
@@ -88,7 +105,7 @@ func MainStart(args []string) {
 
 	rootCmd.Run = func(cmd *cobra.Command, args []string) {
 		if v, err := cmd.Flags().GetBool("version"); err == nil && v {
-			versioninfo.Print()
+			server.PrintPDInfo()
 			return
 		}
 		if v, err := cmd.Flags().GetBool("interact"); err == nil && v {
@@ -99,7 +116,7 @@ func MainStart(args []string) {
 
 	rootCmd.SetArgs(args)
 	rootCmd.ParseFlags(args)
-	rootCmd.SetOut(os.Stdout)
+	rootCmd.SetOutput(os.Stdout)
 
 	if err := rootCmd.Execute(); err != nil {
 		rootCmd.Println(err)
@@ -132,7 +149,7 @@ func loop(persistentFlags *pflag.FlagSet, readlineCompleter readline.AutoComplet
 		rootCmd.LocalFlags().MarkHidden("cacert")
 		rootCmd.LocalFlags().MarkHidden("cert")
 		rootCmd.LocalFlags().MarkHidden("key")
-		rootCmd.SetOut(os.Stdout)
+		rootCmd.SetOutput(os.Stdout)
 		return rootCmd
 	}
 

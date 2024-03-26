@@ -26,11 +26,11 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
+	"github.com/tikv/pd/pkg/etcdutil"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/tso"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/tso"
 	"github.com/tikv/pd/tests"
 )
 
@@ -85,7 +85,7 @@ func TestAllocatorLeader(t *testing.T) {
 	allocatorLeaderMemberIDs := make([]uint64, 0, dcLocationNum)
 	for _, allocator := range allAllocatorLeaders {
 		allocatorLeader, _ := allocator.(*tso.LocalTSOAllocator)
-		allocatorLeaderMemberIDs = append(allocatorLeaderMemberIDs, allocatorLeader.GetMember().ID())
+		allocatorLeaderMemberIDs = append(allocatorLeaderMemberIDs, allocatorLeader.GetMember().GetMemberId())
 	}
 	for _, server := range cluster.GetServers() {
 		// Filter out Global TSO Allocator
@@ -162,10 +162,10 @@ func TestPriorityAndDifferentLocalTSO(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Add(len(dcLocationConfig))
 	for serverName, dcLocation := range dcLocationConfig {
-		go func(name, dc string) {
+		go func(serName, dc string) {
 			defer wg.Done()
 			testutil.Eventually(re, func() bool {
-				return cluster.WaitAllocatorLeader(dc) == name
+				return cluster.WaitAllocatorLeader(dc) == serName
 			}, testutil.WithWaitFor(90*time.Second), testutil.WithTickInterval(time.Second))
 		}(serverName, dcLocation)
 	}
@@ -188,8 +188,8 @@ func waitAllocatorPriorityCheck(cluster *tests.TestCluster) {
 	wg := sync.WaitGroup{}
 	for _, server := range cluster.GetServers() {
 		wg.Add(1)
-		go func(s *tests.TestServer) {
-			s.GetTSOAllocatorManager().PriorityChecker()
+		go func(ser *tests.TestServer) {
+			ser.GetTSOAllocatorManager().PriorityChecker()
 			wg.Done()
 		}(server)
 	}
@@ -215,7 +215,7 @@ func testTSOSuffix(re *require.Assertions, cluster *tests.TestCluster, am *tso.A
 	re.NoError(err)
 	var tso pdpb.Timestamp
 	testutil.Eventually(re, func() bool {
-		tso, err = allocator.GenerateTSO(context.Background(), 1)
+		tso, err = allocator.GenerateTSO(1)
 		re.NoError(err)
 		return tso.GetPhysical() != 0
 	})

@@ -18,10 +18,10 @@ import (
 	"strconv"
 
 	"github.com/spf13/cobra"
-	"github.com/tikv/pd/pkg/utils/tsoutil"
+	"github.com/tikv/pd/pkg/tsoutil"
 )
 
-// NewTSOCommand return a TSO subcommand of rootCmd
+// NewTSOCommand return a ping subcommand of rootCmd
 func NewTSOCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tso <timestamp>",

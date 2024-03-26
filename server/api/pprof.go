@@ -27,8 +27,8 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/versioninfo"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/versioninfo"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
 )
@@ -209,10 +209,8 @@ func (h *pprofHandler) PProfThreadcreate(w http.ResponseWriter, r *http.Request)
 }
 
 func sleepWithCtx(ctx context.Context, d time.Duration) {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
 	select {
-	case <-timer.C:
+	case <-time.After(d):
 	case <-ctx.Done():
 	}
 }
