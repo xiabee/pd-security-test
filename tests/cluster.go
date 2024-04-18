@@ -28,19 +28,23 @@ import (
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/autoscaling"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/dashboard"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/id"
+	"github.com/tikv/pd/pkg/keyspace"
+	"github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/schedule/schedulers"
 	"github.com/tikv/pd/pkg/swaggerserver"
-	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/tso"
+	"github.com/tikv/pd/pkg/utils/logutil"
+	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
 	"github.com/tikv/pd/server/apiv2"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/id"
 	"github.com/tikv/pd/server/join"
-	"github.com/tikv/pd/server/tso"
 	"go.etcd.io/etcd/clientv3"
 )
 
@@ -71,12 +75,21 @@ var zapLogOnce sync.Once
 
 // NewTestServer creates a new TestServer.
 func NewTestServer(ctx context.Context, cfg *config.Config) (*TestServer, error) {
-	err := cfg.SetupLogger()
+	return createTestServer(ctx, cfg, nil)
+}
+
+// NewTestAPIServer creates a new TestServer.
+func NewTestAPIServer(ctx context.Context, cfg *config.Config) (*TestServer, error) {
+	return createTestServer(ctx, cfg, []string{utils.APIServiceName})
+}
+
+func createTestServer(ctx context.Context, cfg *config.Config, services []string) (*TestServer, error) {
+	err := logutil.SetupLogger(cfg.Log, &cfg.Logger, &cfg.LogProps, cfg.Security.RedactInfoLog)
 	if err != nil {
 		return nil, err
 	}
 	zapLogOnce.Do(func() {
-		log.ReplaceGlobals(cfg.GetZapLogger(), cfg.GetZapLogProperties())
+		log.ReplaceGlobals(cfg.Logger, cfg.LogProps)
 	})
 	err = join.PrepareJoinCluster(cfg)
 	if err != nil {
@@ -87,7 +100,7 @@ func NewTestServer(ctx context.Context, cfg *config.Config) (*TestServer, error)
 		serviceBuilders = append(serviceBuilders, swaggerserver.NewHandler)
 	}
 	serviceBuilders = append(serviceBuilders, dashboard.GetServiceBuilders()...)
-	svr, err := server.CreateServer(ctx, cfg, serviceBuilders...)
+	svr, err := server.CreateServer(ctx, cfg, services, serviceBuilders...)
 	if err != nil {
 		return nil, err
 	}
@@ -220,6 +233,13 @@ func (s *TestServer) GetAllocatorLeader(dcLocation string) *pdpb.Member {
 		return nil
 	}
 	return allocator.(*tso.LocalTSOAllocator).GetAllocatorLeader()
+}
+
+// GetKeyspaceManager returns the current TestServer's Keyspace Manager.
+func (s *TestServer) GetKeyspaceManager() *keyspace.Manager {
+	s.RLock()
+	defer s.RUnlock()
+	return s.server.GetKeyspaceManager()
 }
 
 // GetCluster returns PD cluster.
@@ -423,6 +443,16 @@ type ConfigOption func(conf *config.Config, serverName string)
 
 // NewTestCluster creates a new TestCluster.
 func NewTestCluster(ctx context.Context, initialServerCount int, opts ...ConfigOption) (*TestCluster, error) {
+	return createTestCluster(ctx, initialServerCount, false, opts...)
+}
+
+// NewTestAPICluster creates a new TestCluster with API service.
+func NewTestAPICluster(ctx context.Context, initialServerCount int, opts ...ConfigOption) (*TestCluster, error) {
+	return createTestCluster(ctx, initialServerCount, true, opts...)
+}
+
+func createTestCluster(ctx context.Context, initialServerCount int, isAPIServiceMode bool, opts ...ConfigOption) (*TestCluster, error) {
+	schedulers.Register()
 	config := newClusterConfig(initialServerCount)
 	servers := make(map[string]*TestServer)
 	for _, conf := range config.InitialServers {
@@ -430,7 +460,12 @@ func NewTestCluster(ctx context.Context, initialServerCount int, opts ...ConfigO
 		if err != nil {
 			return nil, err
 		}
-		s, err := NewTestServer(ctx, serverConf)
+		var s *TestServer
+		if isAPIServiceMode {
+			s, err = NewTestAPIServer(ctx, serverConf)
+		} else {
+			s, err = NewTestServer(ctx, serverConf)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -678,6 +713,20 @@ func (c *TestCluster) Join(ctx context.Context, opts ...ConfigOption) (*TestServ
 		return nil, err
 	}
 	s, err := NewTestServer(ctx, conf)
+	if err != nil {
+		return nil, err
+	}
+	c.servers[conf.Name] = s
+	return s, nil
+}
+
+// JoinAPIServer is used to add a new TestAPIServer into the cluster.
+func (c *TestCluster) JoinAPIServer(ctx context.Context, opts ...ConfigOption) (*TestServer, error) {
+	conf, err := c.config.Join().Generate(opts...)
+	if err != nil {
+		return nil, err
+	}
+	s, err := NewTestAPIServer(ctx, conf)
 	if err != nil {
 		return nil, err
 	}

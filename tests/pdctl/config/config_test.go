@@ -25,9 +25,9 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/pkg/schedule/placement"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
@@ -135,6 +135,16 @@ func TestConfig(t *testing.T) {
 	re.NoError(err)
 	re.Equal(20*10000, int(svr.GetScheduleConfig().MaxMergeRegionKeys))
 	re.Equal(20*10000, int(svr.GetScheduleConfig().GetMaxMergeRegionKeys()))
+
+	// set store limit v2
+	args = []string{"-u", pdAddr, "config", "set", "store-limit-version", "v2"}
+	_, err = pdctl.ExecuteCommand(cmd, args...)
+	re.NoError(err)
+	re.Equal("v2", svr.GetScheduleConfig().StoreLimitVersion)
+	args = []string{"-u", pdAddr, "config", "set", "store-limit-version", "v1"}
+	_, err = pdctl.ExecuteCommand(cmd, args...)
+	re.NoError(err)
+	re.Equal("v1", svr.GetScheduleConfig().StoreLimitVersion)
 
 	// config show replication
 	args = []string{"-u", pdAddr, "config", "show", "replication"}
@@ -411,6 +421,9 @@ func TestPlacementRuleGroups(t *testing.T) {
 	output, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "set", "group2", "100", "false")
 	re.NoError(err)
 	re.Contains(string(output), "Success!")
+	output, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "set", "group3", "200", "false")
+	re.NoError(err)
+	re.Contains(string(output), "Success!")
 
 	// show all
 	var groups []placement.RuleGroup
@@ -420,15 +433,24 @@ func TestPlacementRuleGroups(t *testing.T) {
 	re.Equal([]placement.RuleGroup{
 		{ID: "pd", Index: 42, Override: true},
 		{ID: "group2", Index: 100, Override: false},
+		{ID: "group3", Index: 200, Override: false},
 	}, groups)
 
 	// delete
 	output, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "delete", "group2")
 	re.NoError(err)
-	re.Contains(string(output), "Success!")
+	re.Contains(string(output), "Delete group and rules successfully.")
 
 	// show again
 	output, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "show", "group2")
+	re.NoError(err)
+	re.Contains(string(output), "404")
+
+	// delete using regex
+	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "delete", "--regexp", ".*3")
+	re.NoError(err)
+
+	_, err = pdctl.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-group", "show", "group3")
 	re.NoError(err)
 	re.Contains(string(output), "404")
 }

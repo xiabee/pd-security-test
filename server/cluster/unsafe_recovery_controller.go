@@ -29,10 +29,10 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/btree"
 	"github.com/tikv/pd/pkg/codec"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/logutil"
-	"github.com/tikv/pd/pkg/syncutil"
-	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/pkg/utils/logutil"
+	"github.com/tikv/pd/pkg/utils/syncutil"
 	"go.uber.org/zap"
 )
 
@@ -385,7 +385,7 @@ func (u *unsafeRecoveryController) generatePlan(newestRegionTree *regionTree, pe
 			}
 			fallthrough
 		case createEmptyRegion:
-			if hasPlan, err = u.generateCreateEmptyRegionPlan(newestRegionTree, peersMap); hasPlan && err == nil {
+			if hasPlan, err = u.generateCreateEmptyRegionPlan(newestRegionTree); hasPlan && err == nil {
 				u.changeStage(createEmptyRegion)
 				break
 			}
@@ -427,7 +427,7 @@ func (u *unsafeRecoveryController) dispatchPlan(heartbeat *pdpb.StoreHeartbeatRe
 
 	if expire, dispatched := u.storePlanExpires[storeID]; !dispatched || expire.Before(now) {
 		if dispatched {
-			log.Info("Unsafe recovery store recovery plan execution timeout, retry", zap.Uint64("store-id", storeID))
+			log.Info("unsafe recovery store recovery plan execution timeout, retry", zap.Uint64("store-id", storeID))
 		}
 		// Dispatch the recovery plan to the store, and the plan may be empty.
 		resp.RecoveryPlan = u.getRecoveryPlan(storeID)
@@ -542,7 +542,7 @@ func (u *unsafeRecoveryController) changeStage(stage unsafeRecoveryStage) {
 	u.output = append(u.output, output)
 	data, err := json.Marshal(output)
 	if err != nil {
-		log.Error("Unsafe recovery fail to marshal json object", zap.Error(err))
+		log.Error("unsafe recovery fail to marshal json object", zap.Error(err))
 	} else {
 		log.Info(string(data))
 	}
@@ -1104,7 +1104,7 @@ func (u *unsafeRecoveryController) generateDemoteFailedVoterPlan(newestRegionTre
 	return hasPlan
 }
 
-func (u *unsafeRecoveryController) generateCreateEmptyRegionPlan(newestRegionTree *regionTree, peersMap map[uint64][]*regionItem) (bool, error) {
+func (u *unsafeRecoveryController) generateCreateEmptyRegionPlan(newestRegionTree *regionTree) (bool, error) {
 	if u.err != nil {
 		return false, nil
 	}
@@ -1158,25 +1158,6 @@ func (u *unsafeRecoveryController) generateCreateEmptyRegionPlan(newestRegionTre
 			if createRegionErr != nil {
 				err = createRegionErr
 				return false
-			}
-			// paranoid check: shouldn't overlap with any of the peers
-			for _, peers := range peersMap {
-				for _, peer := range peers {
-					if !peer.IsInitialized() {
-						continue
-					}
-					if (bytes.Compare(newRegion.StartKey, peer.Region().StartKey) <= 0 &&
-						(len(newRegion.EndKey) == 0 || bytes.Compare(peer.Region().StartKey, newRegion.EndKey) < 0)) ||
-						((len(peer.Region().EndKey) == 0 || bytes.Compare(newRegion.StartKey, peer.Region().EndKey) < 0) &&
-							(len(newRegion.EndKey) == 0 || (len(peer.Region().EndKey) != 0 && bytes.Compare(peer.Region().EndKey, newRegion.EndKey) <= 0))) {
-						err = errors.Errorf(
-							"Find overlap peer %v with newly created empty region %v",
-							logutil.RedactStringer(core.RegionToHexMeta(peer.Region())),
-							logutil.RedactStringer(core.RegionToHexMeta(newRegion)),
-						)
-						return false
-					}
-				}
 			}
 			storeRecoveryPlan := u.getRecoveryPlan(storeID)
 			storeRecoveryPlan.Creates = append(storeRecoveryPlan.Creates, newRegion)

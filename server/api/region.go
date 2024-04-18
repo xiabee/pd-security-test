@@ -32,12 +32,12 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/replication_modepb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/apiutil"
-	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/schedule/filter"
+	"github.com/tikv/pd/pkg/statistics"
+	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule/filter"
-	"github.com/tikv/pd/server/statistics"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
 )
@@ -422,7 +422,12 @@ func covertAPIRegionInfo(r *core.RegionInfo, region *RegionInfo, out *jwriter.Wr
 func (h *regionsHandler) GetRegions(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
 	regions := rc.GetRegions()
-	h.returnWithRegions(w, r, regions)
+	b, err := marshalRegionsInfoJSON(r.Context(), regions)
+	if err != nil {
+		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.rd.Data(w, http.StatusOK, b)
 }
 
 // @Tags     region
@@ -452,7 +457,12 @@ func (h *regionsHandler) ScanRegions(w http.ResponseWriter, r *http.Request) {
 		limit = maxRegionLimit
 	}
 	regions := rc.ScanRegions([]byte(startKey), []byte(endKey), limit)
-	h.returnWithRegions(w, r, regions)
+	b, err := marshalRegionsInfoJSON(r.Context(), regions)
+	if err != nil {
+		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.rd.Data(w, http.StatusOK, b)
 }
 
 // @Tags     region
@@ -483,7 +493,12 @@ func (h *regionsHandler) GetStoreRegions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	regions := rc.GetStoreRegions(uint64(id))
-	h.returnWithRegions(w, r, regions)
+	b, err := marshalRegionsInfoJSON(r.Context(), regions)
+	if err != nil {
+		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.rd.Data(w, http.StatusOK, b)
 }
 
 // @Tags     region
@@ -494,6 +509,25 @@ func (h *regionsHandler) GetStoreRegions(w http.ResponseWriter, r *http.Request)
 // @Router   /regions/check/miss-peer [get]
 func (h *regionsHandler) GetMissPeerRegions(w http.ResponseWriter, r *http.Request) {
 	h.getRegionsByType(w, statistics.MissPeer, r)
+}
+
+func (h *regionsHandler) getRegionsByType(
+	w http.ResponseWriter,
+	typ statistics.RegionStatisticType,
+	r *http.Request,
+) {
+	handler := h.svr.GetHandler()
+	regions, err := handler.GetRegionsByType(typ)
+	if err != nil {
+		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	b, err := marshalRegionsInfoJSON(r.Context(), regions)
+	if err != nil {
+		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.rd.Data(w, http.StatusOK, b)
 }
 
 // @Tags     region
@@ -574,23 +608,6 @@ func (h *regionsHandler) GetUndersizedRegions(w http.ResponseWriter, r *http.Req
 // @Router   /regions/check/empty-region [get]
 func (h *regionsHandler) GetEmptyRegions(w http.ResponseWriter, r *http.Request) {
 	h.getRegionsByType(w, statistics.EmptyRegion, r)
-}
-
-func (h *regionsHandler) getRegionsByType(w http.ResponseWriter, t statistics.RegionStatisticType, r *http.Request) {
-	regions, err := h.svr.GetHandler().GetRegionsByType(t)
-	if err != nil {
-		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	h.returnWithRegions(w, r, regions)
-}
-
-func (h *regionsHandler) returnWithRegions(w http.ResponseWriter, r *http.Request, regions []*core.RegionInfo) {
-	b, err := marshalRegionsInfoJSON(r.Context(), regions)
-	if err != nil {
-		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
-	}
-	h.rd.Data(w, http.StatusOK, b)
 }
 
 type histItem struct {
@@ -913,7 +930,7 @@ func (h *regionsHandler) AccelerateRegionsScheduleInRanges(w http.ResponseWriter
 	var msgBuilder strings.Builder
 	msgBuilder.Grow(128)
 	msgBuilder.WriteString("Accelerate regions scheduling in given ranges: ")
-	regionsIDSet := make(map[uint64]struct{})
+	var regions []*core.RegionInfo
 	for _, rg := range input {
 		startKey, rawStartKey, err := apiutil.ParseKey("start_key", rg)
 		if err != nil {
@@ -925,16 +942,13 @@ func (h *regionsHandler) AccelerateRegionsScheduleInRanges(w http.ResponseWriter
 			h.rd.JSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		regions := rc.ScanRegions(startKey, endKey, limit)
-		for _, region := range regions {
-			regionsIDSet[region.GetID()] = struct{}{}
-		}
+		regions = append(regions, rc.ScanRegions(startKey, endKey, limit)...)
 		msgBuilder.WriteString(fmt.Sprintf("[%s,%s), ", rawStartKey, rawEndKey))
 	}
-	if len(regionsIDSet) > 0 {
-		regionsIDList := make([]uint64, 0, len(regionsIDSet))
-		for id := range regionsIDSet {
-			regionsIDList = append(regionsIDList, id)
+	if len(regions) > 0 {
+		regionsIDList := make([]uint64, 0, len(regions))
+		for _, region := range regions {
+			regionsIDList = append(regionsIDList, region.GetID())
 		}
 		rc.AddSuspectRegions(regionsIDList...)
 	}
