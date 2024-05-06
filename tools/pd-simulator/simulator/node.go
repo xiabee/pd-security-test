@@ -25,6 +25,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/tikv/pd/pkg/ratelimit"
+	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/cases"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
@@ -39,7 +40,7 @@ const (
 // Node simulates a TiKV.
 type Node struct {
 	*metapb.Store
-	sync.RWMutex
+	syncutil.RWMutex
 	stats                    *info.StoreStats
 	tick                     uint64
 	wg                       sync.WaitGroup
@@ -50,8 +51,9 @@ type Node struct {
 	cancel                   context.CancelFunc
 	raftEngine               *RaftEngine
 	limiter                  *ratelimit.RateLimiter
-	sizeMutex                sync.Mutex
+	sizeMutex                syncutil.Mutex
 	hasExtraUsedSpace        bool
+	snapStats                []*pdpb.SnapshotStat
 }
 
 // NewNode returns a Node.
@@ -91,8 +93,8 @@ func NewNode(s *cases.Store, pdAddr string, config *SimConfig) (*Node, error) {
 		cancel()
 		return nil, err
 	}
-	ratio := int64(time.Second) / config.SimTickInterval.Milliseconds()
-	speed := config.StoreIOMBPerSecond * units.MiB * ratio
+	ratio := config.speed()
+	speed := config.StoreIOMBPerSecond * units.MiB * int64(ratio)
 	return &Node{
 		Store:                    store,
 		stats:                    stats,
@@ -104,6 +106,7 @@ func NewNode(s *cases.Store, pdAddr string, config *SimConfig) (*Node, error) {
 		limiter:                  ratelimit.NewRateLimiter(float64(speed), int(speed)),
 		tick:                     uint64(rand.Intn(storeHeartBeatPeriod)),
 		hasExtraUsedSpace:        s.HasExtraUsedSpace,
+		snapStats:                make([]*pdpb.SnapshotStat, 0),
 	}, nil
 }
 
@@ -191,6 +194,10 @@ func (n *Node) storeHeartBeat() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(n.ctx, pdTimeout)
+	stats := make([]*pdpb.SnapshotStat, len(n.snapStats))
+	copy(stats, n.snapStats)
+	n.snapStats = n.snapStats[:0]
+	n.stats.SnapshotStats = stats
 	err := n.client.StoreHeartbeat(ctx, &n.stats.StoreStats)
 	if err != nil {
 		simutil.Logger.Info("report heartbeat error",
@@ -278,4 +285,13 @@ func (n *Node) decUsedSize(size uint64) {
 	n.sizeMutex.Lock()
 	defer n.sizeMutex.Unlock()
 	n.stats.ToCompactionSize += size
+}
+
+func (n *Node) registerSnapStats(generate, send, total uint64) {
+	stat := pdpb.SnapshotStat{
+		GenerateDurationSec: generate,
+		SendDurationSec:     send,
+		TotalDurationSec:    total,
+	}
+	n.snapStats = append(n.snapStats, &stat)
 }

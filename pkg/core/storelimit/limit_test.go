@@ -18,6 +18,7 @@ import (
 	"container/list"
 	"context"
 	"math/rand"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func TestStoreLimit(t *testing.T) {
 	re := require.New(t)
 	rate := int64(15)
 	limit := NewStoreRateLimit(float64(rate)).(*StoreRateLimit)
-	re.Equal(limit.Rate(AddPeer), float64(15))
+	re.Equal(float64(15), limit.Rate(AddPeer))
 	re.True(limit.Available(influence*rate, AddPeer, constant.Low))
 	re.True(limit.Take(influence*rate, AddPeer, constant.Low))
 	re.False(limit.Take(influence, AddPeer, constant.Low))
@@ -100,18 +101,18 @@ func TestWindow(t *testing.T) {
 	token := capacity + 10
 	re.True(s.take(token))
 	re.False(s.take(token))
-	re.EqualValues(s.ack(token), 0)
+	re.EqualValues(0, s.ack(token))
 	re.True(s.take(token))
-	re.EqualValues(s.ack(token), 0)
+	re.EqualValues(0, s.ack(token))
 	re.Equal(s.ack(token), token)
-	re.EqualValues(s.getUsed(), 0)
+	re.EqualValues(0, s.getUsed())
 
 	// case2: the capacity of the window must greater than the minSnapSize.
 	s.reset(minSnapSize - 1)
-	re.EqualValues(s.capacity, minSnapSize)
+	re.EqualValues(minSnapSize, s.capacity)
 	re.True(s.take(minSnapSize))
-	re.EqualValues(s.ack(minSnapSize*2), minSnapSize)
-	re.EqualValues(s.getUsed(), 0)
+	re.EqualValues(minSnapSize, s.ack(minSnapSize*2))
+	re.EqualValues(0, s.getUsed())
 }
 
 func TestFeedback(t *testing.T) {
@@ -125,21 +126,22 @@ func TestFeedback(t *testing.T) {
 	}
 	// region size is 10GB, snapshot write limit is 100MB/s and the snapshot concurrency is 3.
 	// the best strategy is that the tikv executing queue equals the wait.
-	regionSize, limit, wait := int64(10000), int64(100), int64(4)
-	iter := 100
+	const regionSize, limit, wait = int64(10000), int64(100), int64(4)
+	var iter atomic.Int32
+	iter.Store(100)
 	ops := make(chan int64, 10)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// generate the operator
 	go func() {
 		for {
-			if s.Available(regionSize, SendSnapshot, constant.Low) && iter > 0 {
-				iter--
+			if s.Available(regionSize, SendSnapshot, constant.Low) && iter.Load() > 0 {
+				iter.Add(-1)
 				size := regionSize - rand.Int63n(regionSize/10)
 				s.Take(size, SendSnapshot, constant.Low)
 				ops <- size
 			}
-			if iter == 0 {
+			if iter.Load() == 0 {
 				cancel()
 				return
 			}
@@ -185,7 +187,7 @@ func TestFeedback(t *testing.T) {
 			err := exec*wait - cost
 			queue.Remove(first)
 			s.Feedback(float64(err))
-			if iter < 5 {
+			if iter.Load() < 5 {
 				re.Greater(float64(s.GetCap()), float64(regionSize*(wait-2)))
 				re.Less(float64(s.GetCap()), float64(regionSize*wait))
 			}

@@ -21,7 +21,7 @@ import (
 
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/schedule"
+	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 )
 
@@ -36,8 +36,8 @@ func Register() {
 
 func schedulersRegister() {
 	// balance leader
-	schedule.RegisterSliceDecoderBuilder(BalanceLeaderType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(BalanceLeaderType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			conf, ok := v.(*balanceLeaderSchedulerConfig)
 			if !ok {
 				return errs.ErrScheduleConfigNotExist.FastGenByArgs()
@@ -52,7 +52,7 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(BalanceLeaderType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(BalanceLeaderType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &balanceLeaderSchedulerConfig{storage: storage}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -64,8 +64,8 @@ func schedulersRegister() {
 	})
 
 	// balance region
-	schedule.RegisterSliceDecoderBuilder(BalanceRegionType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(BalanceRegionType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			conf, ok := v.(*balanceRegionSchedulerConfig)
 			if !ok {
 				return errs.ErrScheduleConfigNotExist.FastGenByArgs()
@@ -80,7 +80,7 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(BalanceRegionType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(BalanceRegionType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &balanceRegionSchedulerConfig{}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -89,8 +89,8 @@ func schedulersRegister() {
 	})
 
 	// balance witness
-	schedule.RegisterSliceDecoderBuilder(BalanceWitnessType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(BalanceWitnessType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			conf, ok := v.(*balanceWitnessSchedulerConfig)
 			if !ok {
 				return errs.ErrScheduleConfigNotExist.FastGenByArgs()
@@ -105,7 +105,7 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(BalanceWitnessType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(BalanceWitnessType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &balanceWitnessSchedulerConfig{storage: storage}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -117,8 +117,8 @@ func schedulersRegister() {
 	})
 
 	// evict leader
-	schedule.RegisterSliceDecoderBuilder(EvictLeaderType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(EvictLeaderType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			if len(args) != 1 {
 				return errs.ErrSchedulerConfig.FastGenByArgs("id")
 			}
@@ -141,33 +141,35 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(EvictLeaderType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(EvictLeaderType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &evictLeaderSchedulerConfig{StoreIDWithRanges: make(map[uint64][]core.KeyRange), storage: storage}
 		if err := decoder(conf); err != nil {
 			return nil, err
 		}
 		conf.cluster = opController.GetCluster()
+		conf.removeSchedulerCb = removeSchedulerCb[0]
 		return newEvictLeaderScheduler(opController, conf), nil
 	})
 
 	// evict slow store
-	schedule.RegisterSliceDecoderBuilder(EvictSlowStoreType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(EvictSlowStoreType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			return nil
 		}
 	})
 
-	schedule.RegisterScheduler(EvictSlowStoreType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
-		conf := &evictSlowStoreSchedulerConfig{storage: storage, EvictedStores: make([]uint64, 0)}
+	RegisterScheduler(EvictSlowStoreType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
+		conf := initEvictSlowStoreSchedulerConfig(storage)
 		if err := decoder(conf); err != nil {
 			return nil, err
 		}
+		conf.cluster = opController.GetCluster()
 		return newEvictSlowStoreScheduler(opController, conf), nil
 	})
 
 	// grant hot region
-	schedule.RegisterSliceDecoderBuilder(GrantHotRegionType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(GrantHotRegionType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			if len(args) != 2 {
 				return errs.ErrSchedulerConfig.FastGenByArgs("id")
 			}
@@ -196,7 +198,7 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(GrantHotRegionType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(GrantHotRegionType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &grantHotRegionSchedulerConfig{StoreIDs: make([]uint64, 0), storage: storage}
 		conf.cluster = opController.GetCluster()
 		if err := decoder(conf); err != nil {
@@ -206,15 +208,15 @@ func schedulersRegister() {
 	})
 
 	// hot region
-	schedule.RegisterSliceDecoderBuilder(HotRegionType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(HotRegionType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			return nil
 		}
 	})
 
-	schedule.RegisterScheduler(HotRegionType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(HotRegionType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := initHotRegionScheduleConfig()
-		var data map[string]interface{}
+		var data map[string]any
 		if err := decoder(&data); err != nil {
 			return nil, err
 		}
@@ -233,8 +235,8 @@ func schedulersRegister() {
 	})
 
 	// grant leader
-	schedule.RegisterSliceDecoderBuilder(GrantLeaderType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(GrantLeaderType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			if len(args) != 1 {
 				return errs.ErrSchedulerConfig.FastGenByArgs("id")
 			}
@@ -257,9 +259,10 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(GrantLeaderType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(GrantLeaderType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &grantLeaderSchedulerConfig{StoreIDWithRanges: make(map[uint64][]core.KeyRange), storage: storage}
 		conf.cluster = opController.GetCluster()
+		conf.removeSchedulerCb = removeSchedulerCb[0]
 		if err := decoder(conf); err != nil {
 			return nil, err
 		}
@@ -267,8 +270,8 @@ func schedulersRegister() {
 	})
 
 	// label
-	schedule.RegisterSliceDecoderBuilder(LabelType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(LabelType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			conf, ok := v.(*labelSchedulerConfig)
 			if !ok {
 				return errs.ErrScheduleConfigNotExist.FastGenByArgs()
@@ -283,7 +286,7 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(LabelType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(LabelType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &labelSchedulerConfig{}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -292,8 +295,8 @@ func schedulersRegister() {
 	})
 
 	// random merge
-	schedule.RegisterSliceDecoderBuilder(RandomMergeType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(RandomMergeType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			conf, ok := v.(*randomMergeSchedulerConfig)
 			if !ok {
 				return errs.ErrScheduleConfigNotExist.FastGenByArgs()
@@ -308,7 +311,7 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(RandomMergeType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(RandomMergeType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &randomMergeSchedulerConfig{}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -318,8 +321,8 @@ func schedulersRegister() {
 
 	// scatter range
 	// args: [start-key, end-key, range-name].
-	schedule.RegisterSliceDecoderBuilder(ScatterRangeType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(ScatterRangeType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			if len(args) != 3 {
 				return errs.ErrSchedulerConfig.FastGenByArgs("ranges and name")
 			}
@@ -337,7 +340,7 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(ScatterRangeType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(ScatterRangeType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &scatterRangeSchedulerConfig{
 			storage: storage,
 		}
@@ -352,8 +355,8 @@ func schedulersRegister() {
 	})
 
 	// shuffle hot region
-	schedule.RegisterSliceDecoderBuilder(ShuffleHotRegionType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(ShuffleHotRegionType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			conf, ok := v.(*shuffleHotRegionSchedulerConfig)
 			if !ok {
 				return errs.ErrScheduleConfigNotExist.FastGenByArgs()
@@ -371,17 +374,18 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(ShuffleHotRegionType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(ShuffleHotRegionType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &shuffleHotRegionSchedulerConfig{Limit: uint64(1)}
 		if err := decoder(conf); err != nil {
 			return nil, err
 		}
+		conf.storage = storage
 		return newShuffleHotRegionScheduler(opController, conf), nil
 	})
 
 	// shuffle leader
-	schedule.RegisterSliceDecoderBuilder(ShuffleLeaderType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(ShuffleLeaderType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			conf, ok := v.(*shuffleLeaderSchedulerConfig)
 			if !ok {
 				return errs.ErrScheduleConfigNotExist.FastGenByArgs()
@@ -396,7 +400,7 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(ShuffleLeaderType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(ShuffleLeaderType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &shuffleLeaderSchedulerConfig{}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -405,8 +409,8 @@ func schedulersRegister() {
 	})
 
 	// shuffle region
-	schedule.RegisterSliceDecoderBuilder(ShuffleRegionType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(ShuffleRegionType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			conf, ok := v.(*shuffleRegionSchedulerConfig)
 			if !ok {
 				return errs.ErrScheduleConfigNotExist.FastGenByArgs()
@@ -421,7 +425,7 @@ func schedulersRegister() {
 		}
 	})
 
-	schedule.RegisterScheduler(ShuffleRegionType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(ShuffleRegionType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := &shuffleRegionSchedulerConfig{storage: storage}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -430,13 +434,13 @@ func schedulersRegister() {
 	})
 
 	// split bucket
-	schedule.RegisterSliceDecoderBuilder(SplitBucketType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(SplitBucketType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			return nil
 		}
 	})
 
-	schedule.RegisterScheduler(SplitBucketType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(SplitBucketType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		conf := initSplitBucketConfig()
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -446,25 +450,25 @@ func schedulersRegister() {
 	})
 
 	// transfer witness leader
-	schedule.RegisterSliceDecoderBuilder(TransferWitnessLeaderType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(TransferWitnessLeaderType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			return nil
 		}
 	})
 
-	schedule.RegisterScheduler(TransferWitnessLeaderType, func(opController *schedule.OperatorController, _ endpoint.ConfigStorage, _ schedule.ConfigDecoder) (schedule.Scheduler, error) {
+	RegisterScheduler(TransferWitnessLeaderType, func(opController *operator.Controller, _ endpoint.ConfigStorage, _ ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
 		return newTransferWitnessLeaderScheduler(opController), nil
 	})
 
 	// evict slow store by trend
-	schedule.RegisterSliceDecoderBuilder(EvictSlowTrendType, func(args []string) schedule.ConfigDecoder {
-		return func(v interface{}) error {
+	RegisterSliceDecoderBuilder(EvictSlowTrendType, func(args []string) ConfigDecoder {
+		return func(v any) error {
 			return nil
 		}
 	})
 
-	schedule.RegisterScheduler(EvictSlowTrendType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
-		conf := &evictSlowTrendSchedulerConfig{storage: storage, EvictedStores: make([]uint64, 0), evictCandidate: 0}
+	RegisterScheduler(EvictSlowTrendType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder ConfigDecoder, removeSchedulerCb ...func(string) error) (Scheduler, error) {
+		conf := initEvictSlowTrendSchedulerConfig(storage)
 		if err := decoder(conf); err != nil {
 			return nil, err
 		}

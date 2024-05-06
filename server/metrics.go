@@ -82,6 +82,14 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 13),
 		})
 
+	tsoProxyForwardTimeoutCounter = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "pd",
+			Subsystem: "server",
+			Name:      "tso_proxy_forward_timeout_total",
+			Help:      "Counter of timeouts when tso proxy forwarding tso requests to tso service.",
+		})
+
 	tsoHandleDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: "pd",
@@ -128,14 +136,6 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(0.0001, 2, 29), // 0.1ms ~ 7hours
 		}, []string{"address", "store"})
 
-	serverInfo = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "pd",
-			Subsystem: "server",
-			Name:      "info",
-			Help:      "Indicate the pd server info, and the value is the start timestamp (s).",
-		}, []string{"version", "hash"})
-
 	serviceAuditHistogram = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "pd",
@@ -143,14 +143,23 @@ var (
 			Name:      "audit_handling_seconds",
 			Help:      "PD server service handling audit",
 			Buckets:   prometheus.DefBuckets,
-		}, []string{"service", "method", "component", "ip"})
-	serverMaxProcs = prometheus.NewGauge(
+		}, []string{"service", "method", "caller_id", "ip"})
+
+	apiConcurrencyGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "pd",
-			Subsystem: "service",
-			Name:      "maxprocs",
-			Help:      "The value of GOMAXPROCS.",
-		})
+			Subsystem: "server",
+			Name:      "api_concurrency",
+			Help:      "Concurrency number of the api.",
+		}, []string{"kind", "api"})
+
+	forwardFailCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "pd",
+			Subsystem: "server",
+			Name:      "forward_fail_total",
+			Help:      "Counter of forward fail.",
+		}, []string{"request", "type"})
 )
 
 func init() {
@@ -161,13 +170,14 @@ func init() {
 	prometheus.MustRegister(etcdStateGauge)
 	prometheus.MustRegister(tsoProxyHandleDuration)
 	prometheus.MustRegister(tsoProxyBatchSize)
+	prometheus.MustRegister(tsoProxyForwardTimeoutCounter)
 	prometheus.MustRegister(tsoHandleDuration)
 	prometheus.MustRegister(regionHeartbeatHandleDuration)
 	prometheus.MustRegister(storeHeartbeatHandleDuration)
-	prometheus.MustRegister(serverInfo)
 	prometheus.MustRegister(bucketReportCounter)
 	prometheus.MustRegister(bucketReportLatency)
 	prometheus.MustRegister(serviceAuditHistogram)
 	prometheus.MustRegister(bucketReportInterval)
-	prometheus.MustRegister(serverMaxProcs)
+	prometheus.MustRegister(apiConcurrencyGauge)
+	prometheus.MustRegister(forwardFailCounter)
 }

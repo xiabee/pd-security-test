@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/codec"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/schedule/labeler"
 )
 
@@ -30,7 +31,7 @@ func TestValidateID(t *testing.T) {
 		id     uint32
 		hasErr bool
 	}{
-		{DefaultKeyspaceID, true}, // Reserved id should result in error.
+		{utils.DefaultKeyspaceID, true}, // Reserved id should result in error.
 		{100, false},
 		{spaceIDMax - 1, false},
 		{spaceIDMax, false},
@@ -48,7 +49,7 @@ func TestValidateName(t *testing.T) {
 		name   string
 		hasErr bool
 	}{
-		{DefaultKeyspaceName, true}, // Reserved name should result in error.
+		{utils.DefaultKeyspaceName, true}, // Reserved name should result in error.
 		{"keyspaceName1", false},
 		{"keyspace_name_1", false},
 		{"10", false},
@@ -82,12 +83,12 @@ func TestMakeLabelRule(t *testing.T) {
 					},
 				},
 				RuleType: "key-range",
-				Data: []interface{}{
-					map[string]interface{}{
+				Data: []any{
+					map[string]any{
 						"start_key": hex.EncodeToString(codec.EncodeBytes([]byte{'r', 0, 0, 0})),
 						"end_key":   hex.EncodeToString(codec.EncodeBytes([]byte{'r', 0, 0, 1})),
 					},
-					map[string]interface{}{
+					map[string]any{
 						"start_key": hex.EncodeToString(codec.EncodeBytes([]byte{'x', 0, 0, 0})),
 						"end_key":   hex.EncodeToString(codec.EncodeBytes([]byte{'x', 0, 0, 1})),
 					},
@@ -106,12 +107,12 @@ func TestMakeLabelRule(t *testing.T) {
 					},
 				},
 				RuleType: "key-range",
-				Data: []interface{}{
-					map[string]interface{}{
+				Data: []any{
+					map[string]any{
 						"start_key": hex.EncodeToString(codec.EncodeBytes([]byte{'r', 0, 0x10, 0x92})),
 						"end_key":   hex.EncodeToString(codec.EncodeBytes([]byte{'r', 0, 0x10, 0x93})),
 					},
-					map[string]interface{}{
+					map[string]any{
 						"start_key": hex.EncodeToString(codec.EncodeBytes([]byte{'x', 0, 0x10, 0x92})),
 						"end_key":   hex.EncodeToString(codec.EncodeBytes([]byte{'x', 0, 0x10, 0x93})),
 					},
@@ -120,6 +121,6 @@ func TestMakeLabelRule(t *testing.T) {
 		},
 	}
 	for _, testCase := range testCases {
-		re.Equal(testCase.expectedLabelRule, makeLabelRule(testCase.id))
+		re.Equal(testCase.expectedLabelRule, MakeLabelRule(testCase.id))
 	}
 }
