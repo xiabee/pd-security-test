@@ -21,15 +21,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/client/errs"
+	"github.com/tikv/pd/client/tlsutil"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -37,8 +34,6 @@ const (
 	dialTimeout = 3 * time.Second
 	// ForwardMetadataKey is used to record the forwarded host of PD.
 	ForwardMetadataKey = "pd-forwarded-host"
-	// FollowerHandleMetadataKey is used to mark the permit of follower handle.
-	FollowerHandleMetadataKey = "pd-allow-follower-handle"
 )
 
 // GetClientConn returns a gRPC client connection.
@@ -55,7 +50,7 @@ const (
 // ctx will be noop. Users should call ClientConn.Close to terminate all the
 // pending operations after this function returns.
 func GetClientConn(ctx context.Context, addr string, tlsCfg *tls.Config, do ...grpc.DialOption) (*grpc.ClientConn, error) {
-	opt := grpc.WithTransportCredentials(insecure.NewCredentials())
+	opt := grpc.WithInsecure() //nolint
 	if tlsCfg != nil {
 		creds := credentials.NewTLS(tlsCfg)
 		opt = grpc.WithTransportCredentials(creds)
@@ -64,18 +59,7 @@ func GetClientConn(ctx context.Context, addr string, tlsCfg *tls.Config, do ...g
 	if err != nil {
 		return nil, errs.ErrURLParse.Wrap(err).GenWithStackByCause()
 	}
-	// Here we use a shorter MaxDelay to make the connection recover faster.
-	// The default MaxDelay is 120s, which is too long for us.
-	backoffOpts := grpc.WithConnectParams(grpc.ConnectParams{
-		Backoff: backoff.Config{
-			BaseDelay:  time.Second,
-			Multiplier: 1.6,
-			Jitter:     0.2,
-			MaxDelay:   3 * time.Second,
-		},
-	})
-	do = append(do, opt, backoffOpts)
-	cc, err := grpc.DialContext(ctx, u.Host, do...)
+	cc, err := grpc.DialContext(ctx, u.Host, append(do, opt)...)
 	if err != nil {
 		return nil, errs.ErrGRPCDial.Wrap(err).GenWithStackByCause()
 	}
@@ -84,65 +68,29 @@ func GetClientConn(ctx context.Context, addr string, tlsCfg *tls.Config, do ...g
 
 // BuildForwardContext creates a context with receiver metadata information.
 // It is used in client side.
-func BuildForwardContext(ctx context.Context, url string) context.Context {
-	md := metadata.Pairs(ForwardMetadataKey, url)
+func BuildForwardContext(ctx context.Context, addr string) context.Context {
+	md := metadata.Pairs(ForwardMetadataKey, addr)
 	return metadata.NewOutgoingContext(ctx, md)
-}
-
-// GetForwardedHost returns the forwarded host in metadata.
-// Only used for test.
-func GetForwardedHost(ctx context.Context, f func(context.Context) (metadata.MD, bool)) string {
-	v, _ := getValueFromMetadata(ctx, ForwardMetadataKey, f)
-	return v
-}
-
-// BuildFollowerHandleContext creates a context with follower handle metadata information.
-// It is used in client side.
-func BuildFollowerHandleContext(ctx context.Context) context.Context {
-	md := metadata.Pairs(FollowerHandleMetadataKey, "")
-	return metadata.NewOutgoingContext(ctx, md)
-}
-
-// IsFollowerHandleEnabled returns the forwarded host in metadata.
-// Only used for test.
-func IsFollowerHandleEnabled(ctx context.Context, f func(context.Context) (metadata.MD, bool)) bool {
-	_, ok := getValueFromMetadata(ctx, FollowerHandleMetadataKey, f)
-	return ok
-}
-
-func getValueFromMetadata(ctx context.Context, key string, f func(context.Context) (metadata.MD, bool)) (string, bool) {
-	md, ok := f(ctx)
-	if !ok {
-		return "", false
-	}
-	vs, ok := md[key]
-	if !ok {
-		return "", false
-	}
-	return vs[0], true
 }
 
 // GetOrCreateGRPCConn returns the corresponding grpc client connection of the given addr.
 // Returns the old one if's already existed in the clientConns; otherwise creates a new one and returns it.
-func GetOrCreateGRPCConn(ctx context.Context, clientConns *sync.Map, url string, tlsCfg *tls.Config, opt ...grpc.DialOption) (*grpc.ClientConn, error) {
-	conn, ok := clientConns.Load(url)
+func GetOrCreateGRPCConn(ctx context.Context, clientConns *sync.Map, addr string, tlsCfg *tlsutil.TLSConfig, opt ...grpc.DialOption) (*grpc.ClientConn, error) {
+	conn, ok := clientConns.Load(addr)
 	if ok {
-		// TODO: check the connection state.
 		return conn.(*grpc.ClientConn), nil
 	}
-	dCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-	defer cancel()
-	cc, err := GetClientConn(dCtx, url, tlsCfg, opt...)
-	failpoint.Inject("unreachableNetwork2", func(val failpoint.Value) {
-		if val, ok := val.(string); ok && val == url {
-			cc = nil
-			err = errors.Errorf("unreachable network")
-		}
-	})
+	tlsConfig, err := tlsCfg.ToTLSConfig()
 	if err != nil {
 		return nil, err
 	}
-	conn, loaded := clientConns.LoadOrStore(url, cc)
+	dCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	cc, err := GetClientConn(dCtx, addr, tlsConfig, opt...)
+	if err != nil {
+		return nil, err
+	}
+	conn, loaded := clientConns.LoadOrStore(addr, cc)
 	if !loaded {
 		// Successfully stored the connection.
 		return cc, nil

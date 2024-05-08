@@ -19,6 +19,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/placement"
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/storage/endpoint"
@@ -46,7 +47,7 @@ type shuffleRegionSchedulerConfig struct {
 func (conf *shuffleRegionSchedulerConfig) EncodeConfig() ([]byte, error) {
 	conf.RLock()
 	defer conf.RUnlock()
-	return EncodeConfig(conf)
+	return schedule.EncodeConfig(conf)
 }
 
 func (conf *shuffleRegionSchedulerConfig) GetRoles() []string {
@@ -58,9 +59,7 @@ func (conf *shuffleRegionSchedulerConfig) GetRoles() []string {
 func (conf *shuffleRegionSchedulerConfig) GetRanges() []core.KeyRange {
 	conf.RLock()
 	defer conf.RUnlock()
-	ranges := make([]core.KeyRange, len(conf.Ranges))
-	copy(ranges, conf.Ranges)
-	return ranges
+	return conf.Ranges
 }
 
 func (conf *shuffleRegionSchedulerConfig) IsRoleAllow(role string) bool {
@@ -71,7 +70,6 @@ func (conf *shuffleRegionSchedulerConfig) IsRoleAllow(role string) bool {
 
 func (conf *shuffleRegionSchedulerConfig) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	router := mux.NewRouter()
-	router.HandleFunc("/list", conf.handleGetRoles).Methods(http.MethodGet)
 	router.HandleFunc("/roles", conf.handleGetRoles).Methods(http.MethodGet)
 	router.HandleFunc("/roles", conf.handleSetRoles).Methods(http.MethodPost)
 	router.ServeHTTP(w, r)
@@ -104,13 +102,13 @@ func (conf *shuffleRegionSchedulerConfig) handleSetRoles(w http.ResponseWriter, 
 		rd.Text(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	rd.Text(w, http.StatusOK, "Config is updated.")
+	rd.Text(w, http.StatusOK, "")
 }
 
 func (conf *shuffleRegionSchedulerConfig) persist() error {
-	data, err := EncodeConfig(conf)
+	data, err := schedule.EncodeConfig(conf)
 	if err != nil {
 		return err
 	}
-	return conf.storage.SaveSchedulerConfig(ShuffleRegionName, data)
+	return conf.storage.SaveScheduleConfig(ShuffleRegionName, data)
 }

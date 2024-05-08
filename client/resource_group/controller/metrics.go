@@ -21,9 +21,7 @@ const (
 	requestSubsystem      = "request"
 	tokenRequestSubsystem = "token_request"
 
-	// TODO: remove old label in 8.x
-	resourceGroupNameLabel    = "name"
-	newResourceGroupNameLabel = "resource_group"
+	resourceGroupNameLabel = "name"
 )
 
 var (
@@ -33,7 +31,7 @@ var (
 			Subsystem: "resource_group",
 			Name:      "status",
 			Help:      "Status of the resource group.",
-		}, []string{resourceGroupNameLabel, newResourceGroupNameLabel})
+		}, []string{resourceGroupNameLabel})
 
 	successfulRequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -42,16 +40,7 @@ var (
 			Name:      "success",
 			Buckets:   []float64{.005, .01, .05, .1, .5, 1, 5, 10, 20, 25, 30}, // 0.005 ~ 30
 			Help:      "Bucketed histogram of wait duration of successful request.",
-		}, []string{resourceGroupNameLabel, newResourceGroupNameLabel})
-
-	failedLimitReserveDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: requestSubsystem,
-			Name:      "limit_reserve_time_failed",
-			Buckets:   []float64{.005, .01, .05, .1, .5, 1, 5, 10, 20, 25, 30}, // 0.005 ~ 30
-			Help:      "Bucketed histogram of wait duration of failed request.",
-		}, []string{resourceGroupNameLabel, newResourceGroupNameLabel})
+		}, []string{resourceGroupNameLabel})
 
 	failedRequestCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -59,7 +48,7 @@ var (
 			Subsystem: requestSubsystem,
 			Name:      "fail",
 			Help:      "Counter of failed request.",
-		}, []string{resourceGroupNameLabel, newResourceGroupNameLabel})
+		}, []string{resourceGroupNameLabel})
 
 	requestRetryCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -67,7 +56,7 @@ var (
 			Subsystem: requestSubsystem,
 			Name:      "retry",
 			Help:      "Counter of retry time for request.",
-		}, []string{resourceGroupNameLabel, newResourceGroupNameLabel})
+		}, []string{resourceGroupNameLabel})
 
 	tokenRequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -83,7 +72,7 @@ var (
 			Subsystem: tokenRequestSubsystem,
 			Name:      "resource_group",
 			Help:      "Counter of token request by every resource group.",
-		}, []string{resourceGroupNameLabel, newResourceGroupNameLabel})
+		}, []string{resourceGroupNameLabel})
 )
 
 var (
@@ -96,7 +85,6 @@ func init() {
 	prometheus.MustRegister(resourceGroupStatusGauge)
 	prometheus.MustRegister(successfulRequestDuration)
 	prometheus.MustRegister(failedRequestCounter)
-	prometheus.MustRegister(failedLimitReserveDuration)
 	prometheus.MustRegister(requestRetryCounter)
 	prometheus.MustRegister(tokenRequestDuration)
 	prometheus.MustRegister(resourceGroupTokenRequestCounter)

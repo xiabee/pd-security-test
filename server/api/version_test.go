@@ -74,7 +74,7 @@ func TestGetVersion(t *testing.T) {
 	func() {
 		temp.Close()
 		os.Stdout = old
-		os.RemoveAll(fname)
+		os.Remove(fname)
 		svr.Close()
 		cancel()
 		testutil.CleanServer(cfg.DataDir)

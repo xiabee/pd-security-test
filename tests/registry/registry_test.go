@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,8 +30,8 @@ import (
 	"github.com/tikv/pd/tests"
 	"go.uber.org/goleak"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/interop/grpc_testing"
+
+	"google.golang.org/grpc/test/grpc_testing"
 )
 
 func TestMain(m *testing.M) {
@@ -76,11 +76,11 @@ func TestRegistryService(t *testing.T) {
 	err = cluster.RunInitialServers()
 	re.NoError(err)
 
-	re.NotEmpty(cluster.WaitLeader())
-	leader := cluster.GetLeaderServer()
+	leaderName := cluster.WaitLeader()
+	leader := cluster.GetServer(leaderName)
 
 	// Test registered GRPC Service
-	cc, err := grpc.DialContext(ctx, strings.TrimPrefix(leader.GetAddr(), "http://"), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	cc, err := grpc.DialContext(ctx, strings.TrimPrefix(leader.GetAddr(), "http://"), grpc.WithInsecure())
 	re.NoError(err)
 	defer cc.Close()
 	grpcClient := grpc_testing.NewTestServiceClient(cc)

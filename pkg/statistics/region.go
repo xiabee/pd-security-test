@@ -23,7 +23,6 @@ type RegionStats struct {
 	Count            int              `json:"count"`
 	EmptyCount       int              `json:"empty_count"`
 	StorageSize      int64            `json:"storage_size"`
-	UserStorageSize  int64            `json:"user_storage_size"`
 	StorageKeys      int64            `json:"storage_keys"`
 	StoreLeaderCount map[uint64]int   `json:"store_leader_count"`
 	StorePeerCount   map[uint64]int   `json:"store_peer_count"`
@@ -58,12 +57,10 @@ func (s *RegionStats) Observe(r *core.RegionInfo) {
 	s.Count++
 	approximateKeys := r.GetApproximateKeys()
 	approximateSize := r.GetApproximateSize()
-	approximateKvSize := r.GetApproximateKvSize()
 	if approximateSize <= core.EmptyRegionApproximateSize {
 		s.EmptyCount++
 	}
 	s.StorageSize += approximateSize
-	s.UserStorageSize += approximateKvSize
 	s.StorageKeys += approximateKeys
 	leader := r.GetLeader()
 	if leader != nil {

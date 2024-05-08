@@ -22,6 +22,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/utils/apiutil/serverapi"
 	"github.com/tikv/pd/server"
 	"go.uber.org/zap"
 )
@@ -30,31 +31,28 @@ import (
 func Redirector() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		svr := c.MustGet(ServerContextKey).(*server.Server)
-
-		if svr.IsClosed() {
-			c.AbortWithStatusJSON(http.StatusInternalServerError, errs.ErrServerNotStarted.FastGenByArgs().Error())
-			return
-		}
-		allowFollowerHandle := len(c.Request.Header.Get(apiutil.PDAllowFollowerHandleHeader)) > 0
-		if allowFollowerHandle || svr.GetMember().IsLeader() {
+		allowFollowerHandle := len(c.Request.Header.Get(serverapi.PDAllowFollowerHandle)) > 0
+		isLeader := svr.GetMember().IsLeader()
+		if !svr.IsClosed() && (allowFollowerHandle || isLeader) {
 			c.Next()
 			return
 		}
 
 		// Prevent more than one redirection.
-		if name := c.Request.Header.Get(apiutil.PDRedirectorHeader); len(name) != 0 {
+		if name := c.Request.Header.Get(serverapi.PDRedirectorHeader); len(name) != 0 {
 			log.Error("redirect but server is not leader", zap.String("from", name), zap.String("server", svr.Name()), errs.ZapError(errs.ErrRedirect))
 			c.AbortWithStatusJSON(http.StatusInternalServerError, errs.ErrRedirect.FastGenByArgs().Error())
 			return
 		}
 
-		c.Request.Header.Set(apiutil.PDRedirectorHeader, svr.Name())
+		c.Request.Header.Set(serverapi.PDRedirectorHeader, svr.Name())
 
-		if svr.GetMember().GetLeader() == nil {
+		leader := svr.GetMember().GetLeader()
+		if leader == nil {
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, errs.ErrLeaderNil.FastGenByArgs().Error())
 			return
 		}
-		clientUrls := svr.GetMember().GetLeader().GetClientUrls()
+		clientUrls := leader.GetClientUrls()
 		urls := make([]url.URL, 0, len(clientUrls))
 		for _, item := range clientUrls {
 			u, err := url.Parse(item)

@@ -17,7 +17,6 @@ package labeler
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"time"
@@ -45,18 +44,8 @@ type LabelRule struct {
 	Index     int           `json:"index"`
 	Labels    []RegionLabel `json:"labels"`
 	RuleType  string        `json:"rule_type"`
-	Data      any           `json:"data"`
+	Data      interface{}   `json:"data"`
 	minExpire *time.Time
-}
-
-// NewLabelRuleFromJSON creates a label rule from the JSON data.
-func NewLabelRuleFromJSON(data []byte) (*LabelRule, error) {
-	lr := &LabelRule{}
-	err := json.Unmarshal(data, lr)
-	if err != nil {
-		return nil, err
-	}
-	return lr, nil
 }
 
 const (
@@ -65,8 +54,8 @@ const (
 )
 
 const (
-	scheduleOptionLabel     = "schedule"
-	scheduleOptionValueDeny = "deny"
+	scheduleOptionLabel      = "schedule"
+	scheduleOptioonValueDeny = "deny"
 )
 
 // KeyRangeRule contains the start key and end key of the LabelRule.
@@ -182,9 +171,9 @@ func (rule *LabelRule) expireBefore(t time.Time) bool {
 	return rule.minExpire.Before(t)
 }
 
-// initKeyRangeRulesFromLabelRuleData init and adjust []KeyRangeRule from `LabelRule.Data`
-func initKeyRangeRulesFromLabelRuleData(data any) ([]*KeyRangeRule, error) {
-	rules, ok := data.([]any)
+// initKeyRangeRulesFromLabelRuleData init and adjust []KeyRangeRule from `LabelRule.Data“
+func initKeyRangeRulesFromLabelRuleData(data interface{}) ([]*KeyRangeRule, error) {
+	rules, ok := data.([]interface{})
 	if !ok {
 		return nil, errs.ErrRegionRuleContent.FastGenByArgs(fmt.Sprintf("invalid rule type: %T", data))
 	}
@@ -203,8 +192,8 @@ func initKeyRangeRulesFromLabelRuleData(data any) ([]*KeyRangeRule, error) {
 }
 
 // initAndAdjustKeyRangeRule inits and adjusts the KeyRangeRule from one item in `LabelRule.Data`
-func initAndAdjustKeyRangeRule(rule any) (*KeyRangeRule, error) {
-	data, ok := rule.(map[string]any)
+func initAndAdjustKeyRangeRule(rule interface{}) (*KeyRangeRule, error) {
+	data, ok := rule.(map[string]interface{})
 	if !ok {
 		return nil, errs.ErrRegionRuleContent.FastGenByArgs(fmt.Sprintf("invalid rule type: %T", reflect.TypeOf(rule)))
 	}

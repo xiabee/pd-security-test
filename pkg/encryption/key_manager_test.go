@@ -17,6 +17,8 @@ package encryption
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -29,11 +31,12 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/election"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
+	"github.com/tikv/pd/pkg/utils/tempurl"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/embed"
 )
 
-// #nosec G101
 const (
 	testMasterKey     = "8fd7e3e917c170d92f3e51a981dd7bc8fba11f3df7d8df994842f6e86f69b530"
 	testMasterKey2    = "8fd7e3e917c170d92f3e51a981dd7bc8fba11f3df7d8df994842f6e86f69b531"
@@ -46,11 +49,35 @@ func getTestDataKey() []byte {
 	return key
 }
 
-func newTestEtcd(t *testing.T) (client *clientv3.Client) {
-	_, client, clean := etcdutil.NewTestEtcdCluster(t, 1)
-	t.Cleanup(func() {
-		clean()
+func newTestEtcd(t *testing.T, re *require.Assertions) (client *clientv3.Client) {
+	cfg := embed.NewConfig()
+	cfg.Name = "test_etcd"
+	cfg.Dir = t.TempDir()
+	cfg.Logger = "zap"
+	pu, err := url.Parse(tempurl.Alloc())
+	re.NoError(err)
+	cfg.LPUrls = []url.URL{*pu}
+	cfg.APUrls = cfg.LPUrls
+	cu, err := url.Parse(tempurl.Alloc())
+	re.NoError(err)
+	cfg.LCUrls = []url.URL{*cu}
+	cfg.ACUrls = cfg.LCUrls
+	cfg.InitialCluster = fmt.Sprintf("%s=%s", cfg.Name, &cfg.LPUrls[0])
+	cfg.ClusterState = embed.ClusterStateFlagNew
+	server, err := embed.StartEtcd(cfg)
+	re.NoError(err)
+	<-server.Server.ReadyNotify()
+
+	client, err = clientv3.New(clientv3.Config{
+		Endpoints: []string{cfg.LCUrls[0].String()},
 	})
+	re.NoError(err)
+
+	t.Cleanup(func() {
+		client.Close()
+		server.Close()
+	})
+
 	return client
 }
 
@@ -86,7 +113,7 @@ func checkMasterKeyMeta(re *require.Assertions, value []byte, meta *encryptionpb
 func TestNewKeyManagerBasic(t *testing.T) {
 	re := require.New(t)
 	// Initialize.
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	// Use default config.
 	config := &Config{}
 	err := config.Adjust()
@@ -108,7 +135,7 @@ func TestNewKeyManagerBasic(t *testing.T) {
 func TestNewKeyManagerWithCustomConfig(t *testing.T) {
 	re := require.New(t)
 	// Initialize.
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	// Custom config
 	rotatePeriod, err := time.ParseDuration("100h")
@@ -146,7 +173,7 @@ func TestNewKeyManagerWithCustomConfig(t *testing.T) {
 func TestNewKeyManagerLoadKeys(t *testing.T) {
 	re := require.New(t)
 	// Initialize.
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Use default config.
@@ -187,7 +214,7 @@ func TestNewKeyManagerLoadKeys(t *testing.T) {
 func TestGetCurrentKey(t *testing.T) {
 	re := require.New(t)
 	// Initialize.
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	// Use default config.
 	config := &Config{}
 	err := config.Adjust()
@@ -230,7 +257,7 @@ func TestGetCurrentKey(t *testing.T) {
 func TestGetKey(t *testing.T) {
 	re := require.New(t)
 	// Initialize.
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Store initial keys in etcd.
@@ -285,7 +312,7 @@ func TestGetKey(t *testing.T) {
 func TestLoadKeyEmpty(t *testing.T) {
 	re := require.New(t)
 	// Initialize.
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Store initial keys in etcd.
@@ -313,7 +340,7 @@ func TestLoadKeyEmpty(t *testing.T) {
 	// Simulate keys get deleted.
 	_, err = client.Delete(context.Background(), EncryptionKeysPath)
 	re.NoError(err)
-	re.Error(m.loadKeys())
+	re.NotNil(m.loadKeys())
 }
 
 func TestWatcher(t *testing.T) {
@@ -321,7 +348,7 @@ func TestWatcher(t *testing.T) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Setup helper
@@ -397,7 +424,7 @@ func TestWatcher(t *testing.T) {
 func TestSetLeadershipWithEncryptionOff(t *testing.T) {
 	re := require.New(t)
 	// Initialize.
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	// Use default config.
 	config := &Config{}
 	err := config.Adjust()
@@ -422,7 +449,7 @@ func TestSetLeadershipWithEncryptionEnabling(t *testing.T) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Setup helper
@@ -475,7 +502,7 @@ func TestSetLeadershipWithEncryptionMethodChanged(t *testing.T) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Setup helper
@@ -509,7 +536,7 @@ func TestSetLeadershipWithEncryptionMethodChanged(t *testing.T) {
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
 	re.NoError(err)
-	// Config with different encryption method.
+	// Config with different encrption method.
 	config := &Config{
 		DataEncryptionMethod: "aes256-ctr",
 		MasterKey: MasterKeyConfig{
@@ -551,7 +578,7 @@ func TestSetLeadershipWithCurrentKeyExposed(t *testing.T) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Setup helper
@@ -579,7 +606,7 @@ func TestSetLeadershipWithCurrentKeyExposed(t *testing.T) {
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
 	re.NoError(err)
-	// Config with different encryption method.
+	// Config with different encrption method.
 	config := &Config{
 		DataEncryptionMethod: "aes128-ctr",
 		MasterKey: MasterKeyConfig{
@@ -622,7 +649,7 @@ func TestSetLeadershipWithCurrentKeyExpired(t *testing.T) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Setup helper
@@ -697,7 +724,7 @@ func TestSetLeadershipWithMasterKeyChanged(t *testing.T) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	keyFile2 := newTestKeyFile(t, re, testMasterKey2)
 	leadership := newTestLeader(re, client)
@@ -762,7 +789,7 @@ func TestSetLeadershipWithMasterKeyChanged(t *testing.T) {
 func TestSetLeadershipMasterKeyWithCiphertextKey(t *testing.T) {
 	re := require.New(t)
 	// Initialize.
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Setup helper
@@ -840,7 +867,7 @@ func TestSetLeadershipWithEncryptionDisabling(t *testing.T) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Setup helper
@@ -896,7 +923,7 @@ func TestKeyRotation(t *testing.T) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Setup helper
@@ -992,7 +1019,7 @@ func TestKeyRotationConflict(t *testing.T) {
 	// Initialize.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	client := newTestEtcd(t)
+	client := newTestEtcd(t, re)
 	keyFile := newTestKeyFile(t, re)
 	leadership := newTestLeader(re, client)
 	// Setup helper

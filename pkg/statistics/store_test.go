@@ -24,7 +24,7 @@ import (
 	"github.com/tikv/pd/pkg/core"
 )
 
-func TestFilterUnhealthyStore(t *testing.T) {
+func TestFilterUnhealtyStore(t *testing.T) {
 	re := require.New(t)
 	stats := NewStoresStats()
 	cluster := core.NewBasicCluster()
@@ -35,7 +35,7 @@ func TestFilterUnhealthyStore(t *testing.T) {
 	re.Len(stats.GetStoresLoads(), 5)
 
 	cluster.PutStore(cluster.GetStore(1).Clone(core.SetLastHeartbeatTS(time.Now().Add(-24 * time.Hour))))
-	cluster.PutStore(cluster.GetStore(2).Clone(core.SetStoreState(metapb.StoreState_Tombstone)))
+	cluster.PutStore(cluster.GetStore(2).Clone(core.TombstoneStore()))
 	cluster.DeleteStore(cluster.GetStore(3))
 
 	stats.FilterUnhealthyStore(cluster)

@@ -17,6 +17,7 @@ package cases
 import (
 	"time"
 
+	"github.com/docker/go-units"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
@@ -54,6 +55,8 @@ func newRedundantBalanceRegion() *Case {
 			ID:     IDAllocator.nextID(),
 			Peers:  peers,
 			Leader: peers[0],
+			Size:   96 * units.MiB,
+			Keys:   960000,
 		})
 	}
 

@@ -27,6 +27,7 @@ import (
 	"github.com/tikv/pd/pkg/utils/tempurl"
 	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/tests"
+	"github.com/tikv/pd/tests/integrations/mcs"
 	"go.uber.org/goleak"
 )
 
@@ -96,10 +97,10 @@ func (suite *serverRegisterTestSuite) checkServerRegister(serviceName string) {
 	re.Equal(addr, returnedEntry.ServiceAddr)
 
 	// test primary when only one server
-	expectedPrimary := tests.WaitForPrimaryServing(re, map[string]bs.Server{addr: s})
+	expectedPrimary := mcs.WaitForPrimaryServing(suite.Require(), map[string]bs.Server{addr: s})
 	primary, exist := suite.pdLeader.GetServer().GetServicePrimaryAddr(suite.ctx, serviceName)
 	re.True(exist)
-	re.Equal(expectedPrimary, primary)
+	re.Equal(primary, expectedPrimary)
 
 	// test API server discovery after unregister
 	cleanup()
@@ -130,7 +131,7 @@ func (suite *serverRegisterTestSuite) checkServerPrimaryChange(serviceName strin
 		serverMap[s.GetAddr()] = s
 	}
 
-	expectedPrimary := tests.WaitForPrimaryServing(re, serverMap)
+	expectedPrimary := mcs.WaitForPrimaryServing(suite.Require(), serverMap)
 	primary, exist = suite.pdLeader.GetServer().GetServicePrimaryAddr(suite.ctx, serviceName)
 	re.True(exist)
 	re.Equal(expectedPrimary, primary)
@@ -138,7 +139,7 @@ func (suite *serverRegisterTestSuite) checkServerPrimaryChange(serviceName strin
 	serverMap[primary].Close()
 	delete(serverMap, primary)
 
-	expectedPrimary = tests.WaitForPrimaryServing(re, serverMap)
+	expectedPrimary = mcs.WaitForPrimaryServing(suite.Require(), serverMap)
 	// test API server discovery
 	client := suite.pdLeader.GetEtcdClient()
 	endpoints, err := discovery.Discover(client, suite.clusterID, serviceName)
@@ -155,9 +156,9 @@ func (suite *serverRegisterTestSuite) addServer(serviceName string) (bs.Server, 
 	re := suite.Require()
 	switch serviceName {
 	case utils.TSOServiceName:
-		return tests.StartSingleTSOTestServer(suite.ctx, re, suite.backendEndpoints, tempurl.Alloc())
+		return mcs.StartSingleTSOTestServer(suite.ctx, re, suite.backendEndpoints, tempurl.Alloc())
 	case utils.ResourceManagerServiceName:
-		return tests.StartSingleResourceManagerTestServer(suite.ctx, re, suite.backendEndpoints, tempurl.Alloc())
+		return mcs.StartSingleResourceManagerTestServer(suite.ctx, re, suite.backendEndpoints, tempurl.Alloc())
 	default:
 		return nil, nil
 	}

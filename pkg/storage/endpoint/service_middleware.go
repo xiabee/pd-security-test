@@ -22,14 +22,14 @@ import (
 
 // ServiceMiddlewareStorage defines the storage operations on the service middleware.
 type ServiceMiddlewareStorage interface {
-	LoadServiceMiddlewareConfig(cfg any) (bool, error)
-	SaveServiceMiddlewareConfig(cfg any) error
+	LoadServiceMiddlewareConfig(cfg interface{}) (bool, error)
+	SaveServiceMiddlewareConfig(cfg interface{}) error
 }
 
 var _ ServiceMiddlewareStorage = (*StorageEndpoint)(nil)
 
 // LoadServiceMiddlewareConfig loads service middleware config from serviceMiddlewarePath then unmarshal it to cfg.
-func (se *StorageEndpoint) LoadServiceMiddlewareConfig(cfg any) (bool, error) {
+func (se *StorageEndpoint) LoadServiceMiddlewareConfig(cfg interface{}) (bool, error) {
 	value, err := se.Load(serviceMiddlewarePath)
 	if err != nil || value == "" {
 		return false, err
@@ -42,6 +42,10 @@ func (se *StorageEndpoint) LoadServiceMiddlewareConfig(cfg any) (bool, error) {
 }
 
 // SaveServiceMiddlewareConfig stores marshallable cfg to the serviceMiddlewarePath.
-func (se *StorageEndpoint) SaveServiceMiddlewareConfig(cfg any) error {
-	return se.saveJSON(serviceMiddlewarePath, cfg)
+func (se *StorageEndpoint) SaveServiceMiddlewareConfig(cfg interface{}) error {
+	value, err := json.Marshal(cfg)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
+	}
+	return se.Save(serviceMiddlewarePath, string(value))
 }

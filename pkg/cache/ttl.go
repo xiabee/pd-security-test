@@ -25,7 +25,7 @@ import (
 )
 
 type ttlCacheItem struct {
-	value  any
+	value  interface{}
 	expire time.Time
 }
 
@@ -34,7 +34,7 @@ type ttlCache struct {
 	syncutil.RWMutex
 	ctx context.Context
 
-	items      map[any]ttlCacheItem
+	items      map[interface{}]ttlCacheItem
 	ttl        time.Duration
 	gcInterval time.Duration
 }
@@ -43,7 +43,7 @@ type ttlCache struct {
 func newTTL(ctx context.Context, gcInterval time.Duration, duration time.Duration) *ttlCache {
 	c := &ttlCache{
 		ctx:        ctx,
-		items:      make(map[any]ttlCacheItem),
+		items:      make(map[interface{}]ttlCacheItem),
 		ttl:        duration,
 		gcInterval: gcInterval,
 	}
@@ -53,12 +53,12 @@ func newTTL(ctx context.Context, gcInterval time.Duration, duration time.Duratio
 }
 
 // Put puts an item into cache.
-func (c *ttlCache) put(key any, value any) {
+func (c *ttlCache) put(key interface{}, value interface{}) {
 	c.putWithTTL(key, value, c.ttl)
 }
 
 // PutWithTTL puts an item into cache with specified TTL.
-func (c *ttlCache) putWithTTL(key any, value any, ttl time.Duration) {
+func (c *ttlCache) putWithTTL(key interface{}, value interface{}, ttl time.Duration) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -69,7 +69,7 @@ func (c *ttlCache) putWithTTL(key any, value any, ttl time.Duration) {
 }
 
 // Get retrieves an item from cache.
-func (c *ttlCache) get(key any) (any, bool) {
+func (c *ttlCache) get(key interface{}) (interface{}, bool) {
 	c.RLock()
 	defer c.RUnlock()
 
@@ -86,11 +86,11 @@ func (c *ttlCache) get(key any) (any, bool) {
 }
 
 // GetKeys returns all keys that are not expired.
-func (c *ttlCache) getKeys() []any {
+func (c *ttlCache) getKeys() []interface{} {
 	c.RLock()
 	defer c.RUnlock()
 
-	var keys []any
+	var keys []interface{}
 
 	now := time.Now()
 	for key, item := range c.items {
@@ -102,7 +102,7 @@ func (c *ttlCache) getKeys() []any {
 }
 
 // Remove eliminates an item from cache.
-func (c *ttlCache) remove(key any) {
+func (c *ttlCache) remove(key interface{}) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -110,7 +110,7 @@ func (c *ttlCache) remove(key any) {
 }
 
 // pop one key/value that is not expired. If boolean is false, it means that it didn't find the valid one.
-func (c *ttlCache) pop() (key, value any, exist bool) {
+func (c *ttlCache) pop() (interface{}, interface{}, bool) {
 	c.Lock()
 	defer c.Unlock()
 	now := time.Now()
@@ -199,12 +199,12 @@ func NewIDTTL(ctx context.Context, gcInterval, ttl time.Duration) *TTLUint64 {
 }
 
 // Get return the value by key id
-func (c *TTLUint64) Get(id uint64) (any, bool) {
+func (c *TTLUint64) Get(id uint64) (interface{}, bool) {
 	return c.ttlCache.get(id)
 }
 
 // Put saves an ID in cache.
-func (c *TTLUint64) Put(id uint64, value any) {
+func (c *TTLUint64) Put(id uint64, value interface{}) {
 	c.ttlCache.put(id, value)
 }
 
@@ -233,7 +233,7 @@ func (c *TTLUint64) Remove(key uint64) {
 }
 
 // PutWithTTL puts an item into cache with specified TTL.
-func (c *TTLUint64) PutWithTTL(key uint64, value any, ttl time.Duration) {
+func (c *TTLUint64) PutWithTTL(key uint64, value interface{}, ttl time.Duration) {
 	c.ttlCache.putWithTTL(key, value, ttl)
 }
 
@@ -250,17 +250,17 @@ func NewStringTTL(ctx context.Context, gcInterval, ttl time.Duration) *TTLString
 }
 
 // Put put the string key with the value
-func (c *TTLString) Put(key string, value any) {
+func (c *TTLString) Put(key string, value interface{}) {
 	c.ttlCache.put(key, value)
 }
 
 // PutWithTTL puts an item into cache with specified TTL.
-func (c *TTLString) PutWithTTL(key string, value any, ttl time.Duration) {
+func (c *TTLString) PutWithTTL(key string, value interface{}, ttl time.Duration) {
 	c.ttlCache.putWithTTL(key, value, ttl)
 }
 
 // Pop one key/value that is not expired
-func (c *TTLString) Pop() (string, any, bool) {
+func (c *TTLString) Pop() (string, interface{}, bool) {
 	k, v, success := c.ttlCache.pop()
 	if !success {
 		return "", nil, false
@@ -273,7 +273,7 @@ func (c *TTLString) Pop() (string, any, bool) {
 }
 
 // Get return the value by key id
-func (c *TTLString) Get(id string) (any, bool) {
+func (c *TTLString) Get(id string) (interface{}, bool) {
 	return c.ttlCache.get(id)
 }
 

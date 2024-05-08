@@ -20,9 +20,6 @@ import (
 	"github.com/pingcap/errors"
 )
 
-// OpWaiting is the status of a waiting operators.
-const OpWaiting = "waiting"
-
 // OpKind is a bit field to identify operator types.
 type OpKind uint32
 

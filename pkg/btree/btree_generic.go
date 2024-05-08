@@ -78,8 +78,7 @@ package btree
 
 import (
 	"sort"
-
-	"github.com/tikv/pd/pkg/utils/syncutil"
+	"sync"
 )
 
 // Item represents a single object in the tree.
@@ -102,7 +101,7 @@ const (
 // FreeList, in particular when they're created with Clone.
 // Two Btrees using the same freelist are safe for concurrent write access.
 type FreeListG[T Item[T]] struct {
-	mu       syncutil.Mutex
+	mu       sync.Mutex
 	freelist []*node[T]
 }
 
@@ -821,7 +820,7 @@ type copyOnWriteContext[T Item[T]] struct {
 // The internal tree structure of b is marked read-only and shared between t and
 // t2.  Writes to both t and t2 use copy-on-write logic, creating new nodes
 // whenever one of b's original nodes would have been modified.  Read operations
-// should have no performance degradation.  Write operations for both t and t2
+// should have no performance degredation.  Write operations for both t and t2
 // will initially experience minor slow-downs caused by additional allocs and
 // copies due to the aforementioned copy-on-write logic, but should converge to
 // the original performance characteristics of the original tree.

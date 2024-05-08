@@ -1,5 +1,4 @@
 // Copyright 2016 TiKV Project Authors.
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -62,17 +61,14 @@ type regionTree struct {
 	totalSize           int64
 	totalWriteBytesRate float64
 	totalWriteKeysRate  float64
-	// count the number of regions that not loaded from storage.
-	notFromStorageRegionsCnt int
 }
 
 func newRegionTree() *regionTree {
 	return &regionTree{
-		tree:                     btree.NewG[*regionItem](defaultBTreeDegree),
-		totalSize:                0,
-		totalWriteBytesRate:      0,
-		totalWriteKeysRate:       0,
-		notFromStorageRegionsCnt: 0,
+		tree:                btree.NewG[*regionItem](defaultBTreeDegree),
+		totalSize:           0,
+		totalWriteBytesRate: 0,
+		totalWriteKeysRate:  0,
 	}
 }
 
@@ -81,13 +77,6 @@ func (t *regionTree) length() int {
 		return 0
 	}
 	return t.tree.Len()
-}
-
-func (t *regionTree) notFromStorageRegionsCount() int {
-	if t == nil {
-		return 0
-	}
-	return t.notFromStorageRegionsCnt
 }
 
 // GetOverlaps returns the range items that has some intersections with the given items.
@@ -123,9 +112,6 @@ func (t *regionTree) update(item *regionItem, withOverlaps bool, overlaps ...*re
 	regionWriteBytesRate, regionWriteKeysRate := region.GetWriteRate()
 	t.totalWriteBytesRate += regionWriteBytesRate
 	t.totalWriteKeysRate += regionWriteKeysRate
-	if !region.LoadedFromStorage() {
-		t.notFromStorageRegionsCnt++
-	}
 
 	if !withOverlaps {
 		overlaps = t.overlaps(item)
@@ -147,9 +133,6 @@ func (t *regionTree) update(item *regionItem, withOverlaps bool, overlaps ...*re
 		regionWriteBytesRate, regionWriteKeysRate = old.GetWriteRate()
 		t.totalWriteBytesRate -= regionWriteBytesRate
 		t.totalWriteKeysRate -= regionWriteKeysRate
-		if !old.LoadedFromStorage() {
-			t.notFromStorageRegionsCnt--
-		}
 	}
 
 	return result
@@ -166,15 +149,6 @@ func (t *regionTree) updateStat(origin *RegionInfo, region *RegionInfo) {
 	regionWriteBytesRate, regionWriteKeysRate = origin.GetWriteRate()
 	t.totalWriteBytesRate -= regionWriteBytesRate
 	t.totalWriteKeysRate -= regionWriteKeysRate
-
-	// If the region meta information not loaded from storage anymore, decrease the counter.
-	if origin.LoadedFromStorage() && !region.LoadedFromStorage() {
-		t.notFromStorageRegionsCnt++
-	}
-	// If the region meta information updated to load from storage, increase the counter.
-	if !origin.LoadedFromStorage() && region.LoadedFromStorage() {
-		t.notFromStorageRegionsCnt--
-	}
 }
 
 // remove removes a region if the region is in the tree.
@@ -194,9 +168,6 @@ func (t *regionTree) remove(region *RegionInfo) {
 	regionWriteBytesRate, regionWriteKeysRate := result.GetWriteRate()
 	t.totalWriteBytesRate -= regionWriteBytesRate
 	t.totalWriteKeysRate -= regionWriteKeysRate
-	if !region.LoadedFromStorage() {
-		t.notFromStorageRegionsCnt--
-	}
 	t.tree.Delete(item)
 }
 

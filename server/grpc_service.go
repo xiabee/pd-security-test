@@ -19,11 +19,7 @@ import (
 	"fmt"
 	"io"
 	"path"
-	"runtime"
-	"runtime/trace"
 	"strconv"
-	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,7 +27,6 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/pingcap/kvproto/pkg/schedulingpb"
 	"github.com/pingcap/kvproto/pkg/tsopb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/core"
@@ -42,7 +37,6 @@ import (
 	"github.com/tikv/pd/pkg/tso"
 	"github.com/tikv/pd/pkg/utils/grpcutil"
 	"github.com/tikv/pd/pkg/utils/logutil"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/pkg/utils/tsoutil"
 	"github.com/tikv/pd/pkg/versioninfo"
 	"github.com/tikv/pd/server/cluster"
@@ -54,192 +48,32 @@ import (
 )
 
 const (
-	heartbeatSendTimeout          = 5 * time.Second
-	maxRetryTimesRequestTSOServer = 3
-	retryIntervalRequestTSOServer = 500 * time.Millisecond
-	getMinTSFromTSOServerTimeout  = 1 * time.Second
-	defaultGRPCDialTimeout        = 3 * time.Second
-
-	gRPCServiceName = "pdpb.PD"
+	heartbeatSendTimeout = 5 * time.Second
 )
 
 // gRPC errors
 var (
 	// ErrNotLeader is returned when current server is not the leader and not possible to process request.
 	// TODO: work as proxy.
-	ErrNotLeader                        = status.Errorf(codes.Unavailable, "not leader")
-	ErrNotStarted                       = status.Errorf(codes.Unavailable, "server not started")
-	ErrSendHeartbeatTimeout             = status.Errorf(codes.DeadlineExceeded, "send heartbeat timeout")
-	ErrNotFoundTSOAddr                  = status.Errorf(codes.NotFound, "not found tso address")
-	ErrNotFoundSchedulingAddr           = status.Errorf(codes.NotFound, "not found scheduling address")
-	ErrNotFoundService                  = status.Errorf(codes.NotFound, "not found service")
-	ErrForwardTSOTimeout                = status.Errorf(codes.DeadlineExceeded, "forward tso request timeout")
-	ErrMaxCountTSOProxyRoutinesExceeded = status.Errorf(codes.ResourceExhausted, "max count of concurrent tso proxy routines exceeded")
-	ErrTSOProxyRecvFromClientTimeout    = status.Errorf(codes.DeadlineExceeded, "tso proxy timeout when receiving from client; stream closed by server")
-	ErrEtcdNotStarted                   = status.Errorf(codes.Unavailable, "server is started, but etcd not started")
-	ErrFollowerHandlingNotAllowed       = status.Errorf(codes.Unavailable, "not leader and follower handling not allowed")
-)
-
-var (
-	errRegionHeartbeatSend   = forwardFailCounter.WithLabelValues("region_heartbeat", "send")
-	errRegionHeartbeatClient = forwardFailCounter.WithLabelValues("region_heartbeat", "client")
-	errRegionHeartbeatStream = forwardFailCounter.WithLabelValues("region_heartbeat", "stream")
-	errRegionHeartbeatRecv   = forwardFailCounter.WithLabelValues("region_heartbeat", "recv")
-	errScatterRegionSend     = forwardFailCounter.WithLabelValues("scatter_region", "send")
-	errSplitRegionsSend      = forwardFailCounter.WithLabelValues("split_regions", "send")
-	errStoreHeartbeatSend    = forwardFailCounter.WithLabelValues("store_heartbeat", "send")
-	errGetOperatorSend       = forwardFailCounter.WithLabelValues("get_operator", "send")
+	ErrNotLeader            = status.Errorf(codes.Unavailable, "not leader")
+	ErrNotStarted           = status.Errorf(codes.Unavailable, "server not started")
+	ErrSendHeartbeatTimeout = status.Errorf(codes.DeadlineExceeded, "send heartbeat timeout")
+	ErrNotFoundTSOAddr      = status.Errorf(codes.NotFound, "not found tso address")
+	ErrEtcdNotStarted       = status.Errorf(codes.Unavailable, "server is started, but etcd not started")
 )
 
 // GrpcServer wraps Server to provide grpc service.
 type GrpcServer struct {
 	*Server
-	schedulingClient             atomic.Value
-	concurrentTSOProxyStreamings atomic.Int32
-}
-
-// tsoServer wraps PD_TsoServer to ensure when any error
-// occurs on Send() or Recv(), both endpoints will be closed.
-type tsoServer struct {
-	stream pdpb.PD_TsoServer
-	closed int32
-}
-
-type pdpbTSORequest struct {
-	request *pdpb.TsoRequest
-	err     error
-}
-
-func (s *tsoServer) Send(m *pdpb.TsoResponse) error {
-	if atomic.LoadInt32(&s.closed) == 1 {
-		return io.EOF
-	}
-	done := make(chan error, 1)
-	go func() {
-		defer logutil.LogPanic()
-		failpoint.Inject("tsoProxyFailToSendToClient", func() {
-			done <- errors.New("injected error")
-			failpoint.Return()
-		})
-		done <- s.stream.Send(m)
-	}()
-	timer := time.NewTimer(tsoutil.DefaultTSOProxyTimeout)
-	defer timer.Stop()
-	select {
-	case err := <-done:
-		if err != nil {
-			atomic.StoreInt32(&s.closed, 1)
-		}
-		return errors.WithStack(err)
-	case <-timer.C:
-		atomic.StoreInt32(&s.closed, 1)
-		return ErrForwardTSOTimeout
-	}
-}
-
-func (s *tsoServer) Recv(timeout time.Duration) (*pdpb.TsoRequest, error) {
-	if atomic.LoadInt32(&s.closed) == 1 {
-		return nil, io.EOF
-	}
-	failpoint.Inject("tsoProxyRecvFromClientTimeout", func(val failpoint.Value) {
-		if customTimeoutInSeconds, ok := val.(int); ok {
-			timeout = time.Duration(customTimeoutInSeconds) * time.Second
-		}
-	})
-	requestCh := make(chan *pdpbTSORequest, 1)
-	go func() {
-		defer logutil.LogPanic()
-		request, err := s.stream.Recv()
-		requestCh <- &pdpbTSORequest{request: request, err: err}
-	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case req := <-requestCh:
-		if req.err != nil {
-			atomic.StoreInt32(&s.closed, 1)
-			return nil, errors.WithStack(req.err)
-		}
-		return req.request, nil
-	case <-timer.C:
-		atomic.StoreInt32(&s.closed, 1)
-		return nil, ErrTSOProxyRecvFromClientTimeout
-	}
-}
-
-// heartbeatServer wraps PD_RegionHeartbeatServer to ensure when any error
-// occurs on Send() or Recv(), both endpoints will be closed.
-type heartbeatServer struct {
-	stream pdpb.PD_RegionHeartbeatServer
-	closed int32
-}
-
-func (s *heartbeatServer) Send(m core.RegionHeartbeatResponse) error {
-	if atomic.LoadInt32(&s.closed) == 1 {
-		return io.EOF
-	}
-	done := make(chan error, 1)
-	go func() {
-		defer logutil.LogPanic()
-		done <- s.stream.Send(m.(*pdpb.RegionHeartbeatResponse))
-	}()
-	timer := time.NewTimer(heartbeatSendTimeout)
-	defer timer.Stop()
-	select {
-	case err := <-done:
-		if err != nil {
-			atomic.StoreInt32(&s.closed, 1)
-		}
-		return errors.WithStack(err)
-	case <-timer.C:
-		atomic.StoreInt32(&s.closed, 1)
-		return ErrSendHeartbeatTimeout
-	}
-}
-
-func (s *heartbeatServer) Recv() (*pdpb.RegionHeartbeatRequest, error) {
-	if atomic.LoadInt32(&s.closed) == 1 {
-		return nil, io.EOF
-	}
-	req, err := s.stream.Recv()
-	if err != nil {
-		atomic.StoreInt32(&s.closed, 1)
-		return nil, errors.WithStack(err)
-	}
-	return req, nil
-}
-
-type schedulingClient struct {
-	client  schedulingpb.SchedulingClient
-	primary string
-}
-
-func (s *schedulingClient) getClient() schedulingpb.SchedulingClient {
-	if s == nil {
-		return nil
-	}
-	return s.client
-}
-
-func (s *schedulingClient) getPrimaryAddr() string {
-	if s == nil {
-		return ""
-	}
-	return s.primary
 }
 
 type request interface {
 	GetHeader() *pdpb.RequestHeader
 }
 
-type forwardFn func(ctx context.Context, client *grpc.ClientConn) (any, error)
+type forwardFn func(ctx context.Context, client *grpc.ClientConn) (interface{}, error)
 
-func (s *GrpcServer) unaryMiddleware(ctx context.Context, req request, fn forwardFn) (rsp any, err error) {
-	return s.unaryFollowerMiddleware(ctx, req, fn, nil)
-}
-
-// unaryFollowerMiddleware adds the check of followers enable compared to unaryMiddleware.
-func (s *GrpcServer) unaryFollowerMiddleware(ctx context.Context, req request, fn forwardFn, allowFollower *bool) (rsp any, err error) {
+func (s *GrpcServer) unaryMiddleware(ctx context.Context, req request, fn forwardFn) (rsp interface{}, err error) {
 	failpoint.Inject("customTimeout", func() {
 		time.Sleep(5 * time.Second)
 	})
@@ -252,7 +86,7 @@ func (s *GrpcServer) unaryFollowerMiddleware(ctx context.Context, req request, f
 		ctx = grpcutil.ResetForwardContext(ctx)
 		return fn(ctx, client)
 	}
-	if err := s.validateRoleInRequest(ctx, req.GetHeader(), allowFollower); err != nil {
+	if err := s.validateRequest(req.GetHeader()); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -264,15 +98,18 @@ func (s *GrpcServer) GetClusterInfo(ctx context.Context, _ *pdpb.GetClusterInfoR
 	// at startup and needs to get the cluster ID with the first request (i.e. GetMembers).
 	if s.IsClosed() {
 		return &pdpb.GetClusterInfoResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, errs.ErrServerNotStarted.FastGenByArgs().Error()),
+			Header: &pdpb.ResponseHeader{
+				Error: &pdpb.Error{
+					Type:    pdpb.ErrorType_UNKNOWN,
+					Message: errs.ErrServerNotStarted.FastGenByArgs().Error(),
+				},
+			},
 		}, nil
 	}
 
-	var tsoServiceAddrs []string
 	svcModes := make([]pdpb.ServiceMode, 0)
 	if s.IsAPIServiceMode() {
 		svcModes = append(svcModes, pdpb.ServiceMode_API_SVC_MODE)
-		tsoServiceAddrs = s.keyspaceGroupManager.GetTSOServiceAddrs()
 	} else {
 		svcModes = append(svcModes, pdpb.ServiceMode_PD_SVC_MODE)
 	}
@@ -280,189 +117,21 @@ func (s *GrpcServer) GetClusterInfo(ctx context.Context, _ *pdpb.GetClusterInfoR
 	return &pdpb.GetClusterInfoResponse{
 		Header:       s.header(),
 		ServiceModes: svcModes,
-		TsoUrls:      tsoServiceAddrs,
 	}, nil
-}
-
-// GetMinTS implements gRPC PDServer. In PD service mode, it simply returns a timestamp.
-// In API service mode, it queries all tso servers and gets the minimum timestamp across
-// all keyspace groups.
-func (s *GrpcServer) GetMinTS(
-	ctx context.Context, request *pdpb.GetMinTSRequest,
-) (*pdpb.GetMinTSResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetMinTSResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
-		return pdpb.NewPDClient(client).GetMinTS(ctx, request)
-	}
-	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
-		return nil, err
-	} else if rsp != nil {
-		return rsp.(*pdpb.GetMinTSResponse), nil
-	}
-
-	var (
-		minTS *pdpb.Timestamp
-		err   error
-	)
-	if s.IsAPIServiceMode() {
-		minTS, err = s.GetMinTSFromTSOService(tso.GlobalDCLocation)
-	} else {
-		start := time.Now()
-		ts, internalErr := s.tsoAllocatorManager.HandleRequest(ctx, tso.GlobalDCLocation, 1)
-		if internalErr == nil {
-			tsoHandleDuration.Observe(time.Since(start).Seconds())
-		}
-		minTS = &ts
-	}
-	if err != nil {
-		return &pdpb.GetMinTSResponse{
-			Header:    s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			Timestamp: minTS,
-		}, nil
-	}
-
-	return &pdpb.GetMinTSResponse{
-		Header:    s.header(),
-		Timestamp: minTS,
-	}, nil
-}
-
-// GetMinTSFromTSOService queries all tso servers and gets the minimum timestamp across
-// all keyspace groups.
-func (s *GrpcServer) GetMinTSFromTSOService(dcLocation string) (*pdpb.Timestamp, error) {
-	addrs := s.keyspaceGroupManager.GetTSOServiceAddrs()
-	if len(addrs) == 0 {
-		return &pdpb.Timestamp{}, errs.ErrGetMinTS.FastGenByArgs("no tso servers/pods discovered")
-	}
-
-	// Get the minimal timestamp from the TSO servers/pods
-	var mutex syncutil.Mutex
-	resps := make([]*tsopb.GetMinTSResponse, 0)
-	wg := sync.WaitGroup{}
-	wg.Add(len(addrs))
-	for _, addr := range addrs {
-		go func(addr string) {
-			defer wg.Done()
-			resp, err := s.getMinTSFromSingleServer(s.ctx, dcLocation, addr)
-			if err != nil || resp == nil {
-				log.Warn("failed to get min ts from tso server",
-					zap.String("address", addr), zap.Error(err))
-				return
-			}
-			mutex.Lock()
-			defer mutex.Unlock()
-			resps = append(resps, resp)
-		}(addr)
-	}
-	wg.Wait()
-
-	// Check the results. The returned minimal timestamp is valid if all the conditions are met:
-	// 1. The number of responses is equal to the number of TSO servers/pods.
-	// 2. The number of keyspace groups asked is equal to the number of TSO servers/pods.
-	// 3. The minimal timestamp is not zero.
-	var (
-		minTS               *pdpb.Timestamp
-		keyspaceGroupsAsked uint32
-	)
-	if len(resps) == 0 {
-		return &pdpb.Timestamp{}, errs.ErrGetMinTS.FastGenByArgs("none of tso server/pod responded")
-	}
-	emptyTS := &pdpb.Timestamp{}
-	keyspaceGroupsTotal := resps[0].KeyspaceGroupsTotal
-	for _, resp := range resps {
-		if resp.KeyspaceGroupsTotal == 0 {
-			return &pdpb.Timestamp{}, errs.ErrGetMinTS.FastGenByArgs("the tso service has no keyspace group")
-		}
-		if resp.KeyspaceGroupsTotal != keyspaceGroupsTotal {
-			return &pdpb.Timestamp{}, errs.ErrGetMinTS.FastGenByArgs(
-				"the tso service has inconsistent keyspace group total count")
-		}
-		keyspaceGroupsAsked += resp.KeyspaceGroupsServing
-		if tsoutil.CompareTimestamp(resp.Timestamp, emptyTS) > 0 &&
-			(minTS == nil || tsoutil.CompareTimestamp(resp.Timestamp, minTS) < 0) {
-			minTS = resp.Timestamp
-		}
-	}
-
-	if keyspaceGroupsAsked != keyspaceGroupsTotal {
-		return &pdpb.Timestamp{}, errs.ErrGetMinTS.FastGenByArgs(
-			fmt.Sprintf("can't query all the tso keyspace groups. Asked %d, expected %d",
-				keyspaceGroupsAsked, keyspaceGroupsTotal))
-	}
-
-	if minTS == nil {
-		return &pdpb.Timestamp{}, errs.ErrGetMinTS.FastGenByArgs("the tso service is not ready")
-	}
-
-	return minTS, nil
-}
-
-func (s *GrpcServer) getMinTSFromSingleServer(
-	ctx context.Context, dcLocation, tsoSrvAddr string,
-) (*tsopb.GetMinTSResponse, error) {
-	cc, err := s.getDelegateClient(s.ctx, tsoSrvAddr)
-	if err != nil {
-		return nil, errs.ErrClientGetMinTSO.FastGenByArgs(
-			fmt.Sprintf("can't connect to tso server %s", tsoSrvAddr))
-	}
-
-	cctx, cancel := context.WithTimeout(ctx, getMinTSFromTSOServerTimeout)
-	defer cancel()
-
-	resp, err := tsopb.NewTSOClient(cc).GetMinTS(
-		cctx, &tsopb.GetMinTSRequest{
-			Header: &tsopb.RequestHeader{
-				ClusterId: s.ClusterID(),
-			},
-			DcLocation: dcLocation,
-		})
-	if err != nil {
-		attachErr := errors.Errorf("error:%s target:%s status:%s",
-			err, cc.Target(), cc.GetState().String())
-		return nil, errs.ErrClientGetMinTSO.Wrap(attachErr).GenWithStackByCause()
-	}
-	if resp == nil {
-		attachErr := errors.Errorf("error:%s target:%s status:%s",
-			"no min ts info collected", cc.Target(), cc.GetState().String())
-		return nil, errs.ErrClientGetMinTSO.Wrap(attachErr).GenWithStackByCause()
-	}
-	if resp.GetHeader().GetError() != nil {
-		attachErr := errors.Errorf("error:%s target:%s status:%s",
-			resp.GetHeader().GetError().String(), cc.Target(), cc.GetState().String())
-		return nil, errs.ErrClientGetMinTSO.Wrap(attachErr).GenWithStackByCause()
-	}
-
-	return resp, nil
 }
 
 // GetMembers implements gRPC PDServer.
 func (s *GrpcServer) GetMembers(context.Context, *pdpb.GetMembersRequest) (*pdpb.GetMembersResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetMembersResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
 	// Here we purposely do not check the cluster ID because the client does not know the correct cluster ID
 	// at startup and needs to get the cluster ID with the first request (i.e. GetMembers).
 	if s.IsClosed() {
 		return &pdpb.GetMembersResponse{
-			Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, errs.ErrServerNotStarted.FastGenByArgs().Error()),
+			Header: &pdpb.ResponseHeader{
+				Error: &pdpb.Error{
+					Type:    pdpb.ErrorType_UNKNOWN,
+					Message: errs.ErrServerNotStarted.FastGenByArgs().Error(),
+				},
+			},
 		}, nil
 	}
 	members, err := cluster.GetMembers(s.GetClient())
@@ -511,19 +180,6 @@ func (s *GrpcServer) GetMembers(context.Context, *pdpb.GetMembersRequest) (*pdpb
 
 // Tso implements gRPC PDServer.
 func (s *GrpcServer) Tso(stream pdpb.PD_TsoServer) error {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return err
-		}
-	}
-	if s.IsAPIServiceMode() {
-		return s.forwardTSO(stream)
-	}
-
 	var (
 		doneCh chan struct{}
 		errCh  chan error
@@ -547,8 +203,9 @@ func (s *GrpcServer) Tso(stream pdpb.PD_TsoServer) error {
 			return errors.WithStack(err)
 		}
 
-		forwardedHost := grpcutil.GetForwardedHost(stream.Context())
-		if !s.isLocalRequest(forwardedHost) {
+		if forwardedHost, err := s.getForwardedHost(ctx, stream.Context()); err != nil {
+			return err
+		} else if len(forwardedHost) > 0 {
 			clientConn, err := s.getDelegateClient(s.ctx, forwardedHost)
 			if err != nil {
 				return errors.WithStack(err)
@@ -560,8 +217,15 @@ func (s *GrpcServer) Tso(stream pdpb.PD_TsoServer) error {
 				errCh = make(chan error)
 			}
 
+			var tsoProtoFactory tsoutil.ProtoFactory
+			if s.IsAPIServiceMode() {
+				tsoProtoFactory = s.tsoProtoFactory
+			} else {
+				tsoProtoFactory = s.pdProtoFactory
+			}
+
 			tsoRequest := tsoutil.NewPDProtoRequest(forwardedHost, clientConn, request, stream)
-			s.tsoDispatcher.DispatchRequest(ctx, tsoRequest, s.pdProtoFactory, doneCh, errCh, s.tsoPrimaryWatcher)
+			s.tsoDispatcher.DispatchRequest(ctx, tsoRequest, tsoProtoFactory, doneCh, errCh, s.updateServicePrimaryAddrCh)
 			continue
 		}
 
@@ -570,14 +234,11 @@ func (s *GrpcServer) Tso(stream pdpb.PD_TsoServer) error {
 		if s.IsClosed() {
 			return status.Errorf(codes.Unknown, "server not started")
 		}
-		if clusterID := s.ClusterID(); request.GetHeader().GetClusterId() != clusterID {
-			return status.Errorf(codes.FailedPrecondition,
-				"mismatch cluster id, need %d but got %d", clusterID, request.GetHeader().GetClusterId())
+		if request.GetHeader().GetClusterId() != s.clusterID {
+			return status.Errorf(codes.FailedPrecondition, "mismatch cluster id, need %d but got %d", s.clusterID, request.GetHeader().GetClusterId())
 		}
 		count := request.GetCount()
-		ctx, task := trace.NewTask(ctx, "tso")
-		ts, err := s.tsoAllocatorManager.HandleRequest(ctx, request.GetDcLocation(), count)
-		task.End()
+		ts, err := s.tsoAllocatorManager.HandleRequest(request.GetDcLocation(), count)
 		if err != nil {
 			return status.Errorf(codes.Unknown, err.Error())
 		}
@@ -593,20 +254,22 @@ func (s *GrpcServer) Tso(stream pdpb.PD_TsoServer) error {
 	}
 }
 
+func (s *GrpcServer) getForwardedHost(ctx, streamCtx context.Context) (forwardedHost string, err error) {
+	if s.IsAPIServiceMode() {
+		var ok bool
+		forwardedHost, ok = s.GetServicePrimaryAddr(ctx, utils.TSOServiceName)
+		if !ok || len(forwardedHost) == 0 {
+			return "", ErrNotFoundTSOAddr
+		}
+	} else if fh := grpcutil.GetForwardedHost(streamCtx); !s.isLocalRequest(fh) {
+		forwardedHost = fh
+	}
+	return forwardedHost, nil
+}
+
 // Bootstrap implements gRPC PDServer.
 func (s *GrpcServer) Bootstrap(ctx context.Context, request *pdpb.BootstrapRequest) (*pdpb.BootstrapResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.BootstrapResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).Bootstrap(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -639,18 +302,7 @@ func (s *GrpcServer) Bootstrap(ctx context.Context, request *pdpb.BootstrapReque
 
 // IsBootstrapped implements gRPC PDServer.
 func (s *GrpcServer) IsBootstrapped(ctx context.Context, request *pdpb.IsBootstrappedRequest) (*pdpb.IsBootstrappedResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.IsBootstrappedResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).IsBootstrapped(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -668,18 +320,7 @@ func (s *GrpcServer) IsBootstrapped(ctx context.Context, request *pdpb.IsBootstr
 
 // AllocID implements gRPC PDServer.
 func (s *GrpcServer) AllocID(ctx context.Context, request *pdpb.AllocIDRequest) (*pdpb.AllocIDResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.AllocIDResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).AllocID(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -704,17 +345,6 @@ func (s *GrpcServer) AllocID(ctx context.Context, request *pdpb.AllocIDRequest) 
 
 // IsSnapshotRecovering implements gRPC PDServer.
 func (s *GrpcServer) IsSnapshotRecovering(ctx context.Context, request *pdpb.IsSnapshotRecoveringRequest) (*pdpb.IsSnapshotRecoveringResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.IsSnapshotRecoveringResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
 	// recovering mark is stored in etcd directly, there's no need to forward.
 	marked, err := s.Server.IsSnapshotRecovering(ctx)
 	if err != nil {
@@ -730,18 +360,7 @@ func (s *GrpcServer) IsSnapshotRecovering(ctx context.Context, request *pdpb.IsS
 
 // GetStore implements gRPC PDServer.
 func (s *GrpcServer) GetStore(ctx context.Context, request *pdpb.GetStoreRequest) (*pdpb.GetStoreResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetStoreResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).GetStore(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -749,6 +368,7 @@ func (s *GrpcServer) GetStore(ctx context.Context, request *pdpb.GetStoreRequest
 	} else if rsp != nil {
 		return rsp.(*pdpb.GetStoreResponse), err
 	}
+
 	rc := s.GetRaftCluster()
 	if rc == nil {
 		return &pdpb.GetStoreResponse{Header: s.notBootstrappedHeader()}, nil
@@ -786,18 +406,7 @@ func checkStore(rc *cluster.RaftCluster, storeID uint64) *pdpb.Error {
 
 // PutStore implements gRPC PDServer.
 func (s *GrpcServer) PutStore(ctx context.Context, request *pdpb.PutStoreRequest) (*pdpb.PutStoreResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.PutStoreResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).PutStore(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -833,7 +442,7 @@ func (s *GrpcServer) PutStore(ctx context.Context, request *pdpb.PutStoreRequest
 	}
 
 	log.Info("put store ok", zap.Stringer("store", store))
-	CheckPDVersionWithClusterVersion(s.persistOptions)
+	CheckPDVersion(s.persistOptions)
 
 	return &pdpb.PutStoreResponse{
 		Header:            s.header(),
@@ -843,18 +452,7 @@ func (s *GrpcServer) PutStore(ctx context.Context, request *pdpb.PutStoreRequest
 
 // GetAllStores implements gRPC PDServer.
 func (s *GrpcServer) GetAllStores(ctx context.Context, request *pdpb.GetAllStoresRequest) (*pdpb.GetAllStoresResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetAllStoresResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).GetAllStores(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -888,18 +486,7 @@ func (s *GrpcServer) GetAllStores(ctx context.Context, request *pdpb.GetAllStore
 
 // StoreHeartbeat implements gRPC PDServer.
 func (s *GrpcServer) StoreHeartbeat(ctx context.Context, request *pdpb.StoreHeartbeatRequest) (*pdpb.StoreHeartbeatResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.StoreHeartbeatResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, errs.ErrRateLimitExceeded.FastGenByArgs().Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).StoreHeartbeat(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -946,26 +533,8 @@ func (s *GrpcServer) StoreHeartbeat(ctx context.Context, request *pdpb.StoreHear
 		}
 
 		s.handleDamagedStore(request.GetStats())
+
 		storeHeartbeatHandleDuration.WithLabelValues(storeAddress, storeLabel).Observe(time.Since(start).Seconds())
-		if s.IsServiceIndependent(utils.SchedulingServiceName) {
-			forwardCli, _ := s.updateSchedulingClient(ctx)
-			cli := forwardCli.getClient()
-			if cli != nil {
-				req := &schedulingpb.StoreHeartbeatRequest{
-					Header: &schedulingpb.RequestHeader{
-						ClusterId: request.GetHeader().GetClusterId(),
-						SenderId:  request.GetHeader().GetSenderId(),
-					},
-					Stats: request.GetStats(),
-				}
-				if _, err := cli.StoreHeartbeat(ctx, req); err != nil {
-					errStoreHeartbeatSend.Inc()
-					log.Debug("forward store heartbeat failed", zap.Error(err))
-					// reset to let it be updated in the next request
-					s.schedulingClient.CompareAndSwap(forwardCli, &schedulingClient{})
-				}
-			}
-		}
 	}
 
 	if status := request.GetDrAutosyncStatus(); status != nil {
@@ -977,40 +546,6 @@ func (s *GrpcServer) StoreHeartbeat(ctx context.Context, request *pdpb.StoreHear
 	rc.GetUnsafeRecoveryController().HandleStoreHeartbeat(request, resp)
 
 	return resp, nil
-}
-
-// 1. forwardedHost is empty, return nil
-// 2. forwardedHost is not empty and forwardedHost is equal to pre, return pre
-// 3. the rest of cases, update forwardedHost and return new client
-func (s *GrpcServer) updateSchedulingClient(ctx context.Context) (*schedulingClient, error) {
-	forwardedHost, _ := s.GetServicePrimaryAddr(ctx, utils.SchedulingServiceName)
-	if forwardedHost == "" {
-		return nil, ErrNotFoundSchedulingAddr
-	}
-
-	pre := s.schedulingClient.Load()
-	if pre != nil && forwardedHost == pre.(*schedulingClient).getPrimaryAddr() {
-		return pre.(*schedulingClient), nil
-	}
-
-	client, err := s.getDelegateClient(ctx, forwardedHost)
-	if err != nil {
-		log.Error("get delegate client failed", zap.Error(err))
-		return nil, err
-	}
-	forwardCli := &schedulingClient{
-		client:  schedulingpb.NewSchedulingClient(client),
-		primary: forwardedHost,
-	}
-	swapped := s.schedulingClient.CompareAndSwap(pre, forwardCli)
-	if swapped {
-		oldForwardedHost := ""
-		if pre != nil {
-			oldForwardedHost = pre.(*schedulingClient).getPrimaryAddr()
-		}
-		log.Info("update scheduling client", zap.String("old-forwarded-host", oldForwardedHost), zap.String("new-forwarded-host", forwardedHost))
-	}
-	return forwardCli, nil
 }
 
 // bucketHeartbeatServer wraps PD_ReportBucketsServer to ensure when any error
@@ -1029,15 +564,13 @@ func (b *bucketHeartbeatServer) Send(bucket *pdpb.ReportBucketsResponse) error {
 		defer logutil.LogPanic()
 		done <- b.stream.SendAndClose(bucket)
 	}()
-	timer := time.NewTimer(heartbeatSendTimeout)
-	defer timer.Stop()
 	select {
 	case err := <-done:
 		if err != nil {
 			atomic.StoreInt32(&b.closed, 1)
 		}
 		return err
-	case <-timer.C:
+	case <-time.After(heartbeatSendTimeout):
 		atomic.StoreInt32(&b.closed, 1)
 		return ErrSendHeartbeatTimeout
 	}
@@ -1050,6 +583,46 @@ func (b *bucketHeartbeatServer) Recv() (*pdpb.ReportBucketsRequest, error) {
 	req, err := b.stream.Recv()
 	if err != nil {
 		atomic.StoreInt32(&b.closed, 1)
+		return nil, errors.WithStack(err)
+	}
+	return req, nil
+}
+
+// heartbeatServer wraps PD_RegionHeartbeatServer to ensure when any error
+// occurs on Send() or Recv(), both endpoints will be closed.
+type heartbeatServer struct {
+	stream pdpb.PD_RegionHeartbeatServer
+	closed int32
+}
+
+func (s *heartbeatServer) Send(m *pdpb.RegionHeartbeatResponse) error {
+	if atomic.LoadInt32(&s.closed) == 1 {
+		return io.EOF
+	}
+	done := make(chan error, 1)
+	go func() {
+		defer logutil.LogPanic()
+		done <- s.stream.Send(m)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			atomic.StoreInt32(&s.closed, 1)
+		}
+		return errors.WithStack(err)
+	case <-time.After(heartbeatSendTimeout):
+		atomic.StoreInt32(&s.closed, 1)
+		return ErrSendHeartbeatTimeout
+	}
+}
+
+func (s *heartbeatServer) Recv() (*pdpb.RegionHeartbeatRequest, error) {
+	if atomic.LoadInt32(&s.closed) == 1 {
+		return nil, io.EOF
+	}
+	req, err := s.stream.Recv()
+	if err != nil {
+		atomic.StoreInt32(&s.closed, 1)
 		return nil, errors.WithStack(err)
 	}
 	return req, nil
@@ -1069,15 +642,6 @@ func (s *GrpcServer) ReportBuckets(stream pdpb.PD_ReportBucketsServer) error {
 			cancel()
 		}
 	}()
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return err
-		}
-	}
 	for {
 		request, err := server.Recv()
 		failpoint.Inject("grpcClientClosed", func() {
@@ -1138,19 +702,12 @@ func (s *GrpcServer) ReportBuckets(stream pdpb.PD_ReportBucketsServer) error {
 		if buckets == nil || len(buckets.Keys) == 0 {
 			continue
 		}
-		var (
-			storeLabel   string
-			storeAddress string
-		)
 		store := rc.GetLeaderStoreByRegionID(buckets.GetRegionId())
 		if store == nil {
-			// As TiKV report buckets just after the region heartbeat, for new created region, PD may receive buckets report before the first region heartbeat is handled.
-			// So we should not return error here.
-			log.Warn("the store of the bucket in region is not found ", zap.Uint64("region-id", buckets.GetRegionId()))
-		} else {
-			storeLabel = strconv.FormatUint(store.GetID(), 10)
-			storeAddress = store.GetAddress()
+			return errors.Errorf("the store of the bucket in region %v is not found ", buckets.GetRegionId())
 		}
+		storeLabel := strconv.FormatUint(store.GetID(), 10)
+		storeAddress := store.GetAddress()
 		bucketReportCounter.WithLabelValues(storeAddress, storeLabel, "report", "recv").Inc()
 
 		start := time.Now()
@@ -1168,16 +725,13 @@ func (s *GrpcServer) ReportBuckets(stream pdpb.PD_ReportBucketsServer) error {
 // RegionHeartbeat implements gRPC PDServer.
 func (s *GrpcServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 	var (
-		server                      = &heartbeatServer{stream: stream}
-		flowRoundOption             = core.WithFlowRoundByDigit(s.persistOptions.GetPDServerConfig().FlowRoundByDigit)
-		cancel                      context.CancelFunc
-		lastBind                    time.Time
-		errCh                       chan error
-		forwardStream               pdpb.PD_RegionHeartbeatClient
-		lastForwardedHost           string
-		forwardErrCh                chan error
-		forwardSchedulingStream     schedulingpb.Scheduling_RegionHeartbeatClient
-		lastForwardedSchedulingHost string
+		server            = &heartbeatServer{stream: stream}
+		flowRoundOption   = core.WithFlowRoundByDigit(s.persistOptions.GetPDServerConfig().FlowRoundByDigit)
+		forwardStream     pdpb.PD_RegionHeartbeatClient
+		cancel            context.CancelFunc
+		lastForwardedHost string
+		lastBind          time.Time
+		errCh             chan error
 	)
 	defer func() {
 		// cancel the forward stream
@@ -1185,15 +739,7 @@ func (s *GrpcServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error
 			cancel()
 		}
 	}()
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return err
-		}
-	}
+
 	for {
 		request, err := server.Recv()
 		if err == io.EOF {
@@ -1202,10 +748,8 @@ func (s *GrpcServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error
 		if err != nil {
 			return errors.WithStack(err)
 		}
+
 		forwardedHost := grpcutil.GetForwardedHost(stream.Context())
-		failpoint.Inject("grpcClientClosed", func() {
-			forwardedHost = s.GetMember().Member().GetClientUrls()[0]
-		})
 		if !s.isLocalRequest(forwardedHost) {
 			if forwardStream == nil || lastForwardedHost != forwardedHost {
 				if cancel != nil {
@@ -1216,7 +760,7 @@ func (s *GrpcServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error
 					return err
 				}
 				log.Info("create region heartbeat forward stream", zap.String("forwarded-host", forwardedHost))
-				forwardStream, cancel, err = s.createRegionHeartbeatForwardStream(client)
+				forwardStream, cancel, err = s.createHeartbeatForwardStream(client)
 				if err != nil {
 					return err
 				}
@@ -1268,7 +812,7 @@ func (s *GrpcServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error
 			lastBind = time.Now()
 		}
 
-		region := core.RegionFromHeartbeat(request, flowRoundOption)
+		region := core.RegionFromHeartbeat(request, flowRoundOption, core.SetFromHeartbeat(true))
 		if region.GetLeader() == nil {
 			log.Error("invalid request, the leader is nil", zap.Reflect("request", request), errs.ZapError(errs.ErrLeaderNil))
 			regionHeartbeatCounter.WithLabelValues(storeAddress, storeLabel, "report", "invalid-leader").Inc()
@@ -1293,6 +837,7 @@ func (s *GrpcServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error
 			continue
 		}
 		start := time.Now()
+
 		err = rc.HandleRegionHeartbeat(region)
 		if err != nil {
 			regionHeartbeatCounter.WithLabelValues(storeAddress, storeLabel, "report", "err").Inc()
@@ -1302,141 +847,30 @@ func (s *GrpcServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error
 		}
 		regionHeartbeatHandleDuration.WithLabelValues(storeAddress, storeLabel).Observe(time.Since(start).Seconds())
 		regionHeartbeatCounter.WithLabelValues(storeAddress, storeLabel, "report", "ok").Inc()
-
-		if s.IsServiceIndependent(utils.SchedulingServiceName) {
-			if forwardErrCh != nil {
-				select {
-				case err, ok := <-forwardErrCh:
-					if ok {
-						if cancel != nil {
-							cancel()
-						}
-						forwardSchedulingStream = nil
-						log.Error("meet error and need to re-establish the stream", zap.Error(err))
-					}
-				default:
-				}
-			}
-			forwardedSchedulingHost, ok := s.GetServicePrimaryAddr(stream.Context(), utils.SchedulingServiceName)
-			if !ok || len(forwardedSchedulingHost) == 0 {
-				log.Debug("failed to find scheduling service primary address")
-				if cancel != nil {
-					cancel()
-				}
-				continue
-			}
-			if forwardSchedulingStream == nil || lastForwardedSchedulingHost != forwardedSchedulingHost {
-				if cancel != nil {
-					cancel()
-				}
-
-				client, err := s.getDelegateClient(s.ctx, forwardedSchedulingHost)
-				if err != nil {
-					errRegionHeartbeatClient.Inc()
-					log.Error("failed to get client", zap.Error(err))
-					continue
-				}
-				log.Debug("create scheduling forwarding stream", zap.String("forwarded-host", forwardedSchedulingHost))
-				forwardSchedulingStream, _, cancel, err = s.createRegionHeartbeatSchedulingStream(stream.Context(), client)
-				if err != nil {
-					errRegionHeartbeatStream.Inc()
-					log.Debug("failed to create stream", zap.Error(err))
-					continue
-				}
-				lastForwardedSchedulingHost = forwardedSchedulingHost
-				forwardErrCh = make(chan error, 1)
-				go forwardRegionHeartbeatToScheduling(rc, forwardSchedulingStream, server, forwardErrCh)
-			}
-			schedulingpbReq := &schedulingpb.RegionHeartbeatRequest{
-				Header: &schedulingpb.RequestHeader{
-					ClusterId: request.GetHeader().GetClusterId(),
-					SenderId:  request.GetHeader().GetSenderId(),
-				},
-				Region:          request.GetRegion(),
-				Leader:          request.GetLeader(),
-				DownPeers:       request.GetDownPeers(),
-				PendingPeers:    request.GetPendingPeers(),
-				BytesWritten:    request.GetBytesWritten(),
-				BytesRead:       request.GetBytesRead(),
-				KeysWritten:     request.GetKeysWritten(),
-				KeysRead:        request.GetKeysRead(),
-				ApproximateSize: request.GetApproximateSize(),
-				ApproximateKeys: request.GetApproximateKeys(),
-				Interval:        request.GetInterval(),
-				Term:            request.GetTerm(),
-				QueryStats:      request.GetQueryStats(),
-			}
-			if err := forwardSchedulingStream.Send(schedulingpbReq); err != nil {
-				forwardSchedulingStream = nil
-				if grpcutil.NeedRebuildConnection(err) {
-					s.closeDelegateClient(lastForwardedSchedulingHost)
-				}
-				errRegionHeartbeatSend.Inc()
-				log.Error("failed to send request to scheduling service", zap.Error(err))
-			}
-
-			select {
-			case err, ok := <-forwardErrCh:
-				if ok {
-					forwardSchedulingStream = nil
-					errRegionHeartbeatRecv.Inc()
-					log.Error("failed to send response", zap.Error(err))
-				}
-			default:
-			}
-		}
 	}
 }
 
 // GetRegion implements gRPC PDServer.
 func (s *GrpcServer) GetRegion(ctx context.Context, request *pdpb.GetRegionRequest) (*pdpb.GetRegionResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetRegionResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).GetRegion(ctx, request)
 	}
-	followerHandle := new(bool)
-	if rsp, err := s.unaryFollowerMiddleware(ctx, request, fn, followerHandle); err != nil {
+	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
 		return nil, err
 	} else if rsp != nil {
 		return rsp.(*pdpb.GetRegionResponse), nil
 	}
-	var rc *cluster.RaftCluster
-	var region *core.RegionInfo
-	if *followerHandle {
-		rc = s.cluster
-		if !rc.GetRegionSyncer().IsRunning() {
-			return &pdpb.GetRegionResponse{Header: s.regionNotFound()}, nil
-		}
-		region = rc.GetRegionByKey(request.GetRegionKey())
-		if region == nil {
-			log.Warn("follower get region nil", zap.String("key", string(request.GetRegionKey())))
-			return &pdpb.GetRegionResponse{Header: s.regionNotFound()}, nil
-		}
-	} else {
-		rc = s.GetRaftCluster()
-		if rc == nil {
-			return &pdpb.GetRegionResponse{Header: s.notBootstrappedHeader()}, nil
-		}
-		region = rc.GetRegionByKey(request.GetRegionKey())
-		if region == nil {
-			log.Warn("leader get region nil", zap.String("key", string(request.GetRegionKey())))
-			return &pdpb.GetRegionResponse{Header: s.header()}, nil
-		}
-	}
 
+	rc := s.GetRaftCluster()
+	if rc == nil {
+		return &pdpb.GetRegionResponse{Header: s.notBootstrappedHeader()}, nil
+	}
+	region := rc.GetRegionByKey(request.GetRegionKey())
+	if region == nil {
+		return &pdpb.GetRegionResponse{Header: s.header()}, nil
+	}
 	var buckets *metapb.Buckets
-	// FIXME: If the bucket is disabled dynamically, the bucket information is returned unexpectedly
-	if !*followerHandle && rc.GetStoreConfig().IsEnableRegionBucket() && request.GetNeedBuckets() {
+	if rc.GetStoreConfig().IsEnableRegionBucket() && request.GetNeedBuckets() {
 		buckets = region.GetBuckets()
 	}
 	return &pdpb.GetRegionResponse{
@@ -1451,51 +885,26 @@ func (s *GrpcServer) GetRegion(ctx context.Context, request *pdpb.GetRegionReque
 
 // GetPrevRegion implements gRPC PDServer
 func (s *GrpcServer) GetPrevRegion(ctx context.Context, request *pdpb.GetRegionRequest) (*pdpb.GetRegionResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetRegionResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).GetPrevRegion(ctx, request)
 	}
-	followerHandle := new(bool)
-	if rsp, err := s.unaryFollowerMiddleware(ctx, request, fn, followerHandle); err != nil {
+	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
 		return nil, err
 	} else if rsp != nil {
 		return rsp.(*pdpb.GetRegionResponse), err
 	}
 
-	var rc *cluster.RaftCluster
-	if *followerHandle {
-		// no need to check running status
-		rc = s.cluster
-		if !rc.GetRegionSyncer().IsRunning() {
-			return &pdpb.GetRegionResponse{Header: s.regionNotFound()}, nil
-		}
-	} else {
-		rc = s.GetRaftCluster()
-		if rc == nil {
-			return &pdpb.GetRegionResponse{Header: s.notBootstrappedHeader()}, nil
-		}
+	rc := s.GetRaftCluster()
+	if rc == nil {
+		return &pdpb.GetRegionResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 
 	region := rc.GetPrevRegionByKey(request.GetRegionKey())
 	if region == nil {
-		if *followerHandle {
-			return &pdpb.GetRegionResponse{Header: s.regionNotFound()}, nil
-		}
 		return &pdpb.GetRegionResponse{Header: s.header()}, nil
 	}
 	var buckets *metapb.Buckets
-	// FIXME: If the bucket is disabled dynamically, the bucket information is returned unexpectedly
-	if !*followerHandle && rc.GetStoreConfig().IsEnableRegionBucket() && request.GetNeedBuckets() {
+	if rc.GetStoreConfig().IsEnableRegionBucket() && request.GetNeedBuckets() {
 		buckets = region.GetBuckets()
 	}
 	return &pdpb.GetRegionResponse{
@@ -1510,53 +919,25 @@ func (s *GrpcServer) GetPrevRegion(ctx context.Context, request *pdpb.GetRegionR
 
 // GetRegionByID implements gRPC PDServer.
 func (s *GrpcServer) GetRegionByID(ctx context.Context, request *pdpb.GetRegionByIDRequest) (*pdpb.GetRegionResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetRegionResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).GetRegionByID(ctx, request)
 	}
-	followerHandle := new(bool)
-	if rsp, err := s.unaryFollowerMiddleware(ctx, request, fn, followerHandle); err != nil {
+	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
 		return nil, err
 	} else if rsp != nil {
 		return rsp.(*pdpb.GetRegionResponse), err
 	}
 
-	var rc *cluster.RaftCluster
-	if *followerHandle {
-		rc = s.cluster
-		if !rc.GetRegionSyncer().IsRunning() {
-			return &pdpb.GetRegionResponse{Header: s.regionNotFound()}, nil
-		}
-	} else {
-		rc = s.GetRaftCluster()
-		if rc == nil {
-			return &pdpb.GetRegionResponse{Header: s.regionNotFound()}, nil
-		}
+	rc := s.GetRaftCluster()
+	if rc == nil {
+		return &pdpb.GetRegionResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 	region := rc.GetRegion(request.GetRegionId())
-	failpoint.Inject("followerHandleError", func() {
-		if *followerHandle {
-			region = nil
-		}
-	})
 	if region == nil {
-		if *followerHandle {
-			return &pdpb.GetRegionResponse{Header: s.regionNotFound()}, nil
-		}
 		return &pdpb.GetRegionResponse{Header: s.header()}, nil
 	}
 	var buckets *metapb.Buckets
-	if !*followerHandle && rc.GetStoreConfig().IsEnableRegionBucket() && request.GetNeedBuckets() {
+	if rc.GetStoreConfig().IsEnableRegionBucket() && request.GetNeedBuckets() {
 		buckets = region.GetBuckets()
 	}
 	return &pdpb.GetRegionResponse{
@@ -1571,43 +952,20 @@ func (s *GrpcServer) GetRegionByID(ctx context.Context, request *pdpb.GetRegionB
 
 // ScanRegions implements gRPC PDServer.
 func (s *GrpcServer) ScanRegions(ctx context.Context, request *pdpb.ScanRegionsRequest) (*pdpb.ScanRegionsResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.ScanRegionsResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).ScanRegions(ctx, request)
 	}
-	followerHandle := new(bool)
-	if rsp, err := s.unaryFollowerMiddleware(ctx, request, fn, followerHandle); err != nil {
+	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
 		return nil, err
 	} else if rsp != nil {
 		return rsp.(*pdpb.ScanRegionsResponse), nil
 	}
 
-	var rc *cluster.RaftCluster
-	if *followerHandle {
-		rc = s.cluster
-		if !rc.GetRegionSyncer().IsRunning() {
-			return &pdpb.ScanRegionsResponse{Header: s.regionNotFound()}, nil
-		}
-	} else {
-		rc = s.GetRaftCluster()
-		if rc == nil {
-			return &pdpb.ScanRegionsResponse{Header: s.notBootstrappedHeader()}, nil
-		}
+	rc := s.GetRaftCluster()
+	if rc == nil {
+		return &pdpb.ScanRegionsResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 	regions := rc.ScanRegions(request.GetStartKey(), request.GetEndKey(), int(request.GetLimit()))
-	if *followerHandle && len(regions) == 0 {
-		return &pdpb.ScanRegionsResponse{Header: s.regionNotFound()}, nil
-	}
 	resp := &pdpb.ScanRegionsResponse{Header: s.header()}
 	for _, r := range regions {
 		leader := r.GetLeader()
@@ -1629,18 +987,7 @@ func (s *GrpcServer) ScanRegions(ctx context.Context, request *pdpb.ScanRegionsR
 
 // AskSplit implements gRPC PDServer.
 func (s *GrpcServer) AskSplit(ctx context.Context, request *pdpb.AskSplitRequest) (*pdpb.AskSplitResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.AskSplitResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).AskSplit(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -1678,44 +1025,7 @@ func (s *GrpcServer) AskSplit(ctx context.Context, request *pdpb.AskSplitRequest
 
 // AskBatchSplit implements gRPC PDServer.
 func (s *GrpcServer) AskBatchSplit(ctx context.Context, request *pdpb.AskBatchSplitRequest) (*pdpb.AskBatchSplitResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.AskBatchSplitResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	if s.IsServiceIndependent(utils.SchedulingServiceName) {
-		forwardCli, err := s.updateSchedulingClient(ctx)
-		if err != nil {
-			return &pdpb.AskBatchSplitResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-		cli := forwardCli.getClient()
-		if cli != nil {
-			req := &schedulingpb.AskBatchSplitRequest{
-				Header: &schedulingpb.RequestHeader{
-					ClusterId: request.GetHeader().GetClusterId(),
-					SenderId:  request.GetHeader().GetSenderId(),
-				},
-				Region:     request.GetRegion(),
-				SplitCount: request.GetSplitCount(),
-			}
-			resp, err := cli.AskBatchSplit(ctx, req)
-			if err != nil {
-				// reset to let it be updated in the next request
-				s.schedulingClient.CompareAndSwap(forwardCli, &schedulingClient{})
-				return s.convertAskSplitResponse(resp), err
-			}
-			return s.convertAskSplitResponse(resp), nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).AskBatchSplit(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -1757,18 +1067,7 @@ func (s *GrpcServer) AskBatchSplit(ctx context.Context, request *pdpb.AskBatchSp
 
 // ReportSplit implements gRPC PDServer.
 func (s *GrpcServer) ReportSplit(ctx context.Context, request *pdpb.ReportSplitRequest) (*pdpb.ReportSplitResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.ReportSplitResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).ReportSplit(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -1795,18 +1094,7 @@ func (s *GrpcServer) ReportSplit(ctx context.Context, request *pdpb.ReportSplitR
 
 // ReportBatchSplit implements gRPC PDServer.
 func (s *GrpcServer) ReportBatchSplit(ctx context.Context, request *pdpb.ReportBatchSplitRequest) (*pdpb.ReportBatchSplitResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.ReportBatchSplitResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).ReportBatchSplit(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -1834,18 +1122,7 @@ func (s *GrpcServer) ReportBatchSplit(ctx context.Context, request *pdpb.ReportB
 
 // GetClusterConfig implements gRPC PDServer.
 func (s *GrpcServer) GetClusterConfig(ctx context.Context, request *pdpb.GetClusterConfigRequest) (*pdpb.GetClusterConfigResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetClusterConfigResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).GetClusterConfig(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -1866,18 +1143,7 @@ func (s *GrpcServer) GetClusterConfig(ctx context.Context, request *pdpb.GetClus
 
 // PutClusterConfig implements gRPC PDServer.
 func (s *GrpcServer) PutClusterConfig(ctx context.Context, request *pdpb.PutClusterConfigRequest) (*pdpb.PutClusterConfigResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.PutClusterConfigResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).PutClusterConfig(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -1907,61 +1173,7 @@ func (s *GrpcServer) PutClusterConfig(ctx context.Context, request *pdpb.PutClus
 
 // ScatterRegion implements gRPC PDServer.
 func (s *GrpcServer) ScatterRegion(ctx context.Context, request *pdpb.ScatterRegionRequest) (*pdpb.ScatterRegionResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.ScatterRegionResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	if s.IsServiceIndependent(utils.SchedulingServiceName) {
-		forwardCli, err := s.updateSchedulingClient(ctx)
-		if err != nil {
-			return &pdpb.ScatterRegionResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-		cli := forwardCli.getClient()
-		if cli != nil {
-			var regionsID []uint64
-			// nolint
-			if request.GetRegionId() != 0 {
-				// nolint
-				regionsID = []uint64{request.GetRegionId()}
-			} else {
-				regionsID = request.GetRegionsId()
-			}
-			if len(regionsID) == 0 {
-				return &pdpb.ScatterRegionResponse{
-					Header: s.invalidValue("regions id is required"),
-				}, nil
-			}
-			req := &schedulingpb.ScatterRegionsRequest{
-				Header: &schedulingpb.RequestHeader{
-					ClusterId: request.GetHeader().GetClusterId(),
-					SenderId:  request.GetHeader().GetSenderId(),
-				},
-				RegionsId:      regionsID,
-				Group:          request.GetGroup(),
-				RetryLimit:     request.GetRetryLimit(),
-				SkipStoreLimit: request.GetSkipStoreLimit(),
-			}
-			resp, err := cli.ScatterRegions(ctx, req)
-			if err != nil {
-				errScatterRegionSend.Inc()
-				// reset to let it be updated in the next request
-				s.schedulingClient.CompareAndSwap(forwardCli, &schedulingClient{})
-				return s.convertScatterResponse(resp), err
-			}
-			return s.convertScatterResponse(resp), nil
-		}
-	}
-
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).ScatterRegion(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -1976,7 +1188,7 @@ func (s *GrpcServer) ScatterRegion(ctx context.Context, request *pdpb.ScatterReg
 	}
 
 	if len(request.GetRegionsId()) > 0 {
-		percentage, err := scatterRegions(rc, request.GetRegionsId(), request.GetGroup(), int(request.GetRetryLimit()), request.GetSkipStoreLimit())
+		percentage, err := scatterRegions(rc, request.GetRegionsId(), request.GetGroup(), int(request.GetRetryLimit()))
 		if err != nil {
 			return nil, err
 		}
@@ -1999,18 +1211,12 @@ func (s *GrpcServer) ScatterRegion(ctx context.Context, request *pdpb.ScatterReg
 		region = core.NewRegionInfo(request.GetRegion(), request.GetLeader())
 	}
 
-	op, err := rc.GetRegionScatterer().Scatter(region, request.GetGroup(), request.GetSkipStoreLimit())
+	op, err := rc.GetRegionScatter().Scatter(region, request.GetGroup())
 	if err != nil {
 		return nil, err
 	}
-
 	if op != nil {
-		if !rc.GetOperatorController().AddOperator(op) {
-			return &pdpb.ScatterRegionResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN,
-					"operator canceled because cannot add an operator to the execute queue"),
-			}, nil
-		}
+		rc.GetOperatorController().AddOperator(op)
 	}
 
 	return &pdpb.ScatterRegionResponse{
@@ -2021,18 +1227,7 @@ func (s *GrpcServer) ScatterRegion(ctx context.Context, request *pdpb.ScatterReg
 
 // GetGCSafePoint implements gRPC PDServer.
 func (s *GrpcServer) GetGCSafePoint(ctx context.Context, request *pdpb.GetGCSafePointRequest) (*pdpb.GetGCSafePointResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetGCSafePointResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).GetGCSafePoint(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -2062,15 +1257,6 @@ func (s *GrpcServer) SyncRegions(stream pdpb.PD_SyncRegionsServer) error {
 	if s.IsClosed() || s.cluster == nil {
 		return ErrNotStarted
 	}
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return err
-		}
-	}
 	ctx := s.cluster.Context()
 	if ctx == nil {
 		return ErrNotStarted
@@ -2080,18 +1266,7 @@ func (s *GrpcServer) SyncRegions(stream pdpb.PD_SyncRegionsServer) error {
 
 // UpdateGCSafePoint implements gRPC PDServer.
 func (s *GrpcServer) UpdateGCSafePoint(ctx context.Context, request *pdpb.UpdateGCSafePointRequest) (*pdpb.UpdateGCSafePointResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.UpdateGCSafePointResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).UpdateGCSafePoint(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -2129,18 +1304,7 @@ func (s *GrpcServer) UpdateGCSafePoint(ctx context.Context, request *pdpb.Update
 
 // UpdateServiceGCSafePoint update the safepoint for specific service
 func (s *GrpcServer) UpdateServiceGCSafePoint(ctx context.Context, request *pdpb.UpdateServiceGCSafePointRequest) (*pdpb.UpdateServiceGCSafePointResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.UpdateServiceGCSafePointResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).UpdateServiceGCSafePoint(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -2159,7 +1323,15 @@ func (s *GrpcServer) UpdateServiceGCSafePoint(ctx context.Context, request *pdpb
 			return nil, err
 		}
 	}
-	nowTSO, err := s.getGlobalTSO(ctx)
+	var (
+		nowTSO pdpb.Timestamp
+		err    error
+	)
+	if s.IsAPIServiceMode() {
+		nowTSO, err = s.getGlobalTSOFromTSOServer(ctx)
+	} else {
+		nowTSO, err = s.tsoAllocatorManager.HandleRequest(tso.GlobalDCLocation, 1)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2185,44 +1357,7 @@ func (s *GrpcServer) UpdateServiceGCSafePoint(ctx context.Context, request *pdpb
 
 // GetOperator gets information about the operator belonging to the specify region.
 func (s *GrpcServer) GetOperator(ctx context.Context, request *pdpb.GetOperatorRequest) (*pdpb.GetOperatorResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetOperatorResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	if s.IsServiceIndependent(utils.SchedulingServiceName) {
-		forwardCli, err := s.updateSchedulingClient(ctx)
-		if err != nil {
-			return &pdpb.GetOperatorResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-		cli := forwardCli.getClient()
-		if cli != nil {
-			req := &schedulingpb.GetOperatorRequest{
-				Header: &schedulingpb.RequestHeader{
-					ClusterId: request.GetHeader().GetClusterId(),
-					SenderId:  request.GetHeader().GetSenderId(),
-				},
-				RegionId: request.GetRegionId(),
-			}
-			resp, err := cli.GetOperator(ctx, req)
-			if err != nil {
-				errGetOperatorSend.Inc()
-				// reset to let it be updated in the next request
-				s.schedulingClient.CompareAndSwap(forwardCli, &schedulingClient{})
-				return s.convertOperatorResponse(resp), err
-			}
-			return s.convertOperatorResponse(resp), nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).GetOperator(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -2257,38 +1392,22 @@ func (s *GrpcServer) GetOperator(ctx context.Context, request *pdpb.GetOperatorR
 }
 
 // validateRequest checks if Server is leader and clusterID is matched.
-func (s *GrpcServer) validateRequest(header *pdpb.RequestHeader) error {
-	return s.validateRoleInRequest(context.TODO(), header, nil)
-}
-
-// validateRoleInRequest checks if Server is leader when disallow follower-handle and clusterID is matched.
 // TODO: Call it in gRPC interceptor.
-func (s *GrpcServer) validateRoleInRequest(ctx context.Context, header *pdpb.RequestHeader, allowFollower *bool) error {
-	if s.IsClosed() {
-		return ErrNotStarted
+func (s *GrpcServer) validateRequest(header *pdpb.RequestHeader) error {
+	if s.IsClosed() || !s.member.IsLeader() {
+		return ErrNotLeader
 	}
-	if !s.member.IsLeader() {
-		if allowFollower == nil {
-			return ErrNotLeader
-		}
-		if !grpcutil.IsFollowerHandleEnabled(ctx) {
-			// TODO: change the error code
-			return ErrFollowerHandlingNotAllowed
-		}
-		*allowFollower = true
-	}
-	if clusterID := s.ClusterID(); header.GetClusterId() != clusterID {
-		return status.Errorf(codes.FailedPrecondition, "mismatch cluster id, need %d but got %d", clusterID, header.GetClusterId())
+	if header.GetClusterId() != s.clusterID {
+		return status.Errorf(codes.FailedPrecondition, "mismatch cluster id, need %d but got %d", s.clusterID, header.GetClusterId())
 	}
 	return nil
 }
 
 func (s *GrpcServer) header() *pdpb.ResponseHeader {
-	clusterID := s.ClusterID()
-	if clusterID == 0 {
+	if s.clusterID == 0 {
 		return s.wrapErrorToHeader(pdpb.ErrorType_NOT_BOOTSTRAPPED, "cluster id is not ready")
 	}
-	return &pdpb.ResponseHeader{ClusterId: clusterID}
+	return &pdpb.ResponseHeader{ClusterId: s.clusterID}
 }
 
 func (s *GrpcServer) wrapErrorToHeader(errorType pdpb.ErrorType, message string) *pdpb.ResponseHeader {
@@ -2300,7 +1419,7 @@ func (s *GrpcServer) wrapErrorToHeader(errorType pdpb.ErrorType, message string)
 
 func (s *GrpcServer) errorHeader(err *pdpb.Error) *pdpb.ResponseHeader {
 	return &pdpb.ResponseHeader{
-		ClusterId: s.ClusterID(),
+		ClusterId: s.clusterID,
 		Error:     err,
 	}
 }
@@ -2327,68 +1446,6 @@ func (s *GrpcServer) invalidValue(msg string) *pdpb.ResponseHeader {
 	})
 }
 
-func (s *GrpcServer) regionNotFound() *pdpb.ResponseHeader {
-	return s.errorHeader(&pdpb.Error{
-		Type:    pdpb.ErrorType_REGION_NOT_FOUND,
-		Message: "region not found",
-	})
-}
-
-func (s *GrpcServer) convertHeader(header *schedulingpb.ResponseHeader) *pdpb.ResponseHeader {
-	switch header.GetError().GetType() {
-	case schedulingpb.ErrorType_UNKNOWN:
-		if strings.Contains(header.GetError().GetMessage(), "region not found") {
-			return &pdpb.ResponseHeader{
-				ClusterId: header.GetClusterId(),
-				Error: &pdpb.Error{
-					Type:    pdpb.ErrorType_REGION_NOT_FOUND,
-					Message: header.GetError().GetMessage(),
-				},
-			}
-		}
-		return &pdpb.ResponseHeader{
-			ClusterId: header.GetClusterId(),
-			Error: &pdpb.Error{
-				Type:    pdpb.ErrorType_UNKNOWN,
-				Message: header.GetError().GetMessage(),
-			},
-		}
-	default:
-		return &pdpb.ResponseHeader{ClusterId: header.GetClusterId()}
-	}
-}
-
-func (s *GrpcServer) convertSplitResponse(resp *schedulingpb.SplitRegionsResponse) *pdpb.SplitRegionsResponse {
-	return &pdpb.SplitRegionsResponse{
-		Header:             s.convertHeader(resp.GetHeader()),
-		FinishedPercentage: resp.GetFinishedPercentage(),
-	}
-}
-
-func (s *GrpcServer) convertScatterResponse(resp *schedulingpb.ScatterRegionsResponse) *pdpb.ScatterRegionResponse {
-	return &pdpb.ScatterRegionResponse{
-		Header:             s.convertHeader(resp.GetHeader()),
-		FinishedPercentage: resp.GetFinishedPercentage(),
-	}
-}
-
-func (s *GrpcServer) convertOperatorResponse(resp *schedulingpb.GetOperatorResponse) *pdpb.GetOperatorResponse {
-	return &pdpb.GetOperatorResponse{
-		Header:   s.convertHeader(resp.GetHeader()),
-		RegionId: resp.GetRegionId(),
-		Desc:     resp.GetDesc(),
-		Kind:     resp.GetKind(),
-		Status:   resp.GetStatus(),
-	}
-}
-
-func (s *GrpcServer) convertAskSplitResponse(resp *schedulingpb.AskBatchSplitResponse) *pdpb.AskBatchSplitResponse {
-	return &pdpb.AskBatchSplitResponse{
-		Header: s.convertHeader(resp.GetHeader()),
-		Ids:    resp.GetIds(),
-	}
-}
-
 // Only used for the TestLocalAllocatorLeaderChange.
 var mockLocalAllocatorLeaderChangeFlag = false
 
@@ -2398,17 +1455,6 @@ func (s *GrpcServer) SyncMaxTS(_ context.Context, request *pdpb.SyncMaxTSRequest
 	// TODO: support local tso forward in api service mode in the future.
 	if err := s.validateInternalRequest(request.GetHeader(), true); err != nil {
 		return nil, err
-	}
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.SyncMaxTSResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
 	}
 	tsoAllocatorManager := s.GetTSOAllocatorManager()
 	// There is no dc-location found in this server, return err.
@@ -2504,46 +1550,7 @@ func (s *GrpcServer) SyncMaxTS(_ context.Context, request *pdpb.SyncMaxTSRequest
 
 // SplitRegions split regions by the given split keys
 func (s *GrpcServer) SplitRegions(ctx context.Context, request *pdpb.SplitRegionsRequest) (*pdpb.SplitRegionsResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.SplitRegionsResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	if s.IsServiceIndependent(utils.SchedulingServiceName) {
-		forwardCli, err := s.updateSchedulingClient(ctx)
-		if err != nil {
-			return &pdpb.SplitRegionsResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-		cli := forwardCli.getClient()
-		if cli != nil {
-			req := &schedulingpb.SplitRegionsRequest{
-				Header: &schedulingpb.RequestHeader{
-					ClusterId: request.GetHeader().GetClusterId(),
-					SenderId:  request.GetHeader().GetSenderId(),
-				},
-				SplitKeys:  request.GetSplitKeys(),
-				RetryLimit: request.GetRetryLimit(),
-			}
-			resp, err := cli.SplitRegions(ctx, req)
-			if err != nil {
-				errSplitRegionsSend.Inc()
-				// reset to let it be updated in the next request
-				s.schedulingClient.CompareAndSwap(forwardCli, &schedulingClient{})
-				return s.convertSplitResponse(resp), err
-			}
-			return s.convertSplitResponse(resp), nil
-		}
-	}
-
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).SplitRegions(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -2565,21 +1572,10 @@ func (s *GrpcServer) SplitRegions(ctx context.Context, request *pdpb.SplitRegion
 }
 
 // SplitAndScatterRegions split regions by the given split keys, and scatter regions.
-// Only regions which split successfully will be scattered.
-// scatterFinishedPercentage indicates the percentage of successfully split regions that are scattered.
+// Only regions which splited successfully will be scattered.
+// scatterFinishedPercentage indicates the percentage of successfully splited regions that are scattered.
 func (s *GrpcServer) SplitAndScatterRegions(ctx context.Context, request *pdpb.SplitAndScatterRegionsRequest) (*pdpb.SplitAndScatterRegionsResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.SplitAndScatterRegionsResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).SplitAndScatterRegions(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -2592,7 +1588,7 @@ func (s *GrpcServer) SplitAndScatterRegions(ctx context.Context, request *pdpb.S
 		return &pdpb.SplitAndScatterRegionsResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 	splitFinishedPercentage, newRegionIDs := rc.GetRegionSplitter().SplitRegions(ctx, request.GetSplitKeys(), int(request.GetRetryLimit()))
-	scatterFinishedPercentage, err := scatterRegions(rc, newRegionIDs, request.GetGroup(), int(request.GetRetryLimit()), false)
+	scatterFinishedPercentage, err := scatterRegions(rc, newRegionIDs, request.GetGroup(), int(request.GetRetryLimit()))
 	if err != nil {
 		return nil, err
 	}
@@ -2605,8 +1601,8 @@ func (s *GrpcServer) SplitAndScatterRegions(ctx context.Context, request *pdpb.S
 }
 
 // scatterRegions add operators to scatter regions and return the processed percentage and error
-func scatterRegions(cluster *cluster.RaftCluster, regionsID []uint64, group string, retryLimit int, skipStoreLimit bool) (int, error) {
-	opsCount, failures, err := cluster.GetRegionScatterer().ScatterRegionsByID(regionsID, group, retryLimit, skipStoreLimit)
+func scatterRegions(cluster *cluster.RaftCluster, regionsID []uint64, group string, retryLimit int) (int, error) {
+	opsCount, failures, err := cluster.GetRegionScatter().ScatterRegionsByID(regionsID, group, retryLimit)
 	if err != nil {
 		return 0, err
 	}
@@ -2633,17 +1629,6 @@ func (s *GrpcServer) GetDCLocationInfo(ctx context.Context, request *pdpb.GetDCL
 	}
 	if !s.member.IsLeader() {
 		return nil, ErrNotLeader
-	}
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetDCLocationInfoResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
 	}
 	am := s.GetTSOAllocatorManager()
 	info, ok := am.GetDCLocationInfo(request.GetDcLocation())
@@ -2690,6 +1675,162 @@ func (s *GrpcServer) validateInternalRequest(header *pdpb.RequestHeader, onlyAll
 	return nil
 }
 
+func (s *GrpcServer) getDelegateClient(ctx context.Context, forwardedHost string) (*grpc.ClientConn, error) {
+	client, ok := s.clientConns.Load(forwardedHost)
+	if !ok {
+		tlsConfig, err := s.GetTLSConfig().ToTLSConfig()
+		if err != nil {
+			return nil, err
+		}
+		cc, err := grpcutil.GetClientConn(ctx, forwardedHost, tlsConfig)
+		if err != nil {
+			return nil, err
+		}
+		client = cc
+		s.clientConns.Store(forwardedHost, cc)
+	}
+	return client.(*grpc.ClientConn), nil
+}
+
+func (s *GrpcServer) isLocalRequest(forwardedHost string) bool {
+	failpoint.Inject("useForwardRequest", func() {
+		failpoint.Return(false)
+	})
+	if forwardedHost == "" {
+		return true
+	}
+	memberAddrs := s.GetMember().Member().GetClientUrls()
+	for _, addr := range memberAddrs {
+		if addr == forwardedHost {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *GrpcServer) createHeartbeatForwardStream(client *grpc.ClientConn) (pdpb.PD_RegionHeartbeatClient, context.CancelFunc, error) {
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(s.ctx)
+	go checkStream(ctx, cancel, done)
+	forwardStream, err := pdpb.NewPDClient(client).RegionHeartbeat(ctx)
+	done <- struct{}{}
+	return forwardStream, cancel, err
+}
+
+func forwardRegionHeartbeatClientToServer(forwardStream pdpb.PD_RegionHeartbeatClient, server *heartbeatServer, errCh chan error) {
+	defer logutil.LogPanic()
+	defer close(errCh)
+	for {
+		resp, err := forwardStream.Recv()
+		if err != nil {
+			errCh <- errors.WithStack(err)
+			return
+		}
+		if err := server.Send(resp); err != nil {
+			errCh <- errors.WithStack(err)
+			return
+		}
+	}
+}
+
+func (s *GrpcServer) createReportBucketsForwardStream(client *grpc.ClientConn) (pdpb.PD_ReportBucketsClient, context.CancelFunc, error) {
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(s.ctx)
+	go checkStream(ctx, cancel, done)
+	forwardStream, err := pdpb.NewPDClient(client).ReportBuckets(ctx)
+	done <- struct{}{}
+	return forwardStream, cancel, err
+}
+
+func forwardReportBucketClientToServer(forwardStream pdpb.PD_ReportBucketsClient, server *bucketHeartbeatServer, errCh chan error) {
+	defer logutil.LogPanic()
+	defer close(errCh)
+	for {
+		resp, err := forwardStream.CloseAndRecv()
+		if err != nil {
+			errCh <- errors.WithStack(err)
+			return
+		}
+		if err := server.Send(resp); err != nil {
+			errCh <- errors.WithStack(err)
+			return
+		}
+	}
+}
+
+// TODO: If goroutine here timeout when tso stream created successfully, we need to handle it correctly.
+func checkStream(streamCtx context.Context, cancel context.CancelFunc, done chan struct{}) {
+	defer logutil.LogPanic()
+	select {
+	case <-done:
+		return
+	case <-time.After(3 * time.Second):
+		cancel()
+	case <-streamCtx.Done():
+	}
+	<-done
+}
+
+func (s *GrpcServer) getGlobalTSOFromTSOServer(ctx context.Context) (pdpb.Timestamp, error) {
+	forwardedHost, ok := s.GetServicePrimaryAddr(ctx, utils.TSOServiceName)
+	if !ok || forwardedHost == "" {
+		return pdpb.Timestamp{}, ErrNotFoundTSOAddr
+	}
+	forwardStream, err := s.getTSOForwardStream(forwardedHost)
+	if err != nil {
+		return pdpb.Timestamp{}, err
+	}
+	forwardStream.Send(&tsopb.TsoRequest{
+		Header: &tsopb.RequestHeader{
+			ClusterId:       s.clusterID,
+			KeyspaceId:      utils.DefaultKeyspaceID,
+			KeyspaceGroupId: utils.DefaultKeyspaceGroupID,
+		},
+		Count: 1,
+	})
+	ts, err := forwardStream.Recv()
+	if err != nil {
+		log.Error("get global tso from tso server failed", zap.Error(err))
+		return pdpb.Timestamp{}, err
+	}
+	return *ts.GetTimestamp(), nil
+}
+
+func (s *GrpcServer) getTSOForwardStream(forwardedHost string) (tsopb.TSO_TsoClient, error) {
+	s.tsoClientPool.RLock()
+	forwardStream, ok := s.tsoClientPool.clients[forwardedHost]
+	s.tsoClientPool.RUnlock()
+	if ok {
+		// This is the common case to return here
+		return forwardStream, nil
+	}
+
+	s.tsoClientPool.Lock()
+	defer s.tsoClientPool.Unlock()
+
+	// Double check after entering the critical section
+	forwardStream, ok = s.tsoClientPool.clients[forwardedHost]
+	if ok {
+		return forwardStream, nil
+	}
+
+	// Now let's create the client connection and the forward stream
+	client, err := s.getDelegateClient(s.ctx, forwardedHost)
+	if err != nil {
+		return nil, err
+	}
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(s.ctx)
+	go checkStream(ctx, cancel, done)
+	forwardStream, err = tsopb.NewTSOClient(client).Tso(ctx)
+	done <- struct{}{}
+	if err != nil {
+		return nil, err
+	}
+	s.tsoClientPool.clients[forwardedHost] = forwardStream
+	return forwardStream, nil
+}
+
 // for CDC compatibility, we need to initialize config path to `globalConfigPath`
 const globalConfigPath = "/global/config/"
 
@@ -2699,20 +1840,6 @@ const globalConfigPath = "/global/config/"
 func (s *GrpcServer) StoreGlobalConfig(_ context.Context, request *pdpb.StoreGlobalConfigRequest) (*pdpb.StoreGlobalConfigResponse, error) {
 	if s.client == nil {
 		return nil, ErrEtcdNotStarted
-	}
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.StoreGlobalConfigResponse{
-				Error: &pdpb.Error{
-					Type:    pdpb.ErrorType_UNKNOWN,
-					Message: err.Error(),
-				},
-			}, nil
-		}
 	}
 	configPath := request.GetConfigPath()
 	if configPath == "" {
@@ -2750,15 +1877,6 @@ func (s *GrpcServer) StoreGlobalConfig(_ context.Context, request *pdpb.StoreGlo
 func (s *GrpcServer) LoadGlobalConfig(ctx context.Context, request *pdpb.LoadGlobalConfigRequest) (*pdpb.LoadGlobalConfigResponse, error) {
 	if s.client == nil {
 		return nil, ErrEtcdNotStarted
-	}
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return nil, err
-		}
 	}
 	configPath := request.GetConfigPath()
 	if configPath == "" {
@@ -2799,16 +1917,7 @@ func (s *GrpcServer) WatchGlobalConfig(req *pdpb.WatchGlobalConfigRequest, serve
 	if s.client == nil {
 		return ErrEtcdNotStarted
 	}
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return err
-		}
-	}
-	ctx, cancel := context.WithCancel(server.Context())
+	ctx, cancel := context.WithCancel(s.Context())
 	defer cancel()
 	configPath := req.GetConfigPath()
 	if configPath == "" {
@@ -2823,8 +1932,6 @@ func (s *GrpcServer) WatchGlobalConfig(req *pdpb.WatchGlobalConfigRequest, serve
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
-		case <-s.Context().Done():
 			return nil
 		case res := <-watchChan:
 			if res.Err() != nil {
@@ -2857,11 +1964,10 @@ func (s *GrpcServer) WatchGlobalConfig(req *pdpb.WatchGlobalConfigRequest, serve
 					} else {
 						// Prev-kv is compacted means there must have been a delete event before this event,
 						// which means that this is just a duplicated event, so we can just ignore it.
-						log.Info("previous key-value pair has been compacted", zap.String("required-key", string(e.Kv.Key)))
+						log.Info("previous key-value pair has been compacted", zap.String("previous key", string(e.Kv.Key)))
 					}
 				}
 			}
-
 			if len(cfgs) > 0 {
 				if err := server.Send(&pdpb.WatchGlobalConfigResponse{Changes: cfgs, Revision: res.Header.GetRevision()}); err != nil {
 					return err
@@ -2896,18 +2002,7 @@ func (s *GrpcServer) handleDamagedStore(stats *pdpb.StoreStats) {
 
 // ReportMinResolvedTS implements gRPC PDServer.
 func (s *GrpcServer) ReportMinResolvedTS(ctx context.Context, request *pdpb.ReportMinResolvedTsRequest) (*pdpb.ReportMinResolvedTsResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.ReportMinResolvedTsResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).ReportMinResolvedTS(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -2936,18 +2031,7 @@ func (s *GrpcServer) ReportMinResolvedTS(ctx context.Context, request *pdpb.Repo
 
 // SetExternalTimestamp implements gRPC PDServer.
 func (s *GrpcServer) SetExternalTimestamp(ctx context.Context, request *pdpb.SetExternalTimestampRequest) (*pdpb.SetExternalTimestampResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.SetExternalTimestampResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).SetExternalTimestamp(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -2956,7 +2040,15 @@ func (s *GrpcServer) SetExternalTimestamp(ctx context.Context, request *pdpb.Set
 		return rsp.(*pdpb.SetExternalTimestampResponse), nil
 	}
 
-	nowTSO, err := s.getGlobalTSO(ctx)
+	var (
+		nowTSO pdpb.Timestamp
+		err    error
+	)
+	if s.IsAPIServiceMode() {
+		nowTSO, err = s.getGlobalTSOFromTSOServer(ctx)
+	} else {
+		nowTSO, err = s.tsoAllocatorManager.HandleRequest(tso.GlobalDCLocation, 1)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2974,18 +2066,7 @@ func (s *GrpcServer) SetExternalTimestamp(ctx context.Context, request *pdpb.Set
 
 // GetExternalTimestamp implements gRPC PDServer.
 func (s *GrpcServer) GetExternalTimestamp(ctx context.Context, request *pdpb.GetExternalTimestampRequest) (*pdpb.GetExternalTimestampResponse, error) {
-	if s.GetServiceMiddlewarePersistOptions().IsGRPCRateLimitEnabled() {
-		fName := currentFunction()
-		limiter := s.GetGRPCRateLimiter()
-		if done, err := limiter.Allow(fName); err == nil {
-			defer done()
-		} else {
-			return &pdpb.GetExternalTimestampResponse{
-				Header: s.wrapErrorToHeader(pdpb.ErrorType_UNKNOWN, err.Error()),
-			}, nil
-		}
-	}
-	fn := func(ctx context.Context, client *grpc.ClientConn) (any, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
 		return pdpb.NewPDClient(client).GetExternalTimestamp(ctx, request)
 	}
 	if rsp, err := s.unaryMiddleware(ctx, request, fn); err != nil {
@@ -2999,10 +2080,4 @@ func (s *GrpcServer) GetExternalTimestamp(ctx context.Context, request *pdpb.Get
 		Header:    s.header(),
 		Timestamp: timestamp,
 	}, nil
-}
-
-func currentFunction() string {
-	counter, _, _, _ := runtime.Caller(1)
-	s := strings.Split(runtime.FuncForPC(counter).Name(), ".")
-	return s[len(s)-1]
 }

@@ -23,10 +23,9 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/errs"
-	sche "github.com/tikv/pd/pkg/schedule/core"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/placement"
-	"github.com/tikv/pd/pkg/schedule/plan"
 	"github.com/tikv/pd/pkg/statistics"
 	"go.uber.org/zap"
 )
@@ -43,8 +42,8 @@ const (
 )
 
 type solver struct {
-	*plan.BalanceSchedulerPlan
-	sche.SchedulerCluster
+	*balanceSchedulerPlan
+	schedule.Cluster
 	kind              constant.ScheduleKind
 	opInfluence       operator.OpInfluence
 	tolerantSizeRatio float64
@@ -55,10 +54,10 @@ type solver struct {
 	targetScore float64
 }
 
-func newSolver(basePlan *plan.BalanceSchedulerPlan, kind constant.ScheduleKind, cluster sche.SchedulerCluster, opInfluence operator.OpInfluence) *solver {
+func newSolver(basePlan *balanceSchedulerPlan, kind constant.ScheduleKind, cluster schedule.Cluster, opInfluence operator.OpInfluence) *solver {
 	return &solver{
-		BalanceSchedulerPlan: basePlan,
-		SchedulerCluster:     cluster,
+		balanceSchedulerPlan: basePlan,
+		Cluster:              cluster,
 		kind:                 kind,
 		opInfluence:          opInfluence,
 		tolerantSizeRatio:    adjustTolerantRatio(cluster, kind),
@@ -70,7 +69,7 @@ func (p *solver) GetOpInfluence(storeID uint64) int64 {
 }
 
 func (p *solver) SourceStoreID() uint64 {
-	return p.Source.GetID()
+	return p.source.GetID()
 }
 
 func (p *solver) SourceMetricLabel() string {
@@ -78,7 +77,7 @@ func (p *solver) SourceMetricLabel() string {
 }
 
 func (p *solver) TargetStoreID() uint64 {
-	return p.Target.GetID()
+	return p.target.GetID()
 }
 
 func (p *solver) TargetMetricLabel() string {
@@ -86,7 +85,7 @@ func (p *solver) TargetMetricLabel() string {
 }
 
 func (p *solver) sourceStoreScore(scheduleName string) float64 {
-	sourceID := p.Source.GetID()
+	sourceID := p.source.GetID()
 	tolerantResource := p.getTolerantResource()
 	// to avoid schedule too much, if A's core greater than B and C a little
 	// we want that A should be moved out one region not two
@@ -95,7 +94,8 @@ func (p *solver) sourceStoreScore(scheduleName string) float64 {
 		influence = -influence
 	}
 
-	if p.GetSchedulerConfig().IsDebugMetricsEnabled() {
+	opts := p.GetOpts()
+	if opts.IsDebugMetricsEnabled() {
 		opInfluenceStatus.WithLabelValues(scheduleName, strconv.FormatUint(sourceID, 10), "source").Set(float64(influence))
 		tolerantResourceStatus.WithLabelValues(scheduleName).Set(float64(tolerantResource))
 	}
@@ -103,19 +103,19 @@ func (p *solver) sourceStoreScore(scheduleName string) float64 {
 	switch p.kind.Resource {
 	case constant.LeaderKind:
 		sourceDelta := influence - tolerantResource
-		score = p.Source.LeaderScore(p.kind.Policy, sourceDelta)
+		score = p.source.LeaderScore(p.kind.Policy, sourceDelta)
 	case constant.RegionKind:
 		sourceDelta := influence*influenceAmp - tolerantResource
-		score = p.Source.RegionScore(p.GetSchedulerConfig().GetRegionScoreFormulaVersion(), p.GetSchedulerConfig().GetHighSpaceRatio(), p.GetSchedulerConfig().GetLowSpaceRatio(), sourceDelta)
+		score = p.source.RegionScore(opts.GetRegionScoreFormulaVersion(), opts.GetHighSpaceRatio(), opts.GetLowSpaceRatio(), sourceDelta)
 	case constant.WitnessKind:
 		sourceDelta := influence - tolerantResource
-		score = p.Source.WitnessScore(sourceDelta)
+		score = p.source.WitnessScore(sourceDelta)
 	}
 	return score
 }
 
 func (p *solver) targetStoreScore(scheduleName string) float64 {
-	targetID := p.Target.GetID()
+	targetID := p.target.GetID()
 	// to avoid schedule too much, if A's score less than B and C in small range,
 	// we want that A can be moved in one region not two
 	tolerantResource := p.getTolerantResource()
@@ -126,20 +126,21 @@ func (p *solver) targetStoreScore(scheduleName string) float64 {
 		influence = -influence
 	}
 
-	if p.GetSchedulerConfig().IsDebugMetricsEnabled() {
+	opts := p.GetOpts()
+	if opts.IsDebugMetricsEnabled() {
 		opInfluenceStatus.WithLabelValues(scheduleName, strconv.FormatUint(targetID, 10), "target").Set(float64(influence))
 	}
 	var score float64
 	switch p.kind.Resource {
 	case constant.LeaderKind:
 		targetDelta := influence + tolerantResource
-		score = p.Target.LeaderScore(p.kind.Policy, targetDelta)
+		score = p.target.LeaderScore(p.kind.Policy, targetDelta)
 	case constant.RegionKind:
 		targetDelta := influence*influenceAmp + tolerantResource
-		score = p.Target.RegionScore(p.GetSchedulerConfig().GetRegionScoreFormulaVersion(), p.GetSchedulerConfig().GetHighSpaceRatio(), p.GetSchedulerConfig().GetLowSpaceRatio(), targetDelta)
+		score = p.target.RegionScore(opts.GetRegionScoreFormulaVersion(), opts.GetHighSpaceRatio(), opts.GetLowSpaceRatio(), targetDelta)
 	case constant.WitnessKind:
 		targetDelta := influence + tolerantResource
-		score = p.Target.WitnessScore(targetDelta)
+		score = p.target.WitnessScore(targetDelta)
 	}
 	return score
 }
@@ -150,16 +151,16 @@ func (p *solver) shouldBalance(scheduleName string) bool {
 	// The reason we use max(regionSize, averageRegionSize) to check is:
 	// 1. prevent moving small regions between stores with close scores, leading to unnecessary balance.
 	// 2. prevent moving huge regions, leading to over balance.
-	sourceID := p.Source.GetID()
-	targetID := p.Target.GetID()
+	sourceID := p.source.GetID()
+	targetID := p.target.GetID()
 	// Make sure after move, source score is still greater than target score.
 	shouldBalance := p.sourceScore > p.targetScore
 
 	if !shouldBalance && log.GetLevel() <= zap.DebugLevel {
 		log.Debug("skip balance "+p.kind.Resource.String(),
-			zap.String("scheduler", scheduleName), zap.Uint64("region-id", p.Region.GetID()), zap.Uint64("source-store", sourceID), zap.Uint64("target-store", targetID),
-			zap.Int64("source-size", p.Source.GetRegionSize()), zap.Float64("source-score", p.sourceScore),
-			zap.Int64("target-size", p.Target.GetRegionSize()), zap.Float64("target-score", p.targetScore),
+			zap.String("scheduler", scheduleName), zap.Uint64("region-id", p.region.GetID()), zap.Uint64("source-store", sourceID), zap.Uint64("target-store", targetID),
+			zap.Int64("source-size", p.source.GetRegionSize()), zap.Float64("source-score", p.sourceScore),
+			zap.Int64("target-size", p.target.GetRegionSize()), zap.Float64("target-score", p.targetScore),
 			zap.Int64("average-region-size", p.GetAverageRegionSize()),
 			zap.Int64("tolerant-resource", p.getTolerantResource()))
 	}
@@ -180,14 +181,14 @@ func (p *solver) getTolerantResource() int64 {
 	return p.tolerantSource
 }
 
-func adjustTolerantRatio(cluster sche.SchedulerCluster, kind constant.ScheduleKind) float64 {
+func adjustTolerantRatio(cluster schedule.Cluster, kind constant.ScheduleKind) float64 {
 	var tolerantSizeRatio float64
 	switch c := cluster.(type) {
-	case *rangeCluster:
+	case *schedule.RangeCluster:
 		// range cluster use a separate configuration
 		tolerantSizeRatio = c.GetTolerantSizeRatio()
 	default:
-		tolerantSizeRatio = cluster.GetSchedulerConfig().GetTolerantSizeRatio()
+		tolerantSizeRatio = cluster.GetOpts().GetTolerantSizeRatio()
 	}
 	if kind.Resource == constant.LeaderKind && kind.Policy == constant.ByCount {
 		if tolerantSizeRatio == 0 {
@@ -218,11 +219,11 @@ func getKeyRanges(args []string) ([]core.KeyRange, error) {
 	for len(args) > 1 {
 		startKey, err := url.QueryUnescape(args[0])
 		if err != nil {
-			return nil, errs.ErrQueryUnescape.Wrap(err)
+			return nil, errs.ErrQueryUnescape.Wrap(err).FastGenWithCause()
 		}
 		endKey, err := url.QueryUnescape(args[1])
 		if err != nil {
-			return nil, errs.ErrQueryUnescape.Wrap(err)
+			return nil, errs.ErrQueryUnescape.Wrap(err).FastGenWithCause()
 		}
 		args = args[2:]
 		ranges = append(ranges, core.NewKeyRange(startKey, endKey))
@@ -235,23 +236,21 @@ func getKeyRanges(args []string) ([]core.KeyRange, error) {
 
 type pendingInfluence struct {
 	op                *operator.Operator
-	froms             []uint64
-	to                uint64
+	from, to          uint64
 	origin            statistics.Influence
 	maxZombieDuration time.Duration
 }
 
-func newPendingInfluence(op *operator.Operator, froms []uint64, to uint64, infl statistics.Influence, maxZombieDur time.Duration) *pendingInfluence {
+func newPendingInfluence(op *operator.Operator, from, to uint64, infl statistics.Influence, maxZombieDur time.Duration) *pendingInfluence {
 	return &pendingInfluence{
 		op:                op,
-		froms:             froms,
+		from:              from,
 		to:                to,
 		origin:            infl,
 		maxZombieDuration: maxZombieDur,
 	}
 }
 
-// stLdRate returns a function to get the load rate of the store with the specified dimension.
 func stLdRate(dim int) func(ld *statistics.StoreLoad) float64 {
 	return func(ld *statistics.StoreLoad) float64 {
 		return ld.Loads[dim]
@@ -264,16 +263,12 @@ func stLdCount(ld *statistics.StoreLoad) float64 {
 
 type storeLoadCmp func(ld1, ld2 *statistics.StoreLoad) int
 
-// negLoadCmp returns a cmp that returns the negation of cmps.
 func negLoadCmp(cmp storeLoadCmp) storeLoadCmp {
 	return func(ld1, ld2 *statistics.StoreLoad) int {
 		return -cmp(ld1, ld2)
 	}
 }
 
-// sliceLoadCmp returns function with running cmps in order.
-// If the cmp returns 0, which means equal, the next cmp will be used.
-// If all cmps return 0, the two loads are considered equal.
 func sliceLoadCmp(cmps ...storeLoadCmp) storeLoadCmp {
 	return func(ld1, ld2 *statistics.StoreLoad) int {
 		for _, cmp := range cmps {
@@ -285,15 +280,12 @@ func sliceLoadCmp(cmps ...storeLoadCmp) storeLoadCmp {
 	}
 }
 
-// stLdRankCmp returns a cmp that compares the two loads with discretized data.
-// For example, if the rank function discretice data by step 10 , the load 11 and 19 will be considered equal.
 func stLdRankCmp(dim func(ld *statistics.StoreLoad) float64, rank func(value float64) int64) storeLoadCmp {
 	return func(ld1, ld2 *statistics.StoreLoad) int {
 		return rankCmp(dim(ld1), dim(ld2), rank)
 	}
 }
 
-// rankCmp compares the two values with discretized data.
 func rankCmp(a, b float64, rank func(value float64) int64) int {
 	aRk, bRk := rank(a), rank(b)
 	if aRk < bRk {
@@ -306,9 +298,6 @@ func rankCmp(a, b float64, rank func(value float64) int64) int {
 
 type storeLPCmp func(lp1, lp2 *statistics.StoreLoadPred) int
 
-// sliceLPCmp returns function with running cmps in order.
-// If the cmp returns 0, which means equal, the next cmp will be used.
-// If all cmps return 0, the two loads are considered equal.
 func sliceLPCmp(cmps ...storeLPCmp) storeLPCmp {
 	return func(lp1, lp2 *statistics.StoreLoadPred) int {
 		for _, cmp := range cmps {
@@ -320,21 +309,18 @@ func sliceLPCmp(cmps ...storeLPCmp) storeLPCmp {
 	}
 }
 
-// minLPCmp is a function to select the min load of the store between current and future when comparing.
 func minLPCmp(ldCmp storeLoadCmp) storeLPCmp {
 	return func(lp1, lp2 *statistics.StoreLoadPred) int {
 		return ldCmp(lp1.Min(), lp2.Min())
 	}
 }
 
-// maxLPCmp is a function to select the max load of the store between current and future when comparing.
 func maxLPCmp(ldCmp storeLoadCmp) storeLPCmp {
 	return func(lp1, lp2 *statistics.StoreLoadPred) int {
 		return ldCmp(lp1.Max(), lp2.Max())
 	}
 }
 
-// diffCmp is a function to select the diff load of the store between current and future when comparing.
 func diffCmp(ldCmp storeLoadCmp) storeLPCmp {
 	return func(lp1, lp2 *statistics.StoreLoadPred) int {
 		return ldCmp(lp1.Diff(), lp2.Diff())
@@ -388,21 +374,5 @@ func (q *retryQuota) GC(keepStores []*core.StoreInfo) {
 		if _, ok := set[id]; !ok {
 			delete(q.limits, id)
 		}
-	}
-}
-
-// pauseAndResumeLeaderTransfer checks the old and new store IDs, and pause or resume the leader transfer.
-func pauseAndResumeLeaderTransfer[T any](cluster *core.BasicCluster, old, new map[uint64]T) {
-	for id := range old {
-		if _, ok := new[id]; ok {
-			continue
-		}
-		cluster.ResumeLeaderTransfer(id)
-	}
-	for id := range new {
-		if _, ok := old[id]; ok {
-			continue
-		}
-		cluster.PauseLeaderTransfer(id)
 	}
 }

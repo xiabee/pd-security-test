@@ -42,7 +42,7 @@ func TestAPI(t *testing.T) {
 	re.NoError(err)
 	cluster.WaitLeader()
 
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 
 	var jsonStr = []byte(`

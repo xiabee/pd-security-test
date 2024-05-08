@@ -70,7 +70,7 @@ func TestGetScaledTiKVGroups(t *testing.T) {
 		informer         core.StoreSetInformer
 		healthyInstances []instance
 		expectedPlan     []*Plan
-		errorChecker     func(err error, msgAndArgs ...any)
+		errorChecker     func(err error, msgAndArgs ...interface{})
 	}{
 		{
 			name:     "no scaled tikv group",
@@ -233,7 +233,7 @@ func TestGetTotalCPUUseTime(t *testing.T) {
 	}
 	totalCPUUseTime, _ := getTotalCPUUseTime(querier, TiDB, instances, time.Now(), 0)
 	expected := mockResultValue * float64(len(instances))
-	re.Less(math.Abs(expected-totalCPUUseTime), 1e-6)
+	re.True(math.Abs(expected-totalCPUUseTime) < 1e-6)
 }
 
 func TestGetTotalCPUQuota(t *testing.T) {

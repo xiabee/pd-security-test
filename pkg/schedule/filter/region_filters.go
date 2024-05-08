@@ -18,7 +18,6 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/core/storelimit"
-	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/placement"
 	"github.com/tikv/pd/pkg/schedule/plan"
 	"github.com/tikv/pd/pkg/slice"
@@ -100,12 +99,12 @@ func (f *regionDownFilter) Select(region *core.RegionInfo) *plan.Status {
 
 // RegionReplicatedFilter filters all unreplicated regions.
 type RegionReplicatedFilter struct {
-	cluster sche.SharedCluster
+	cluster regionHealthCluster
 	fit     *placement.RegionFit
 }
 
 // NewRegionReplicatedFilter creates a RegionFilter that filters all unreplicated regions.
-func NewRegionReplicatedFilter(cluster sche.SharedCluster) RegionFilter {
+func NewRegionReplicatedFilter(cluster regionHealthCluster) RegionFilter {
 	return &RegionReplicatedFilter{cluster: cluster}
 }
 
@@ -117,7 +116,7 @@ func (f *RegionReplicatedFilter) GetFit() *placement.RegionFit {
 // Select returns Ok if the given region satisfy the replication.
 // it will cache the lasted region fit if the region satisfy the replication.
 func (f *RegionReplicatedFilter) Select(region *core.RegionInfo) *plan.Status {
-	if f.cluster.GetSharedConfig().IsPlacementRulesEnabled() {
+	if f.cluster.GetOpts().IsPlacementRulesEnabled() {
 		fit := f.cluster.GetRuleManager().FitRegion(f.cluster, region)
 		if !fit.IsSatisfied() {
 			return statusRegionNotMatchRule
@@ -132,11 +131,11 @@ func (f *RegionReplicatedFilter) Select(region *core.RegionInfo) *plan.Status {
 }
 
 type regionEmptyFilter struct {
-	cluster sche.SharedCluster
+	cluster regionHealthCluster
 }
 
 // NewRegionEmptyFilter returns creates a RegionFilter that filters all empty regions.
-func NewRegionEmptyFilter(cluster sche.SharedCluster) RegionFilter {
+func NewRegionEmptyFilter(cluster regionHealthCluster) RegionFilter {
 	return &regionEmptyFilter{cluster: cluster}
 }
 
@@ -148,8 +147,8 @@ func (f *regionEmptyFilter) Select(region *core.RegionInfo) *plan.Status {
 }
 
 // isEmptyRegionAllowBalance returns true if the region is not empty or the number of regions is too small.
-func isEmptyRegionAllowBalance(cluster sche.SharedCluster, region *core.RegionInfo) bool {
-	return region.GetApproximateSize() > core.EmptyRegionApproximateSize || cluster.GetTotalRegionCount() < core.InitClusterRegionThreshold
+func isEmptyRegionAllowBalance(cluster regionHealthCluster, region *core.RegionInfo) bool {
+	return region.GetApproximateSize() > core.EmptyRegionApproximateSize || cluster.GetRegionCount() < core.InitClusterRegionThreshold
 }
 
 type regionWitnessFilter struct {

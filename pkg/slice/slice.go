@@ -49,12 +49,11 @@ func Contains[T comparable](slice []T, value T) bool {
 
 // Remove removes the value from the slice.
 func Remove[T comparable](slice []T, value T) []T {
-	i, j := 0, 0
-	for ; i < len(slice); i++ {
-		if slice[i] != value {
-			slice[j] = slice[i]
-			j++
+	for i := 0; i < len(slice); i++ {
+		if slice[i] == value {
+			slice = append(slice[:i], slice[i+1:]...)
+			i--
 		}
 	}
-	return slice[:j]
+	return slice
 }

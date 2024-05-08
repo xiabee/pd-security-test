@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
@@ -42,7 +41,7 @@ type ServiceRegister struct {
 // NewServiceRegister creates a new ServiceRegister.
 func NewServiceRegister(ctx context.Context, cli *clientv3.Client, clusterID, serviceName, serviceAddr, serializedValue string, ttl int64) *ServiceRegister {
 	cctx, cancel := context.WithCancel(ctx)
-	serviceKey := RegistryPath(clusterID, serviceName, serviceAddr)
+	serviceKey := registryPath(clusterID, serviceName, serviceAddr)
 	return &ServiceRegister{
 		ctx:    cctx,
 		cancel: cancel,
@@ -55,12 +54,18 @@ func NewServiceRegister(ctx context.Context, cli *clientv3.Client, clusterID, se
 
 // Register registers the service to etcd.
 func (sr *ServiceRegister) Register() error {
-	id, err := sr.putWithTTL()
+	resp, err := sr.cli.Grant(sr.ctx, sr.ttl)
 	if err != nil {
 		sr.cancel()
-		return fmt.Errorf("put the key with lease %s failed: %v", sr.key, err)
+		return fmt.Errorf("grant lease failed: %v", err)
 	}
-	kresp, err := sr.cli.KeepAlive(sr.ctx, id)
+
+	if _, err := sr.cli.Put(sr.ctx, sr.key, sr.value, clientv3.WithLease(resp.ID)); err != nil {
+		sr.cancel()
+		return fmt.Errorf("put the key %s failed: %v", sr.key, err)
+	}
+
+	kresp, err := sr.cli.KeepAlive(sr.ctx, resp.ID)
 	if err != nil {
 		sr.cancel()
 		return fmt.Errorf("keepalive failed: %v", err)
@@ -75,43 +80,34 @@ func (sr *ServiceRegister) Register() error {
 			case _, ok := <-kresp:
 				if !ok {
 					log.Error("keep alive failed", zap.String("key", sr.key))
-					kresp = sr.renewKeepalive()
+					// retry
+					t := time.NewTicker(time.Duration(sr.ttl) * time.Second / 2)
+					for {
+						select {
+						case <-sr.ctx.Done():
+							log.Info("exit register process", zap.String("key", sr.key))
+							return
+						default:
+						}
+
+						<-t.C
+						resp, err := sr.cli.Grant(sr.ctx, sr.ttl)
+						if err != nil {
+							log.Error("grant lease failed", zap.String("key", sr.key), zap.Error(err))
+							continue
+						}
+
+						if _, err := sr.cli.Put(sr.ctx, sr.key, sr.value, clientv3.WithLease(resp.ID)); err != nil {
+							log.Error("put the key failed", zap.String("key", sr.key), zap.Error(err))
+							continue
+						}
+					}
 				}
 			}
 		}
 	}()
 
 	return nil
-}
-
-func (sr *ServiceRegister) renewKeepalive() <-chan *clientv3.LeaseKeepAliveResponse {
-	t := time.NewTicker(time.Duration(sr.ttl) * time.Second / 2)
-	defer t.Stop()
-	for {
-		select {
-		case <-sr.ctx.Done():
-			log.Info("exit register process", zap.String("key", sr.key))
-			return nil
-		case <-t.C:
-			id, err := sr.putWithTTL()
-			if err != nil {
-				log.Error("put the key with lease failed", zap.String("key", sr.key), zap.Error(err))
-				continue
-			}
-			kresp, err := sr.cli.KeepAlive(sr.ctx, id)
-			if err != nil {
-				log.Error("client keep alive failed", zap.String("key", sr.key), zap.Error(err))
-				continue
-			}
-			return kresp
-		}
-	}
-}
-
-func (sr *ServiceRegister) putWithTTL() (clientv3.LeaseID, error) {
-	ctx, cancel := context.WithTimeout(sr.ctx, etcdutil.DefaultRequestTimeout)
-	defer cancel()
-	return etcdutil.EtcdKVPutWithTTL(ctx, sr.cli, sr.key, sr.value, sr.ttl)
 }
 
 // Deregister deregisters the service from etcd.

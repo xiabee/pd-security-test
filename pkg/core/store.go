@@ -600,36 +600,22 @@ func DistinctScore(labels []string, stores []*StoreInfo, other *StoreInfo) float
 	return score
 }
 
-// MergeLabels merges the passed in labels with origins, overriding duplicated ones.
-// Note: To prevent potential data races, it is advisable to refrain from directly modifying the 'origin' variable.
+// MergeLabels merges the passed in labels with origins, overriding duplicated
+// ones.
 func MergeLabels(origin []*metapb.StoreLabel, labels []*metapb.StoreLabel) []*metapb.StoreLabel {
-	results := make([]*metapb.StoreLabel, 0, len(origin))
-	for _, label := range origin {
-		results = append(results, &metapb.StoreLabel{
-			Key:   label.Key,
-			Value: label.Value,
-		})
-	}
-
+	storeLabels := origin
+L:
 	for _, newLabel := range labels {
-		found := false
-		for _, label := range results {
+		for _, label := range storeLabels {
 			if strings.EqualFold(label.Key, newLabel.Key) {
-				// Update the value for an existing key.
 				label.Value = newLabel.Value
-				found = true
-				break
+				continue L
 			}
 		}
-		// Add a new label if the key doesn't exist in the original slice.
-		if !found {
-			results = append(results, newLabel)
-		}
+		storeLabels = append(storeLabels, newLabel)
 	}
-
-	// Filter out labels with an empty value.
-	res := results[:0]
-	for _, l := range results {
+	res := storeLabels[:0]
+	for _, l := range storeLabels {
 		if l.Value != "" {
 			res = append(res, l)
 		}
