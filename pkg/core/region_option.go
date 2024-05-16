@@ -282,6 +282,13 @@ func SetApproximateSize(v int64) RegionCreateOption {
 	}
 }
 
+// SetApproximateKvSize sets the approximate size for the region.
+func SetApproximateKvSize(v int64) RegionCreateOption {
+	return func(region *RegionInfo) {
+		region.approximateKvSize = v
+	}
+}
+
 // SetApproximateKeys sets the approximate keys for the region.
 func SetApproximateKeys(v int64) RegionCreateOption {
 	return func(region *RegionInfo) {
@@ -374,10 +381,10 @@ func WithInterval(interval *pdpb.TimeInterval) RegionCreateOption {
 	}
 }
 
-// SetFromHeartbeat sets if the region info comes from the region heartbeat.
-func SetFromHeartbeat(fromHeartbeat bool) RegionCreateOption {
+// SetSource sets the region info's come from.
+func SetSource(source RegionSource) RegionCreateOption {
 	return func(region *RegionInfo) {
-		region.fromHeartbeat = fromHeartbeat
+		region.source = source
 	}
 }
 

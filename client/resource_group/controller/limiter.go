@@ -122,12 +122,14 @@ func NewLimiterWithCfg(now time.Time, cfg tokenBucketReconfigureArgs, lowTokensN
 // A Reservation holds information about events that are permitted by a Limiter to happen after a delay.
 // A Reservation may be canceled, which may enable the Limiter to permit additional events.
 type Reservation struct {
-	ok        bool
-	lim       *Limiter
-	tokens    float64
-	timeToAct time.Time
+	ok               bool
+	lim              *Limiter
+	tokens           float64
+	timeToAct        time.Time
+	needWaitDuration time.Duration
 	// This is the Limit at reservation time, it can change later.
-	limit Limit
+	limit           Limit
+	remainingTokens float64
 }
 
 // OK returns whether the limiter can provide the requested number of tokens
@@ -185,7 +187,7 @@ func (r *Reservation) CancelAt(now time.Time) {
 
 // Reserve returns a Reservation that indicates how long the caller must wait before n events happen.
 // The Limiter takes this Reservation into account when allowing future events.
-// The returned Reservation’s OK() method returns false if wait duration exceeds deadline.
+// The returned Reservation's OK() method returns false if wait duration exceeds deadline.
 // Usage example:
 //
 //	r := lim.Reserve(time.Now(), 1)
@@ -285,7 +287,7 @@ type tokenBucketReconfigureArgs struct {
 	NotifyThreshold float64
 }
 
-// LimiterOption is used to modify the Limiter during construction.
+// LimiterOption configures Limiter.
 type LimiterOption func(*Limiter)
 
 func resetLowProcess() func(*Limiter) {
@@ -301,7 +303,7 @@ func (lim *Limiter) Reconfigure(now time.Time,
 ) {
 	lim.mu.Lock()
 	defer lim.mu.Unlock()
-	log.Debug("[resource group controller] before reconfigure", zap.Float64("old-tokens", lim.tokens), zap.Float64("old-rate", float64(lim.limit)), zap.Float64("old-notify-threshold", args.NotifyThreshold), zap.Int64("old-burst", lim.burst))
+	logControllerTrace("[resource group controller] before reconfigure", zap.Float64("old-tokens", lim.tokens), zap.Float64("old-rate", float64(lim.limit)), zap.Float64("old-notify-threshold", args.NotifyThreshold), zap.Int64("old-burst", lim.burst))
 	if args.NewBurst < 0 {
 		lim.last = now
 		lim.tokens = args.NewTokens
@@ -317,7 +319,7 @@ func (lim *Limiter) Reconfigure(now time.Time,
 		opt(lim)
 	}
 	lim.maybeNotify()
-	log.Debug("[resource group controller] after reconfigure", zap.Float64("tokens", lim.tokens), zap.Float64("rate", float64(lim.limit)), zap.Float64("notify-threshold", args.NotifyThreshold), zap.Int64("burst", lim.burst))
+	logControllerTrace("[resource group controller] after reconfigure", zap.Float64("tokens", lim.tokens), zap.Float64("rate", float64(lim.limit)), zap.Float64("notify-threshold", args.NotifyThreshold), zap.Int64("burst", lim.burst))
 }
 
 // AvailableTokens decreases the amount of tokens currently available.
@@ -358,9 +360,11 @@ func (lim *Limiter) reserveN(now time.Time, n float64, maxFutureReserve time.Dur
 
 	// Prepare reservation
 	r := Reservation{
-		ok:    ok,
-		lim:   lim,
-		limit: lim.limit,
+		ok:               ok,
+		lim:              lim,
+		limit:            lim.limit,
+		needWaitDuration: waitDuration,
+		remainingTokens:  tokens,
 	}
 	if ok {
 		r.tokens = n
@@ -372,7 +376,16 @@ func (lim *Limiter) reserveN(now time.Time, n float64, maxFutureReserve time.Dur
 		lim.tokens = tokens
 		lim.maybeNotify()
 	} else {
-		log.Debug("[resource group controller]", zap.Float64("current-tokens", lim.tokens), zap.Float64("current-rate", float64(lim.limit)), zap.Float64("request-tokens", n), zap.Int64("burst", lim.burst), zap.Int("remaining-notify-times", lim.remainingNotifyTimes))
+		log.Warn("[resource group controller] cannot reserve enough tokens",
+			zap.Duration("need-wait-duration", waitDuration),
+			zap.Duration("max-wait-duration", maxFutureReserve),
+			zap.Float64("current-ltb-tokens", lim.tokens),
+			zap.Float64("current-ltb-rate", float64(lim.limit)),
+			zap.Float64("request-tokens", n),
+			zap.Float64("notify-threshold", lim.notifyThreshold),
+			zap.Bool("is-low-process", lim.isLowProcess),
+			zap.Int64("burst", lim.burst),
+			zap.Int("remaining-notify-times", lim.remainingNotifyTimes))
 		lim.last = last
 		if lim.limit == 0 {
 			lim.notify()
@@ -387,7 +400,7 @@ func (lim *Limiter) reserveN(now time.Time, n float64, maxFutureReserve time.Dur
 	return r
 }
 
-// ResetRemainingNotifyTimes resets remainingNotifyTimes.
+// ResetRemainingNotifyTimes resets the remaining notify times to 3.
 func (lim *Limiter) ResetRemainingNotifyTimes() {
 	lim.mu.Lock()
 	defer lim.mu.Unlock()
@@ -452,7 +465,7 @@ func WaitReservations(ctx context.Context, now time.Time, reservations []*Reserv
 	for _, res := range reservations {
 		if !res.ok {
 			cancel()
-			return 0, errs.ErrClientResourceGroupThrottled
+			return res.needWaitDuration, errs.ErrClientResourceGroupThrottled.FastGenByArgs(res.needWaitDuration, res.limit, res.remainingTokens)
 		}
 		delay := res.DelayFrom(now)
 		if delay > longestDelayDuration {

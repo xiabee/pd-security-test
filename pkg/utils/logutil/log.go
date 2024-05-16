@@ -70,7 +70,7 @@ func StringToZapLogLevel(level string) zapcore.Level {
 func SetupLogger(logConfig log.Config, logger **zap.Logger, logProps **log.ZapProperties, enabled ...bool) error {
 	lg, p, err := log.InitLogger(&logConfig, zap.AddStacktrace(zapcore.FatalLevel))
 	if err != nil {
-		return errs.ErrInitLogger.Wrap(err).FastGenWithCause()
+		return errs.ErrInitLogger.Wrap(err)
 	}
 	*logger = lg
 	*logProps = p
@@ -151,4 +151,24 @@ type stringer struct {
 // String implement fmt.Stringer
 func (s stringer) String() string {
 	return "?"
+}
+
+// CondUint32 constructs a field with the given key and value conditionally.
+// If the condition is true, it constructs a field with uint32 type; otherwise,
+// skip the field.
+func CondUint32(key string, val uint32, condition bool) zap.Field {
+	if condition {
+		return zap.Uint32(key, val)
+	}
+	return zap.Skip()
+}
+
+// IsLevelLegal checks whether the level is legal.
+func IsLevelLegal(level string) bool {
+	switch strings.ToLower(level) {
+	case "fatal", "error", "warn", "warning", "debug", "info":
+		return true
+	default:
+		return false
+	}
 }

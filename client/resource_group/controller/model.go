@@ -18,11 +18,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/elastic/gosigar"
-	"github.com/pingcap/log"
+	sigar "github.com/cloudfoundry/gosigar"
 	"go.uber.org/zap"
 
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
+	"github.com/pingcap/log"
 )
 
 // RequestUnit is the basic unit of the resource request management, which has two types:
@@ -35,6 +35,7 @@ type RequestUnit float64
 type RequestInfo interface {
 	IsWrite() bool
 	WriteBytes() uint64
+	ReplicaNumber() int64
 	StoreID() uint64
 }
 
@@ -64,13 +65,13 @@ type ResourceCalculator interface {
 
 // KVCalculator is used to calculate the KV-side consumption.
 type KVCalculator struct {
-	*Config
+	*RUConfig
 }
 
 var _ ResourceCalculator = (*KVCalculator)(nil)
 
-func newKVCalculator(cfg *Config) *KVCalculator {
-	return &KVCalculator{Config: cfg}
+func newKVCalculator(cfg *RUConfig) *KVCalculator {
+	return &KVCalculator{RUConfig: cfg}
 }
 
 // Trickle ...
@@ -87,14 +88,19 @@ func (kc *KVCalculator) BeforeKVRequest(consumption *rmpb.Consumption, req Reque
 		consumption.KvReadRpcCount += 1
 		// Read bytes could not be known before the request is executed,
 		// so we only add the base cost here.
-		consumption.RRU += float64(kc.ReadBaseCost)
+		consumption.RRU += float64(kc.ReadBaseCost) + float64(kc.ReadPerBatchBaseCost)*defaultAvgBatchProportion
 	}
 }
 
 func (kc *KVCalculator) calculateWriteCost(consumption *rmpb.Consumption, req RequestInfo) {
 	writeBytes := float64(req.WriteBytes())
 	consumption.WriteBytes += writeBytes
-	consumption.WRU += float64(kc.WriteBaseCost) + float64(kc.WriteBytesCost)*writeBytes
+	// write request cost need consider the replicas, due to write data will be replicate to all replicas.
+	replicaNums := float64(req.ReplicaNumber())
+	if replicaNums == 0 {
+		replicaNums = 1
+	}
+	consumption.WRU += (float64(kc.WriteBaseCost) + float64(kc.WritePerBatchBaseCost)*defaultAvgBatchProportion + float64(kc.WriteBytesCost)*writeBytes) * replicaNums
 }
 
 // AfterKVRequest ...
@@ -140,13 +146,13 @@ func (kc *KVCalculator) payBackWriteCost(consumption *rmpb.Consumption, req Requ
 
 // SQLCalculator is used to calculate the SQL-side consumption.
 type SQLCalculator struct {
-	*Config
+	*RUConfig
 }
 
 var _ ResourceCalculator = (*SQLCalculator)(nil)
 
-func newSQLCalculator(cfg *Config) *SQLCalculator {
-	return &SQLCalculator{Config: cfg}
+func newSQLCalculator(cfg *RUConfig) *SQLCalculator {
+	return &SQLCalculator{RUConfig: cfg}
 }
 
 // Trickle update sql layer CPU consumption.
@@ -296,7 +302,7 @@ func getSQLProcessCPUTime(isSingleGroupByKeyspace bool) float64 {
 
 func getSysProcessCPUTime() float64 {
 	pid := os.Getpid()
-	cpuTime := gosigar.ProcTime{}
+	cpuTime := sigar.ProcTime{}
 	if err := cpuTime.Get(pid); err != nil {
 		log.Error("getCPUTime get pid failed", zap.Error(err))
 	}

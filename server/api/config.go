@@ -27,6 +27,9 @@ import (
 	"github.com/pingcap/errcode"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/mcs/utils"
+	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/jsonutil"
 	"github.com/tikv/pd/pkg/utils/logutil"
@@ -35,6 +38,10 @@ import (
 	"github.com/tikv/pd/server/config"
 	"github.com/unrolled/render"
 )
+
+// This line is to ensure the package `sc` could always be imported so that
+// the swagger could generate the right definitions for the config structs.
+var _ *sc.ScheduleConfig = nil
 
 type confHandler struct {
 	svr *server.Server
@@ -55,7 +62,18 @@ func newConfHandler(svr *server.Server, rd *render.Render) *confHandler {
 // @Router   /config [get]
 func (h *confHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := h.svr.GetConfig()
-	cfg.Schedule.MaxMergeRegionKeys = cfg.Schedule.GetMaxMergeRegionKeys()
+	if h.svr.IsServiceIndependent(utils.SchedulingServiceName) &&
+		r.Header.Get(apiutil.XForbiddenForwardToMicroServiceHeader) != "true" {
+		schedulingServerConfig, err := h.GetSchedulingServerConfig()
+		if err != nil {
+			h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		cfg.Schedule = schedulingServerConfig.Schedule
+		cfg.Replication = schedulingServerConfig.Replication
+	} else {
+		cfg.Schedule.MaxMergeRegionKeys = cfg.Schedule.GetMaxMergeRegionKeys()
+	}
 	h.rd.JSON(w, http.StatusOK, cfg)
 }
 
@@ -95,7 +113,7 @@ func (h *confHandler) SetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conf := make(map[string]interface{})
+	conf := make(map[string]any)
 	if err := json.Unmarshal(data, &conf); err != nil {
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
@@ -139,7 +157,7 @@ func (h *confHandler) SetConfig(w http.ResponseWriter, r *http.Request) {
 	h.rd.JSON(w, http.StatusOK, "The config is updated.")
 }
 
-func (h *confHandler) updateConfig(cfg *config.Config, key string, value interface{}) error {
+func (h *confHandler) updateConfig(cfg *config.Config, key string, value any) error {
 	kp := strings.Split(key, ".")
 	switch kp[0] {
 	case "schedule":
@@ -161,11 +179,47 @@ func (h *confHandler) updateConfig(cfg *config.Config, key string, value interfa
 	case "cluster-version":
 		return h.updateClusterVersion(value)
 	case "label-property": // TODO: support changing label-property
+	case "keyspace":
+		return h.updateKeyspaceConfig(cfg, kp[len(kp)-1], value)
+	case "micro-service":
+		return h.updateMicroServiceConfig(cfg, kp[len(kp)-1], value)
 	}
 	return errors.Errorf("config prefix %s not found", kp[0])
 }
 
-func (h *confHandler) updateSchedule(config *config.Config, key string, value interface{}) error {
+func (h *confHandler) updateKeyspaceConfig(config *config.Config, key string, value any) error {
+	updated, found, err := jsonutil.AddKeyValue(&config.Keyspace, key, value)
+	if err != nil {
+		return err
+	}
+
+	if !found {
+		return errors.Errorf("config item %s not found", key)
+	}
+
+	if updated {
+		err = h.svr.SetKeyspaceConfig(config.Keyspace)
+	}
+	return err
+}
+
+func (h *confHandler) updateMicroServiceConfig(config *config.Config, key string, value any) error {
+	updated, found, err := jsonutil.AddKeyValue(&config.MicroService, key, value)
+	if err != nil {
+		return err
+	}
+
+	if !found {
+		return errors.Errorf("config item %s not found", key)
+	}
+
+	if updated {
+		err = h.svr.SetMicroServiceConfig(config.MicroService)
+	}
+	return err
+}
+
+func (h *confHandler) updateSchedule(config *config.Config, key string, value any) error {
 	updated, found, err := jsonutil.AddKeyValue(&config.Schedule, key, value)
 	if err != nil {
 		return err
@@ -181,7 +235,7 @@ func (h *confHandler) updateSchedule(config *config.Config, key string, value in
 	return err
 }
 
-func (h *confHandler) updateReplication(config *config.Config, key string, value interface{}) error {
+func (h *confHandler) updateReplication(config *config.Config, key string, value any) error {
 	updated, found, err := jsonutil.AddKeyValue(&config.Replication, key, value)
 	if err != nil {
 		return err
@@ -197,8 +251,8 @@ func (h *confHandler) updateReplication(config *config.Config, key string, value
 	return err
 }
 
-func (h *confHandler) updateReplicationModeConfig(config *config.Config, key []string, value interface{}) error {
-	cfg := make(map[string]interface{})
+func (h *confHandler) updateReplicationModeConfig(config *config.Config, key []string, value any) error {
+	cfg := make(map[string]any)
 	cfg = getConfigMap(cfg, key, value)
 	data, err := json.Marshal(cfg)
 	if err != nil {
@@ -219,7 +273,7 @@ func (h *confHandler) updateReplicationModeConfig(config *config.Config, key []s
 	return err
 }
 
-func (h *confHandler) updatePDServerConfig(config *config.Config, key string, value interface{}) error {
+func (h *confHandler) updatePDServerConfig(config *config.Config, key string, value any) error {
 	updated, found, err := jsonutil.AddKeyValue(&config.PDServerCfg, key, value)
 	if err != nil {
 		return err
@@ -235,7 +289,7 @@ func (h *confHandler) updatePDServerConfig(config *config.Config, key string, va
 	return err
 }
 
-func (h *confHandler) updateLogLevel(kp []string, value interface{}) error {
+func (h *confHandler) updateLogLevel(kp []string, value any) error {
 	if len(kp) != 2 || kp[1] != "level" {
 		return errors.Errorf("only support changing log level")
 	}
@@ -250,7 +304,7 @@ func (h *confHandler) updateLogLevel(kp []string, value interface{}) error {
 	return errors.Errorf("input value %v is illegal", value)
 }
 
-func (h *confHandler) updateClusterVersion(value interface{}) error {
+func (h *confHandler) updateClusterVersion(value any) error {
 	if version, ok := value.(string); ok {
 		err := h.svr.SetClusterVersion(version)
 		if err != nil {
@@ -261,13 +315,13 @@ func (h *confHandler) updateClusterVersion(value interface{}) error {
 	return errors.Errorf("input value %v is illegal", value)
 }
 
-func getConfigMap(cfg map[string]interface{}, key []string, value interface{}) map[string]interface{} {
+func getConfigMap(cfg map[string]any, key []string, value any) map[string]any {
 	if len(key) == 1 {
 		cfg[key[0]] = value
 		return cfg
 	}
 
-	subConfig := make(map[string]interface{})
+	subConfig := make(map[string]any)
 	cfg[key[0]] = getConfigMap(subConfig, key[1:], value)
 	return cfg
 }
@@ -275,9 +329,20 @@ func getConfigMap(cfg map[string]interface{}, key []string, value interface{}) m
 // @Tags     config
 // @Summary  Get schedule config.
 // @Produce  json
-// @Success  200  {object}  config.ScheduleConfig
+// @Success  200  {object}  sc.ScheduleConfig
 // @Router   /config/schedule [get]
 func (h *confHandler) GetScheduleConfig(w http.ResponseWriter, r *http.Request) {
+	if h.svr.IsServiceIndependent(utils.SchedulingServiceName) &&
+		r.Header.Get(apiutil.XForbiddenForwardToMicroServiceHeader) != "true" {
+		cfg, err := h.GetSchedulingServerConfig()
+		if err != nil {
+			h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		cfg.Schedule.SchedulersPayload = nil
+		h.rd.JSON(w, http.StatusOK, cfg.Schedule)
+		return
+	}
 	cfg := h.svr.GetScheduleConfig()
 	cfg.MaxMergeRegionKeys = cfg.GetMaxMergeRegionKeys()
 	h.rd.JSON(w, http.StatusOK, cfg)
@@ -301,7 +366,7 @@ func (h *confHandler) SetScheduleConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	conf := make(map[string]interface{})
+	conf := make(map[string]any)
 	if err := json.Unmarshal(data, &conf); err != nil {
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
@@ -338,9 +403,19 @@ func (h *confHandler) SetScheduleConfig(w http.ResponseWriter, r *http.Request) 
 // @Tags     config
 // @Summary  Get replication config.
 // @Produce  json
-// @Success  200  {object}  config.ReplicationConfig
+// @Success  200  {object}  sc.ReplicationConfig
 // @Router   /config/replicate [get]
 func (h *confHandler) GetReplicationConfig(w http.ResponseWriter, r *http.Request) {
+	if h.svr.IsServiceIndependent(utils.SchedulingServiceName) &&
+		r.Header.Get(apiutil.XForbiddenForwardToMicroServiceHeader) != "true" {
+		cfg, err := h.GetSchedulingServerConfig()
+		if err != nil {
+			h.rd.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		h.rd.JSON(w, http.StatusOK, cfg.Replication)
+		return
+	}
 	h.rd.JSON(w, http.StatusOK, h.svr.GetReplicationConfig())
 }
 
@@ -481,4 +556,34 @@ func (h *confHandler) SetReplicationModeConfig(w http.ResponseWriter, r *http.Re
 // @Router   /config/pd-server [get]
 func (h *confHandler) GetPDServerConfig(w http.ResponseWriter, r *http.Request) {
 	h.rd.JSON(w, http.StatusOK, h.svr.GetPDServerConfig())
+}
+
+func (h *confHandler) GetSchedulingServerConfig() (*config.Config, error) {
+	addr, ok := h.svr.GetServicePrimaryAddr(h.svr.Context(), utils.SchedulingServiceName)
+	if !ok {
+		return nil, errs.ErrNotFoundSchedulingAddr.FastGenByArgs()
+	}
+	url := fmt.Sprintf("%s/scheduling/api/v1/config", addr)
+	req, err := http.NewRequest(http.MethodGet, url, http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := h.svr.GetHTTPClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errs.ErrSchedulingServer.FastGenByArgs(resp.StatusCode)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var schedulingServerConfig config.Config
+	err = json.Unmarshal(b, &schedulingServerConfig)
+	if err != nil {
+		return nil, err
+	}
+	return &schedulingServerConfig, nil
 }
