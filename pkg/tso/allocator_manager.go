@@ -108,7 +108,7 @@ type ElectionMember interface {
 	// MemberValue returns the member value.
 	MemberValue() string
 	// GetMember returns the current member
-	GetMember() any
+	GetMember() interface{}
 	// Client returns the etcd client.
 	Client() *clientv3.Client
 	// IsLeader returns whether the participant is the leader or not by checking its
@@ -325,12 +325,6 @@ func (am *AllocatorManager) close() {
 		allocatorGroup.allocator.(*GlobalTSOAllocator).close()
 	}
 
-	for _, cc := range am.localAllocatorConn.clientConns {
-		if err := cc.Close(); err != nil {
-			log.Error("failed to close allocator manager grpc clientConn", errs.ZapError(errs.ErrCloseGRPCConn, err))
-		}
-	}
-
 	am.cancel()
 	am.svcLoopWG.Wait()
 
@@ -419,7 +413,7 @@ func (am *AllocatorManager) GetClusterDCLocationsFromEtcd() (clusterDCLocations 
 		if err != nil {
 			log.Warn("get server id and dcLocation from etcd failed, invalid server id",
 				logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
-				zap.Any("split-serverPath", serverPath),
+				zap.Any("splitted-serverPath", serverPath),
 				zap.String("dc-location", dcLocation),
 				errs.ZapError(err))
 			continue
@@ -979,8 +973,8 @@ func (am *AllocatorManager) getDCLocationSuffixMapFromEtcd() (map[string]int32, 
 		if err != nil {
 			return nil, err
 		}
-		splitKey := strings.Split(string(kv.Key), "/")
-		dcLocation := splitKey[len(splitKey)-1]
+		splittedKey := strings.Split(string(kv.Key), "/")
+		dcLocation := splittedKey[len(splittedKey)-1]
 		dcLocationSuffix[dcLocation] = int32(suffix)
 	}
 	return dcLocationSuffix, nil

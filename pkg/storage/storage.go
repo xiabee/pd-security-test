@@ -57,18 +57,13 @@ func NewStorageWithEtcdBackend(client *clientv3.Client, rootPath string) Storage
 	return newEtcdBackend(client, rootPath)
 }
 
-// NewRegionStorageWithLevelDBBackend will create a specialized storage to
-// store region meta information based on a LevelDB backend.
-func NewRegionStorageWithLevelDBBackend(
+// NewStorageWithLevelDBBackend creates a new storage with LevelDB backend.
+func NewStorageWithLevelDBBackend(
 	ctx context.Context,
 	filePath string,
 	ekm *encryption.Manager,
-) (*RegionStorage, error) {
-	levelDBBackend, err := newLevelDBBackend(ctx, filePath, ekm)
-	if err != nil {
-		return nil, err
-	}
-	return newRegionStorage(levelDBBackend), nil
+) (Storage, error) {
+	return newLevelDBBackend(ctx, filePath, ekm)
 }
 
 // TODO: support other KV storage backends like BadgerDB in the future.
@@ -93,14 +88,15 @@ func NewCoreStorage(defaultStorage Storage, regionStorage endpoint.RegionStorage
 	}
 }
 
-// RetrieveRegionStorage retrieve the region storage from the given storage.
-// If it's a `coreStorage`, it will return the regionStorage inside, otherwise it will return the original storage.
-func RetrieveRegionStorage(s Storage) endpoint.RegionStorage {
+// TryGetLocalRegionStorage gets the local region storage. Returns nil if not present.
+func TryGetLocalRegionStorage(s Storage) endpoint.RegionStorage {
 	switch ps := s.(type) {
 	case *coreStorage:
 		return ps.regionStorage
-	default:
+	case *levelDBBackend, *memoryStorage:
 		return ps
+	default:
+		return nil
 	}
 }
 

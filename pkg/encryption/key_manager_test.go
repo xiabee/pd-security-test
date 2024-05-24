@@ -313,7 +313,7 @@ func TestLoadKeyEmpty(t *testing.T) {
 	// Simulate keys get deleted.
 	_, err = client.Delete(context.Background(), EncryptionKeysPath)
 	re.NoError(err)
-	re.Error(m.loadKeys())
+	re.NotNil(m.loadKeys())
 }
 
 func TestWatcher(t *testing.T) {
@@ -509,7 +509,7 @@ func TestSetLeadershipWithEncryptionMethodChanged(t *testing.T) {
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
 	re.NoError(err)
-	// Config with different encryption method.
+	// Config with different encrption method.
 	config := &Config{
 		DataEncryptionMethod: "aes256-ctr",
 		MasterKey: MasterKeyConfig{
@@ -579,7 +579,7 @@ func TestSetLeadershipWithCurrentKeyExposed(t *testing.T) {
 	}
 	err := saveKeys(leadership, masterKeyMeta, keys, defaultKeyManagerHelper())
 	re.NoError(err)
-	// Config with different encryption method.
+	// Config with different encrption method.
 	config := &Config{
 		DataEncryptionMethod: "aes128-ctr",
 		MasterKey: MasterKeyConfig{

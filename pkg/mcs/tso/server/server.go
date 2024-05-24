@@ -20,8 +20,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -80,6 +78,9 @@ type Server struct {
 	service              *Service
 	keyspaceGroupManager *tso.KeyspaceGroupManager
 
+	// tsoDispatcher is used to dispatch the TSO requests to
+	// the corresponding forwarding TSO channels.
+	tsoDispatcher *tsoutil.TSODispatcher
 	// tsoProtoFactory is the abstract factory for creating tso
 	// related data structures defined in the tso grpc protocol
 	tsoProtoFactory *tsoutil.TSOProtoFactory
@@ -178,7 +179,6 @@ func (s *Server) Close() {
 	utils.StopHTTPServer(s)
 	utils.StopGRPCServer(s)
 	s.GetListener().Close()
-	s.CloseClientConns()
 	s.serverLoopCancel()
 	s.serverLoopWg.Wait()
 
@@ -362,28 +362,16 @@ func (s *Server) startServer() (err error) {
 	metaDataGauge.WithLabelValues(fmt.Sprintf("cluster%d", s.clusterID)).Set(0)
 	// The independent TSO service still reuses PD version info since PD and TSO are just
 	// different service modes provided by the same pd-server binary
-	bs.ServerInfoGauge.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
-	bs.ServerMaxProcsGauge.Set(float64(runtime.GOMAXPROCS(0)))
+	serverInfo.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
 
 	// Initialize the TSO service.
 	s.serverLoopCtx, s.serverLoopCancel = context.WithCancel(s.Context())
 	legacySvcRootPath := endpoint.LegacyRootPath(s.clusterID)
 	tsoSvcRootPath := endpoint.TSOSvcRootPath(s.clusterID)
-	execPath, err := os.Executable()
-	deployPath := filepath.Dir(execPath)
-	if err != nil {
-		deployPath = ""
-	}
-	s.serviceID = &discovery.ServiceRegistryEntry{
-		ServiceAddr:    s.cfg.AdvertiseListenAddr,
-		Version:        versioninfo.PDReleaseVersion,
-		GitHash:        versioninfo.PDGitHash,
-		DeployPath:     deployPath,
-		StartTimestamp: s.StartTimestamp(),
-	}
+	s.serviceID = &discovery.ServiceRegistryEntry{ServiceAddr: s.cfg.AdvertiseListenAddr}
 	s.keyspaceGroupManager = tso.NewKeyspaceGroupManager(
 		s.serverLoopCtx, s.serviceID, s.GetClient(), s.GetHTTPClient(), s.cfg.AdvertiseListenAddr,
-		s.clusterID, legacySvcRootPath, tsoSvcRootPath, s.cfg)
+		discovery.TSOPath(s.clusterID), legacySvcRootPath, tsoSvcRootPath, s.cfg)
 	if err := s.keyspaceGroupManager.Initialize(); err != nil {
 		return err
 	}

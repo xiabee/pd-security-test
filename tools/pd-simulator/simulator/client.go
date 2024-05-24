@@ -341,7 +341,7 @@ func (c *client) PutPDConfig(config *PDConfig) error {
 	}
 	if len(config.LocationLabels) > 0 {
 		path := fmt.Sprintf("%s/%s/config", c.url, httpPrefix)
-		data := make(map[string]any)
+		data := make(map[string]interface{})
 		data["location-labels"] = config.LocationLabels
 		content, err := json.Marshal(data)
 		if err != nil {

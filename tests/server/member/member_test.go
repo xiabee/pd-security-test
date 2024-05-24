@@ -32,7 +32,6 @@ import (
 	"github.com/tikv/pd/pkg/utils/assertutil"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/testutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/tests"
@@ -84,13 +83,12 @@ func TestMemberDelete(t *testing.T) {
 		{path: fmt.Sprintf("id/%d", members[1].GetServerID()), members: []*config.Config{leader.GetConfig()}},
 	}
 
-	httpClient := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
-	defer httpClient.CloseIdleConnections()
+	httpClient := &http.Client{Timeout: 15 * time.Second}
 	for _, table := range tables {
 		t.Log(time.Now(), "try to delete:", table.path)
 		testutil.Eventually(re, func() bool {
 			addr := leader.GetConfig().ClientUrls + "/pd/api/v1/members/" + table.path
-			req, err := http.NewRequest(http.MethodDelete, addr, http.NoBody)
+			req, err := http.NewRequest(http.MethodDelete, addr, nil)
 			re.NoError(err)
 			res, err := httpClient.Do(req)
 			re.NoError(err)
@@ -105,7 +103,7 @@ func TestMemberDelete(t *testing.T) {
 			}
 			// Check by member list.
 			cluster.WaitLeader()
-			if err = checkMemberList(re, *httpClient, leader.GetConfig().ClientUrls, table.members); err != nil {
+			if err = checkMemberList(re, leader.GetConfig().ClientUrls, table.members); err != nil {
 				t.Logf("check member fail: %v", err)
 				time.Sleep(time.Second)
 				return false
@@ -122,7 +120,8 @@ func TestMemberDelete(t *testing.T) {
 	}
 }
 
-func checkMemberList(re *require.Assertions, httpClient http.Client, clientURL string, configs []*config.Config) error {
+func checkMemberList(re *require.Assertions, clientURL string, configs []*config.Config) error {
+	httpClient := &http.Client{Timeout: 15 * time.Second}
 	addr := clientURL + "/pd/api/v1/members"
 	res, err := httpClient.Get(addr)
 	re.NoError(err)
@@ -152,9 +151,7 @@ func TestLeaderPriority(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cluster, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, serverName string) {
-		conf.LeaderPriorityCheckInterval = typeutil.NewDuration(time.Second)
-	})
+	cluster, err := tests.NewTestCluster(ctx, 3)
 	defer cluster.Destroy()
 	re.NoError(err)
 
@@ -263,7 +260,7 @@ func TestPDLeaderLostWhileEtcdLeaderIntact(t *testing.T) {
 	re.NoError(err)
 
 	leader1 := cluster.WaitLeader()
-	memberID := cluster.GetLeaderServer().GetLeader().GetMemberId()
+	memberID := cluster.GetServer(leader1).GetLeader().GetMemberId()
 
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/leaderLoopCheckAgain", fmt.Sprintf("return(\"%d\")", memberID)))
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/exitCampaignLeader", fmt.Sprintf("return(\"%d\")", memberID)))
@@ -341,7 +338,7 @@ func TestCampaignLeaderFrequently(t *testing.T) {
 	re.NotEmpty(cluster.GetLeader())
 
 	for i := 0; i < 3; i++ {
-		cluster.GetLeaderServer().ResetPDLeader()
+		cluster.GetServers()[cluster.GetLeader()].ResetPDLeader()
 		cluster.WaitLeader()
 	}
 	// PD leader should be different from before because etcd leader changed.

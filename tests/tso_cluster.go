@@ -84,7 +84,7 @@ func RestartTestTSOCluster(
 	}
 	wg.Wait()
 
-	errorMap.Range(func(key, value any) bool {
+	errorMap.Range(func(key, value interface{}) bool {
 		if value != nil {
 			err = value.(error)
 			return false

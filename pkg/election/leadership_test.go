@@ -175,7 +175,7 @@ func TestExitWatch(t *testing.T) {
 
 		resp2, err := client.MemberList(context.Background())
 		re.NoError(err)
-		re.Len(resp2.Members, 3)
+		re.Equal(3, len(resp2.Members))
 
 		etcd2.Server.HardStop()
 		etcd3.Server.HardStop()

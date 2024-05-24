@@ -58,9 +58,7 @@ func (conf *shuffleRegionSchedulerConfig) GetRoles() []string {
 func (conf *shuffleRegionSchedulerConfig) GetRanges() []core.KeyRange {
 	conf.RLock()
 	defer conf.RUnlock()
-	ranges := make([]core.KeyRange, len(conf.Ranges))
-	copy(ranges, conf.Ranges)
-	return ranges
+	return conf.Ranges
 }
 
 func (conf *shuffleRegionSchedulerConfig) IsRoleAllow(role string) bool {
@@ -71,7 +69,6 @@ func (conf *shuffleRegionSchedulerConfig) IsRoleAllow(role string) bool {
 
 func (conf *shuffleRegionSchedulerConfig) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	router := mux.NewRouter()
-	router.HandleFunc("/list", conf.handleGetRoles).Methods(http.MethodGet)
 	router.HandleFunc("/roles", conf.handleGetRoles).Methods(http.MethodGet)
 	router.HandleFunc("/roles", conf.handleSetRoles).Methods(http.MethodPost)
 	router.ServeHTTP(w, r)

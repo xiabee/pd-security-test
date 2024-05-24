@@ -31,7 +31,6 @@ const (
 	serviceMiddlewarePath     = "service_middleware"
 	schedulePath              = "schedule"
 	gcPath                    = "gc"
-	ruleCommonPath            = "rule"
 	rulesPath                 = "rules"
 	ruleGroupPath             = "rule_group"
 	regionLabelPath           = "region_label"
@@ -101,11 +100,6 @@ func SchedulerConfigPathPrefix(clusterID uint64) string {
 // RulesPathPrefix returns the path prefix to save the placement rules.
 func RulesPathPrefix(clusterID uint64) string {
 	return path.Join(PDRootPath(clusterID), rulesPath)
-}
-
-// RuleCommonPathPrefix returns the path prefix to save the placement rule common config.
-func RuleCommonPathPrefix(clusterID uint64) string {
-	return path.Join(PDRootPath(clusterID), ruleCommonPath)
 }
 
 // RuleGroupPathPrefix returns the path prefix to save the placement rule groups.

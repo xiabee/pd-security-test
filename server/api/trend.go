@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tikv/pd/pkg/response"
 	"github.com/tikv/pd/pkg/statistics"
 	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/utils/apiutil"
@@ -137,7 +136,7 @@ func (h *trendHandler) getTrendStores() ([]trendStore, error) {
 	}
 	trendStores := make([]trendStore, 0, len(stores))
 	for _, store := range stores {
-		info := response.BuildStoreInfo(h.svr.GetScheduleConfig(), store)
+		info := newStoreInfo(h.svr.GetScheduleConfig(), store)
 		s := trendStore{
 			ID:              info.Store.GetId(),
 			Address:         info.Store.GetAddress(),

@@ -104,7 +104,7 @@ func (m *Participant) Name() string {
 }
 
 // GetMember returns the member.
-func (m *Participant) GetMember() any {
+func (m *Participant) GetMember() interface{} {
 	return m.member
 }
 
@@ -121,16 +121,22 @@ func (m *Participant) Client() *clientv3.Client {
 // IsLeader returns whether the participant is the leader or not by checking its leadership's
 // lease and leader info.
 func (m *Participant) IsLeader() bool {
+	if m.GetLeader() == nil {
+		return false
+	}
 	return m.leadership.Check() && m.GetLeader().GetId() == m.member.GetId() && m.campaignCheck()
 }
 
 // IsLeaderElected returns true if the leader exists; otherwise false
 func (m *Participant) IsLeaderElected() bool {
-	return m.GetLeader().GetId() != 0
+	return m.GetLeader() != nil
 }
 
 // GetLeaderListenUrls returns current leader's listen urls
 func (m *Participant) GetLeaderListenUrls() []string {
+	if m.GetLeader() == nil {
+		return nil
+	}
 	return m.GetLeader().GetListenUrls()
 }
 
@@ -143,9 +149,13 @@ func (m *Participant) GetLeaderID() uint64 {
 func (m *Participant) GetLeader() participant {
 	leader := m.leader.Load()
 	if leader == nil {
-		return NewParticipantByService(m.serviceName)
+		return nil
 	}
-	return leader.(participant)
+	member := leader.(participant)
+	if member.GetId() == 0 {
+		return nil
+	}
+	return member
 }
 
 // setLeader sets the member's leader.

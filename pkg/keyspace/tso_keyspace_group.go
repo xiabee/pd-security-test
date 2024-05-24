@@ -216,6 +216,7 @@ func (m *GroupManager) allocNodesToAllKeyspaceGroups(ctx context.Context) {
 
 func (m *GroupManager) initTSONodesWatcher(client *clientv3.Client, clusterID uint64) {
 	tsoServiceKey := discovery.TSOPath(clusterID)
+	tsoServiceEndKey := clientv3.GetPrefixRangeEnd(tsoServiceKey)
 
 	putFn := func(kv *mvccpb.KeyValue) error {
 		s := &discovery.ServiceRegistryEntry{}
@@ -244,11 +245,10 @@ func (m *GroupManager) initTSONodesWatcher(client *clientv3.Client, clusterID ui
 		client,
 		"tso-nodes-watcher",
 		tsoServiceKey,
-		func([]*clientv3.Event) error { return nil },
 		putFn,
 		deleteFn,
-		func([]*clientv3.Event) error { return nil },
-		true, /* withPrefix */
+		func() error { return nil },
+		clientv3.WithRange(tsoServiceEndKey),
 	)
 }
 
@@ -914,7 +914,7 @@ func (m *GroupManager) MergeKeyspaceGroups(mergeTargetID uint32, mergeList []uin
 	//   - Load and delete the keyspace groups in the merge list.
 	//   - Load and update the target keyspace group.
 	// So we pre-check the number of operations to avoid exceeding the maximum number of etcd transaction.
-	if (mergeListNum+1)*2 > etcdutil.MaxEtcdTxnOps {
+	if (mergeListNum+1)*2 > MaxEtcdTxnOps {
 		return ErrExceedMaxEtcdTxnOps
 	}
 	if slice.Contains(mergeList, utils.DefaultKeyspaceGroupID) {
@@ -1061,7 +1061,7 @@ func (m *GroupManager) MergeAllIntoDefaultKeyspaceGroup() error {
 			continue
 		}
 		var (
-			maxBatchSize  = etcdutil.MaxEtcdTxnOps/2 - 1
+			maxBatchSize  = MaxEtcdTxnOps/2 - 1
 			groupsToMerge = make([]uint32, 0, maxBatchSize)
 		)
 		for idx, group := range groups.GetAll() {

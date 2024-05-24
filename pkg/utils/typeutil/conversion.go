@@ -53,8 +53,8 @@ func BoolToInt(b bool) int {
 }
 
 // JSONToUint64Slice converts JSON slice to uint64 slice.
-func JSONToUint64Slice(from any) ([]uint64, bool) {
-	items, ok := from.([]any)
+func JSONToUint64Slice(from interface{}) ([]uint64, bool) {
+	items, ok := from.([]interface{})
 	if !ok {
 		return nil, false
 	}

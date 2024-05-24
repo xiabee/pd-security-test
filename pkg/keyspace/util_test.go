@@ -83,12 +83,12 @@ func TestMakeLabelRule(t *testing.T) {
 					},
 				},
 				RuleType: "key-range",
-				Data: []any{
-					map[string]any{
+				Data: []interface{}{
+					map[string]interface{}{
 						"start_key": hex.EncodeToString(codec.EncodeBytes([]byte{'r', 0, 0, 0})),
 						"end_key":   hex.EncodeToString(codec.EncodeBytes([]byte{'r', 0, 0, 1})),
 					},
-					map[string]any{
+					map[string]interface{}{
 						"start_key": hex.EncodeToString(codec.EncodeBytes([]byte{'x', 0, 0, 0})),
 						"end_key":   hex.EncodeToString(codec.EncodeBytes([]byte{'x', 0, 0, 1})),
 					},
@@ -107,12 +107,12 @@ func TestMakeLabelRule(t *testing.T) {
 					},
 				},
 				RuleType: "key-range",
-				Data: []any{
-					map[string]any{
+				Data: []interface{}{
+					map[string]interface{}{
 						"start_key": hex.EncodeToString(codec.EncodeBytes([]byte{'r', 0, 0x10, 0x92})),
 						"end_key":   hex.EncodeToString(codec.EncodeBytes([]byte{'r', 0, 0x10, 0x93})),
 					},
-					map[string]any{
+					map[string]interface{}{
 						"start_key": hex.EncodeToString(codec.EncodeBytes([]byte{'x', 0, 0x10, 0x92})),
 						"end_key":   hex.EncodeToString(codec.EncodeBytes([]byte{'x', 0, 0x10, 0x93})),
 					},

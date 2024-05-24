@@ -51,7 +51,6 @@ var (
 type balanceRegionSchedulerConfig struct {
 	Name   string          `json:"name"`
 	Ranges []core.KeyRange `json:"ranges"`
-	// TODO: When we prepare to use Ranges, we will need to implement the ReloadConfig function for this scheduler.
 }
 
 type balanceRegionScheduler struct {
@@ -285,8 +284,8 @@ func (s *balanceRegionScheduler) transferPeer(solver *solver, collector *plan.Co
 		op.FinishedCounters = append(op.FinishedCounters,
 			balanceDirectionCounter.WithLabelValues(s.GetName(), sourceLabel, targetLabel),
 		)
-		op.SetAdditionalInfo("sourceScore", strconv.FormatFloat(solver.sourceScore, 'f', 2, 64))
-		op.SetAdditionalInfo("targetScore", strconv.FormatFloat(solver.targetScore, 'f', 2, 64))
+		op.AdditionalInfos["sourceScore"] = strconv.FormatFloat(solver.sourceScore, 'f', 2, 64)
+		op.AdditionalInfos["targetScore"] = strconv.FormatFloat(solver.targetScore, 'f', 2, 64)
 		return op
 	}
 

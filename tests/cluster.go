@@ -551,7 +551,7 @@ func restartTestCluster(
 	}
 	wg.Wait()
 
-	errorMap.Range(func(key, value any) bool {
+	errorMap.Range(func(key, value interface{}) bool {
 		if value != nil {
 			err = value.(error)
 			return false
@@ -852,8 +852,8 @@ func (c *TestCluster) CheckClusterDCLocation() {
 	wg := sync.WaitGroup{}
 	for _, server := range c.GetServers() {
 		wg.Add(1)
-		go func(s *TestServer) {
-			s.GetTSOAllocatorManager().ClusterDCLocationChecker()
+		go func(ser *TestServer) {
+			ser.GetTSOAllocatorManager().ClusterDCLocationChecker()
 			wg.Done()
 		}(server)
 	}

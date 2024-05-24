@@ -287,8 +287,8 @@ func (r *RegionStatistics) Collect() {
 	regionWitnessLeaderRegionCounter.Set(float64(len(r.stats[WitnessLeader])))
 }
 
-// ResetRegionStatsMetrics resets the metrics of the regions' status.
-func ResetRegionStatsMetrics() {
+// Reset resets the metrics of the regions' status.
+func (r *RegionStatistics) Reset() {
 	regionMissPeerRegionCounter.Set(0)
 	regionExtraPeerRegionCounter.Set(0)
 	regionDownPeerRegionCounter.Set(0)
@@ -341,8 +341,8 @@ func (l *LabelStatistics) Collect() {
 	}
 }
 
-// ResetLabelStatsMetrics resets the metrics of the label status.
-func ResetLabelStatsMetrics() {
+// Reset resets the metrics of the label status.
+func (l *LabelStatistics) Reset() {
 	regionLabelLevelGauge.Reset()
 }
 

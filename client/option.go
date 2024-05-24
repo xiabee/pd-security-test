@@ -28,7 +28,6 @@ const (
 	maxInitClusterRetries                        = 100
 	defaultMaxTSOBatchWaitInterval time.Duration = 0
 	defaultEnableTSOFollowerProxy                = false
-	defaultEnableFollowerHandle                  = false
 )
 
 // DynamicOption is used to distinguish the dynamic option type.
@@ -41,8 +40,6 @@ const (
 	// EnableTSOFollowerProxy is the TSO Follower Proxy option.
 	// It is stored as bool.
 	EnableTSOFollowerProxy
-	// EnableFollowerHandle is the follower handle option.
-	EnableFollowerHandle
 
 	dynamicOptionCount
 )
@@ -75,7 +72,6 @@ func newOption() *option {
 
 	co.dynamicOptions[MaxTSOBatchWaitInterval].Store(defaultMaxTSOBatchWaitInterval)
 	co.dynamicOptions[EnableTSOFollowerProxy].Store(defaultEnableTSOFollowerProxy)
-	co.dynamicOptions[EnableFollowerHandle].Store(defaultEnableFollowerHandle)
 	return co
 }
 
@@ -90,19 +86,6 @@ func (o *option) setMaxTSOBatchWaitInterval(interval time.Duration) error {
 		o.dynamicOptions[MaxTSOBatchWaitInterval].Store(interval)
 	}
 	return nil
-}
-
-// setEnableFollowerHandle set the Follower Handle option.
-func (o *option) setEnableFollowerHandle(enable bool) {
-	old := o.getEnableFollowerHandle()
-	if enable != old {
-		o.dynamicOptions[EnableFollowerHandle].Store(enable)
-	}
-}
-
-// getMaxTSOBatchWaitInterval gets the Follower Handle enable option.
-func (o *option) getEnableFollowerHandle() bool {
-	return o.dynamicOptions[EnableFollowerHandle].Load().(bool)
 }
 
 // getMaxTSOBatchWaitInterval gets the max TSO batch wait interval option.

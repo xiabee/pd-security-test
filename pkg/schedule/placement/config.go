@@ -79,30 +79,28 @@ func (c *ruleConfig) getGroup(id string) *RuleGroup {
 	return &RuleGroup{ID: id}
 }
 
-func (c *ruleConfig) beginPatch() *RuleConfigPatch {
-	return &RuleConfigPatch{
+func (c *ruleConfig) beginPatch() *ruleConfigPatch {
+	return &ruleConfigPatch{
 		c:   c,
 		mut: newRuleConfig(),
 	}
 }
 
-// RuleConfigPatch is a helper data structure to update ruleConfig.
-type RuleConfigPatch struct {
+// A helper data structure to update ruleConfig.
+type ruleConfigPatch struct {
 	c   *ruleConfig // original configuration to be updated
 	mut *ruleConfig // record all to-commit rules and groups
 }
 
-// SetRule sets a rule to the patch.
-func (p *RuleConfigPatch) SetRule(r *Rule) {
+func (p *ruleConfigPatch) setRule(r *Rule) {
 	p.mut.rules[r.Key()] = r
 }
 
-// DeleteRule deletes a rule from the patch.
-func (p *RuleConfigPatch) DeleteRule(group, id string) {
+func (p *ruleConfigPatch) deleteRule(group, id string) {
 	p.mut.rules[[2]string{group, id}] = nil
 }
 
-func (p *RuleConfigPatch) getGroup(id string) *RuleGroup {
+func (p *ruleConfigPatch) getGroup(id string) *RuleGroup {
 	if g, ok := p.mut.groups[id]; ok {
 		return g
 	}
@@ -112,17 +110,15 @@ func (p *RuleConfigPatch) getGroup(id string) *RuleGroup {
 	return &RuleGroup{ID: id}
 }
 
-// SetGroup sets a group to the patch.
-func (p *RuleConfigPatch) SetGroup(g *RuleGroup) {
+func (p *ruleConfigPatch) setGroup(g *RuleGroup) {
 	p.mut.groups[g.ID] = g
 }
 
-// DeleteGroup deletes a group from the patch.
-func (p *RuleConfigPatch) DeleteGroup(id string) {
-	p.SetGroup(&RuleGroup{ID: id})
+func (p *ruleConfigPatch) deleteGroup(id string) {
+	p.setGroup(&RuleGroup{ID: id})
 }
 
-func (p *RuleConfigPatch) iterateRules(f func(*Rule)) {
+func (p *ruleConfigPatch) iterateRules(f func(*Rule)) {
 	for _, r := range p.mut.rules {
 		if r != nil { // nil means delete.
 			f(r)
@@ -135,13 +131,13 @@ func (p *RuleConfigPatch) iterateRules(f func(*Rule)) {
 	}
 }
 
-func (p *RuleConfigPatch) adjust() {
+func (p *ruleConfigPatch) adjust() {
 	// setup rule.group for `buildRuleList` use.
 	p.iterateRules(func(r *Rule) { r.group = p.getGroup(r.GroupID) })
 }
 
 // trim unnecessary updates. For example, remove a rule then insert the same rule.
-func (p *RuleConfigPatch) trim() {
+func (p *ruleConfigPatch) trim() {
 	for key, rule := range p.mut.rules {
 		if jsonEquals(rule, p.c.getRule(key)) {
 			delete(p.mut.rules, key)
@@ -155,7 +151,7 @@ func (p *RuleConfigPatch) trim() {
 }
 
 // merge all mutations to ruleConfig.
-func (p *RuleConfigPatch) commit() {
+func (p *ruleConfigPatch) commit() {
 	for key, rule := range p.mut.rules {
 		if rule == nil {
 			delete(p.c.rules, key)
@@ -180,7 +176,7 @@ func (p *RuleConfigPatch) commit() {
 	p.c.adjust()
 }
 
-func jsonEquals(a, b any) bool {
+func jsonEquals(a, b interface{}) bool {
 	aa, _ := json.Marshal(a)
 	bb, _ := json.Marshal(b)
 	return bytes.Equal(aa, bb)

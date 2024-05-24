@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -217,7 +216,6 @@ func (s *Server) Close() {
 	utils.StopHTTPServer(s)
 	utils.StopGRPCServer(s)
 	s.GetListener().Close()
-	s.CloseClientConns()
 	s.serverLoopCancel()
 	s.serverLoopWg.Wait()
 
@@ -296,17 +294,16 @@ func (s *Server) startServer() (err error) {
 	log.Info("init cluster id", zap.Uint64("cluster-id", s.clusterID))
 	// The independent Resource Manager service still reuses PD version info since PD and Resource Manager are just
 	// different service modes provided by the same pd-server binary
-	bs.ServerInfoGauge.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
-	bs.ServerMaxProcsGauge.Set(float64(runtime.GOMAXPROCS(0)))
+	serverInfo.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
 
-	uniqueName := s.cfg.GetAdvertiseListenAddr()
+	uniqueName := s.cfg.ListenAddr
 	uniqueID := memberutil.GenerateUniqueID(uniqueName)
 	log.Info("joining primary election", zap.String("participant-name", uniqueName), zap.Uint64("participant-id", uniqueID))
 	s.participant = member.NewParticipant(s.GetClient(), utils.ResourceManagerServiceName)
 	p := &resource_manager.Participant{
 		Name:       uniqueName,
 		Id:         uniqueID, // id is unique among all participants
-		ListenUrls: []string{s.cfg.GetAdvertiseListenAddr()},
+		ListenUrls: []string{s.cfg.AdvertiseListenAddr},
 	}
 	s.participant.InitInfo(p, endpoint.ResourceManagerSvcRootPath(s.clusterID), utils.PrimaryKey, "primary election")
 
@@ -315,7 +312,7 @@ func (s *Server) startServer() (err error) {
 		manager: NewManager[*Server](s),
 	}
 
-	if err := s.InitListener(s.GetTLSConfig(), s.cfg.GetListenAddr()); err != nil {
+	if err := s.InitListener(s.GetTLSConfig(), s.cfg.ListenAddr); err != nil {
 		return err
 	}
 
@@ -324,15 +321,13 @@ func (s *Server) startServer() (err error) {
 	s.serverLoopWg.Add(1)
 	go utils.StartGRPCAndHTTPServers(s, serverReadyChan, s.GetListener())
 	<-serverReadyChan
+	s.startServerLoop()
 
 	// Run callbacks
 	log.Info("triggering the start callback functions")
 	for _, cb := range s.GetStartCallbacks() {
 		cb()
 	}
-	// The start callback function will initialize storage, which will be used in service ready callback.
-	// We should make sure the calling sequence is right.
-	s.startServerLoop()
 
 	// Server has started.
 	entry := &discovery.ServiceRegistryEntry{ServiceAddr: s.cfg.AdvertiseListenAddr}

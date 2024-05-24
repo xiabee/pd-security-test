@@ -123,6 +123,7 @@ func (rmc *ControllerConfig) Adjust(meta *configutil.ConfigMetaData) {
 
 // RequestUnitConfig is the configuration of the request units, which determines the coefficients of
 // the RRU and WRU cost. This configuration should be modified carefully.
+// TODO: use common config with client size.
 type RequestUnitConfig struct {
 	// ReadBaseCost is the base cost for a read request. No matter how many bytes read/written or
 	// the CPU times taken for a request, this cost is inevitable.
@@ -248,26 +249,6 @@ func (c *Config) adjustLog(meta *configutil.ConfigMetaData) {
 	}
 	configutil.AdjustString(&c.Log.Format, utils.DefaultLogFormat)
 	configutil.AdjustString(&c.Log.Level, utils.DefaultLogLevel)
-}
-
-// GetName returns the Name
-func (c *Config) GetName() string {
-	return c.Name
-}
-
-// GeBackendEndpoints returns the BackendEndpoints
-func (c *Config) GeBackendEndpoints() string {
-	return c.BackendEndpoints
-}
-
-// GetListenAddr returns the ListenAddr
-func (c *Config) GetListenAddr() string {
-	return c.ListenAddr
-}
-
-// GetAdvertiseListenAddr returns the AdvertiseListenAddr
-func (c *Config) GetAdvertiseListenAddr() string {
-	return c.AdvertiseListenAddr
 }
 
 // GetTLSConfig returns the TLS config.

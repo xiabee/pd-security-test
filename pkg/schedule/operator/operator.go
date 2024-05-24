@@ -15,6 +15,7 @@
 package operator
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -82,7 +83,7 @@ type Operator struct {
 	level            constant.PriorityLevel
 	Counters         []prometheus.Counter
 	FinishedCounters []prometheus.Counter
-	additionalInfos  opAdditionalInfo
+	AdditionalInfos  map[string]string
 	ApproximateSize  int64
 	timeout          time.Duration
 	influence        *OpInfluence
@@ -99,18 +100,16 @@ func NewOperator(desc, brief string, regionID uint64, regionEpoch *metapb.Region
 		maxDuration += v.Timeout(approximateSize).Seconds()
 	}
 	return &Operator{
-		desc:        desc,
-		brief:       brief,
-		regionID:    regionID,
-		regionEpoch: regionEpoch,
-		kind:        kind,
-		steps:       steps,
-		stepsTime:   make([]int64, len(steps)),
-		status:      NewOpStatusTracker(),
-		level:       level,
-		additionalInfos: opAdditionalInfo{
-			value: make(map[string]string),
-		},
+		desc:            desc,
+		brief:           brief,
+		regionID:        regionID,
+		regionEpoch:     regionEpoch,
+		kind:            kind,
+		steps:           steps,
+		stepsTime:       make([]int64, len(steps)),
+		status:          NewOpStatusTracker(),
+		level:           level,
+		AdditionalInfos: make(map[string]string),
 		ApproximateSize: approximateSize,
 		timeout:         time.Duration(maxDuration) * time.Second,
 	}
@@ -119,8 +118,8 @@ func NewOperator(desc, brief string, regionID uint64, regionEpoch *metapb.Region
 // Sync some attribute with the given timeout.
 func (o *Operator) Sync(other *Operator) {
 	o.timeout = other.timeout
-	o.SetAdditionalInfo(string(RelatedMergeRegion), strconv.FormatUint(other.RegionID(), 10))
-	other.SetAdditionalInfo(string(RelatedMergeRegion), strconv.FormatUint(o.RegionID(), 10))
+	o.AdditionalInfos[string(RelatedMergeRegion)] = strconv.FormatUint(other.RegionID(), 10)
+	other.AdditionalInfos[string(RelatedMergeRegion)] = strconv.FormatUint(o.RegionID(), 10)
 }
 
 func (o *Operator) String() string {
@@ -148,39 +147,6 @@ func (o *Operator) Brief() string {
 // MarshalJSON serializes custom types to JSON.
 func (o *Operator) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + o.String() + `"`), nil
-}
-
-// OpObject is used to return Operator as a json object for API.
-type OpObject struct {
-	Desc        string              `json:"desc"`
-	Brief       string              `json:"brief"`
-	RegionID    uint64              `json:"region_id"`
-	RegionEpoch *metapb.RegionEpoch `json:"region_epoch"`
-	Kind        OpKind              `json:"kind"`
-	Timeout     string              `json:"timeout"`
-	Status      OpStatus            `json:"status"`
-}
-
-// ToJSONObject serializes Operator as JSON object.
-func (o *Operator) ToJSONObject() *OpObject {
-	var status OpStatus
-	if o.CheckSuccess() {
-		status = SUCCESS
-	} else if o.CheckTimeout() {
-		status = TIMEOUT
-	} else {
-		status = o.Status()
-	}
-
-	return &OpObject{
-		Desc:        o.desc,
-		Brief:       o.brief,
-		RegionID:    o.regionID,
-		RegionEpoch: o.regionEpoch,
-		Kind:        o.kind,
-		Timeout:     o.timeout.String(),
-		Status:      status,
-	}
 }
 
 // Desc returns the operator's short description.
@@ -298,10 +264,8 @@ func (o *Operator) CheckSuccess() bool {
 
 // Cancel marks the operator canceled.
 func (o *Operator) Cancel(reason ...CancelReasonType) bool {
-	o.additionalInfos.Lock()
-	defer o.additionalInfos.Unlock()
-	if _, ok := o.additionalInfos.value[cancelReason]; !ok && len(reason) != 0 {
-		o.additionalInfos.value[cancelReason] = string(reason[0])
+	if _, ok := o.AdditionalInfos[cancelReason]; !ok && len(reason) != 0 {
+		o.AdditionalInfos[cancelReason] = string(reason[0])
 	}
 	return o.status.To(CANCELED)
 }
@@ -508,6 +472,17 @@ func (o *Operator) Record(finishTime time.Time) *OpRecord {
 	}
 	record.duration = finishTime.Sub(start)
 	return record
+}
+
+// GetAdditionalInfo returns additional info with string
+func (o *Operator) GetAdditionalInfo() string {
+	if len(o.AdditionalInfos) != 0 {
+		additionalInfo, err := json.Marshal(o.AdditionalInfos)
+		if err == nil {
+			return string(additionalInfo)
+		}
+	}
+	return ""
 }
 
 // IsLeaveJointStateOperator returns true if the desc is OpDescLeaveJointState.

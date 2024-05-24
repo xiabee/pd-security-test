@@ -22,6 +22,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/client/errs"
+	"github.com/tikv/pd/client/grpcutil"
 	"go.uber.org/zap"
 )
 
@@ -34,8 +35,8 @@ type GCClient interface {
 
 // UpdateGCSafePointV2 update gc safe point for the given keyspace.
 func (c *client) UpdateGCSafePointV2(ctx context.Context, keyspaceID uint32, safePoint uint64) (uint64, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-		span = span.Tracer().StartSpan("pdclient.UpdateGCSafePointV2", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil {
+		span = opentracing.StartSpan("pdclient.UpdateGCSafePointV2", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -47,7 +48,8 @@ func (c *client) UpdateGCSafePointV2(ctx context.Context, keyspaceID uint32, saf
 		KeyspaceId: keyspaceID,
 		SafePoint:  safePoint,
 	}
-	protoClient, ctx := c.getClientAndContext(ctx)
+	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
+	protoClient := c.getClient()
 	if protoClient == nil {
 		cancel()
 		return 0, errs.ErrClientGetProtoClient
@@ -63,8 +65,8 @@ func (c *client) UpdateGCSafePointV2(ctx context.Context, keyspaceID uint32, saf
 
 // UpdateServiceSafePointV2 update service safe point for the given keyspace.
 func (c *client) UpdateServiceSafePointV2(ctx context.Context, keyspaceID uint32, serviceID string, ttl int64, safePoint uint64) (uint64, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-		span = span.Tracer().StartSpan("pdclient.UpdateServiceSafePointV2", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil {
+		span = opentracing.StartSpan("pdclient.UpdateServiceSafePointV2", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -78,7 +80,8 @@ func (c *client) UpdateServiceSafePointV2(ctx context.Context, keyspaceID uint32
 		SafePoint:  safePoint,
 		Ttl:        ttl,
 	}
-	protoClient, ctx := c.getClientAndContext(ctx)
+	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
+	protoClient := c.getClient()
 	if protoClient == nil {
 		cancel()
 		return 0, errs.ErrClientGetProtoClient
@@ -101,7 +104,8 @@ func (c *client) WatchGCSafePointV2(ctx context.Context, revision int64) (chan [
 
 	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
 	defer cancel()
-	protoClient, ctx := c.getClientAndContext(ctx)
+	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
+	protoClient := c.getClient()
 	if protoClient == nil {
 		return nil, errs.ErrClientGetProtoClient
 	}

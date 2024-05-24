@@ -19,12 +19,13 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
-	"strings"
+	"sync"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-contrib/pprof"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
 	"github.com/pingcap/log"
 	rmserver "github.com/tikv/pd/pkg/mcs/resourcemanager/server"
@@ -39,6 +40,7 @@ import (
 const APIPathPrefix = "/resource-manager/api/v1/"
 
 var (
+	once            sync.Once
 	apiServiceGroup = apiutil.APIServiceGroup{
 		Name:       "resource-manager",
 		Version:    "v1",
@@ -64,6 +66,11 @@ type Service struct {
 
 // NewService returns a new Service.
 func NewService(srv *rmserver.Service) *Service {
+	once.Do(func() {
+		// These global modification will be effective only for the first invoke.
+		_ = godotenv.Load()
+		gin.SetMode(gin.ReleaseMode)
+	})
 	apiHandlerEngine := gin.New()
 	apiHandlerEngine.Use(gin.Recovery())
 	apiHandlerEngine.Use(cors.Default())
@@ -74,11 +81,10 @@ func NewService(srv *rmserver.Service) *Service {
 		c.Set(multiservicesapi.ServiceContextKey, manager.GetBasicServer())
 		c.Next()
 	})
+	apiHandlerEngine.Use(multiservicesapi.ServiceRedirector())
 	apiHandlerEngine.GET("metrics", utils.PromHandler())
-	apiHandlerEngine.GET("status", utils.StatusHandler)
 	pprof.Register(apiHandlerEngine)
 	endpoint := apiHandlerEngine.Group(APIPathPrefix)
-	endpoint.Use(multiservicesapi.ServiceRedirector())
 	s := &Service{
 		manager:          manager,
 		apiHandlerEngine: apiHandlerEngine,
@@ -137,7 +143,7 @@ func changeLogLevel(c *gin.Context) {
 //	@Success	200			{string}	string	"Success"
 //	@Failure	400			{string}	error
 //	@Failure	500			{string}	error
-//	@Router		/config/group [post]
+//	@Router		/config/group [POST]
 func (s *Service) postResourceGroup(c *gin.Context) {
 	var group rmpb.ResourceGroup
 	if err := c.ShouldBindJSON(&group); err != nil {
@@ -177,14 +183,12 @@ func (s *Service) putResourceGroup(c *gin.Context) {
 //
 //	@Tags		ResourceManager
 //	@Summary	Get resource group by name.
-//	@Success	200		    {string}	json	format	of	rmserver.ResourceGroup
-//	@Failure	404		    {string}	error
-//	@Param		name	    path		string	true	"groupName"
-//	@Param		with_stats	query		bool	false	"whether to return statistics data."
-//	@Router		/config/group/{name} [get]
+//	@Success	200		{string}	json	format	of	rmserver.ResourceGroup
+//	@Failure	404		{string}	error
+//	@Param		name	path		string	true	"groupName"
+//	@Router		/config/group/{name} [GET]
 func (s *Service) getResourceGroup(c *gin.Context) {
-	withStats := strings.EqualFold(c.Query("with_stats"), "true")
-	group := s.manager.GetResourceGroup(c.Param("name"), withStats)
+	group := s.manager.GetResourceGroup(c.Param("name"))
 	if group == nil {
 		c.String(http.StatusNotFound, errors.New("resource group not found").Error())
 	}
@@ -197,11 +201,9 @@ func (s *Service) getResourceGroup(c *gin.Context) {
 //	@Summary	get all resource group with a list.
 //	@Success	200	{string}	json	format	of	[]rmserver.ResourceGroup
 //	@Failure	404	{string}	error
-//	@Param		with_stats		query	bool	false	"whether to return statistics data."
-//	@Router		/config/groups [get]
+//	@Router		/config/groups [GET]
 func (s *Service) getResourceGroupList(c *gin.Context) {
-	withStats := strings.EqualFold(c.Query("with_stats"), "true")
-	groups := s.manager.GetResourceGroupList(withStats)
+	groups := s.manager.GetResourceGroupList()
 	c.IndentedJSON(http.StatusOK, groups)
 }
 
@@ -212,7 +214,7 @@ func (s *Service) getResourceGroupList(c *gin.Context) {
 //	@Param		name	path		string	true	"Name of the resource group to be deleted"
 //	@Success	200		{string}	string	"Success!"
 //	@Failure	404		{string}	error
-//	@Router		/config/group/{name} [delete]
+//	@Router		/config/group/{name} [DELETE]
 func (s *Service) deleteResourceGroup(c *gin.Context) {
 	if err := s.manager.DeleteResourceGroup(c.Param("name")); err != nil {
 		c.String(http.StatusNotFound, err.Error())
@@ -226,7 +228,7 @@ func (s *Service) deleteResourceGroup(c *gin.Context) {
 //	@Summary	Get the resource controller config.
 //	@Success	200		{string}	json	format	of	rmserver.ControllerConfig
 //	@Failure	400 	{string}	error
-//	@Router		/config/controller [get]
+//	@Router		/config/controller [GET]
 func (s *Service) getControllerConfig(c *gin.Context) {
 	config := s.manager.GetControllerConfig()
 	c.IndentedJSON(http.StatusOK, config)
@@ -239,9 +241,9 @@ func (s *Service) getControllerConfig(c *gin.Context) {
 //	@Param		config	body	object	true	"json params, rmserver.ControllerConfig"
 //	@Success	200		{string}	string	"Success!"
 //	@Failure	400 	{string}	error
-//	@Router		/config/controller [post]
+//	@Router		/config/controller [POST]
 func (s *Service) setControllerConfig(c *gin.Context) {
-	conf := make(map[string]any)
+	conf := make(map[string]interface{})
 	if err := c.ShouldBindJSON(&conf); err != nil {
 		c.String(http.StatusBadRequest, err.Error())
 		return

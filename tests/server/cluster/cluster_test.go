@@ -604,7 +604,6 @@ func TestRaftClusterMultipleRestart(t *testing.T) {
 	err = rc.PutStore(store)
 	re.NoError(err)
 	re.NotNil(tc)
-	rc.Stop()
 
 	// let the job run at small interval
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/cluster/highFrequencyClusterJobs", `return(true)`))
@@ -612,6 +611,8 @@ func TestRaftClusterMultipleRestart(t *testing.T) {
 		err = rc.Start(leaderServer.GetServer())
 		re.NoError(err)
 		time.Sleep(time.Millisecond)
+		rc = leaderServer.GetRaftCluster()
+		re.NotNil(rc)
 		rc.Stop()
 	}
 	re.NoError(failpoint.Disable("github.com/tikv/pd/server/cluster/highFrequencyClusterJobs"))
@@ -905,10 +906,10 @@ func TestLoadClusterInfo(t *testing.T) {
 	tc.WaitLeader()
 	leaderServer := tc.GetLeaderServer()
 	svr := leaderServer.GetServer()
-	rc := cluster.NewRaftCluster(ctx, svr.ClusterID(), svr.GetBasicCluster(), svr.GetStorage(), syncer.NewRegionSyncer(svr), svr.GetClient(), svr.GetHTTPClient())
+	rc := cluster.NewRaftCluster(ctx, svr.ClusterID(), syncer.NewRegionSyncer(svr), svr.GetClient(), svr.GetHTTPClient())
 
 	// Cluster is not bootstrapped.
-	rc.InitCluster(svr.GetAllocator(), svr.GetPersistOptions(), svr.GetHBStreams(), svr.GetKeyspaceGroupManager())
+	rc.InitCluster(svr.GetAllocator(), svr.GetPersistOptions(), svr.GetStorage(), svr.GetBasicCluster(), svr.GetKeyspaceGroupManager())
 	raftCluster, err := rc.LoadClusterInfo()
 	re.NoError(err)
 	re.Nil(raftCluster)
@@ -945,8 +946,8 @@ func TestLoadClusterInfo(t *testing.T) {
 	}
 	re.NoError(testStorage.Flush())
 
-	raftCluster = cluster.NewRaftCluster(ctx, svr.ClusterID(), basicCluster, testStorage, syncer.NewRegionSyncer(svr), svr.GetClient(), svr.GetHTTPClient())
-	raftCluster.InitCluster(mockid.NewIDAllocator(), svr.GetPersistOptions(), svr.GetHBStreams(), svr.GetKeyspaceGroupManager())
+	raftCluster = cluster.NewRaftCluster(ctx, svr.ClusterID(), syncer.NewRegionSyncer(svr), svr.GetClient(), svr.GetHTTPClient())
+	raftCluster.InitCluster(mockid.NewIDAllocator(), svr.GetPersistOptions(), testStorage, basicCluster, svr.GetKeyspaceGroupManager())
 	raftCluster, err = raftCluster.LoadClusterInfo()
 	re.NoError(err)
 	re.NotNil(raftCluster)
@@ -1382,7 +1383,7 @@ func TestTransferLeaderForScheduler(t *testing.T) {
 	re.NoError(err)
 	tc.WaitLeader()
 	// start
-	leaderServer := tc.GetLeaderServer()
+	leaderServer := tc.GetServer(tc.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 	rc := leaderServer.GetServer().GetRaftCluster()
 	re.NotNil(rc)
@@ -1404,18 +1405,16 @@ func TestTransferLeaderForScheduler(t *testing.T) {
 
 	time.Sleep(time.Second)
 	re.True(leaderServer.GetRaftCluster().IsPrepared())
-	schedsNum := len(rc.GetCoordinator().GetSchedulersController().GetSchedulerNames())
 	// Add evict leader scheduler
-	api.MustAddScheduler(re, leaderServer.GetAddr(), schedulers.EvictLeaderName, map[string]any{
+	api.MustAddScheduler(re, leaderServer.GetAddr(), schedulers.EvictLeaderName, map[string]interface{}{
 		"store_id": 1,
 	})
-	api.MustAddScheduler(re, leaderServer.GetAddr(), schedulers.EvictLeaderName, map[string]any{
+	api.MustAddScheduler(re, leaderServer.GetAddr(), schedulers.EvictLeaderName, map[string]interface{}{
 		"store_id": 2,
 	})
 	// Check scheduler updated.
-	schedsNum += 1
 	schedulersController := rc.GetCoordinator().GetSchedulersController()
-	re.Len(schedulersController.GetSchedulerNames(), schedsNum)
+	re.Len(schedulersController.GetSchedulerNames(), 6)
 	checkEvictLeaderSchedulerExist(re, schedulersController, true)
 	checkEvictLeaderStoreIDs(re, schedulersController, []uint64{1, 2})
 
@@ -1423,7 +1422,7 @@ func TestTransferLeaderForScheduler(t *testing.T) {
 	tc.ResignLeader()
 	rc.Stop()
 	tc.WaitLeader()
-	leaderServer = tc.GetLeaderServer()
+	leaderServer = tc.GetServer(tc.GetLeader())
 	rc1 := leaderServer.GetServer().GetRaftCluster()
 	rc1.Start(leaderServer.GetServer())
 	re.NoError(err)
@@ -1435,7 +1434,7 @@ func TestTransferLeaderForScheduler(t *testing.T) {
 	re.True(leaderServer.GetRaftCluster().IsPrepared())
 	// Check scheduler updated.
 	schedulersController = rc1.GetCoordinator().GetSchedulersController()
-	re.Len(schedulersController.GetSchedulerNames(), schedsNum)
+	re.Len(schedulersController.GetSchedulerNames(), 6)
 	checkEvictLeaderSchedulerExist(re, schedulersController, true)
 	checkEvictLeaderStoreIDs(re, schedulersController, []uint64{1, 2})
 
@@ -1443,7 +1442,7 @@ func TestTransferLeaderForScheduler(t *testing.T) {
 	tc.ResignLeader()
 	rc1.Stop()
 	tc.WaitLeader()
-	leaderServer = tc.GetLeaderServer()
+	leaderServer = tc.GetServer(tc.GetLeader())
 	rc = leaderServer.GetServer().GetRaftCluster()
 	rc.Start(leaderServer.GetServer())
 	re.NotNil(rc)
@@ -1454,7 +1453,7 @@ func TestTransferLeaderForScheduler(t *testing.T) {
 	re.True(leaderServer.GetRaftCluster().IsPrepared())
 	// Check scheduler updated
 	schedulersController = rc.GetCoordinator().GetSchedulersController()
-	re.Len(schedulersController.GetSchedulerNames(), schedsNum)
+	re.Len(schedulersController.GetSchedulerNames(), 6)
 	checkEvictLeaderSchedulerExist(re, schedulersController, true)
 	checkEvictLeaderStoreIDs(re, schedulersController, []uint64{1, 2})
 
@@ -1579,7 +1578,7 @@ func TestMinResolvedTS(t *testing.T) {
 	}
 
 	// default run job
-	re.NotZero(rc.GetPDServerConfig().MinResolvedTSPersistenceInterval.Duration)
+	re.NotEqual(rc.GetPDServerConfig().MinResolvedTSPersistenceInterval.Duration, 0)
 	setMinResolvedTSPersistenceInterval(re, rc, svr, 0)
 	re.Equal(time.Duration(0), rc.GetPDServerConfig().MinResolvedTSPersistenceInterval.Duration)
 
@@ -1655,8 +1654,8 @@ func TestTransferLeaderBack(t *testing.T) {
 	tc.WaitLeader()
 	leaderServer := tc.GetLeaderServer()
 	svr := leaderServer.GetServer()
-	rc := cluster.NewRaftCluster(ctx, svr.ClusterID(), svr.GetBasicCluster(), svr.GetStorage(), syncer.NewRegionSyncer(svr), svr.GetClient(), svr.GetHTTPClient())
-	rc.InitCluster(svr.GetAllocator(), svr.GetPersistOptions(), svr.GetHBStreams(), svr.GetKeyspaceGroupManager())
+	rc := cluster.NewRaftCluster(ctx, svr.ClusterID(), syncer.NewRegionSyncer(svr), svr.GetClient(), svr.GetHTTPClient())
+	rc.InitCluster(svr.GetAllocator(), svr.GetPersistOptions(), svr.GetStorage(), svr.GetBasicCluster(), svr.GetKeyspaceGroupManager())
 	storage := rc.GetStorage()
 	meta := &metapb.Cluster{Id: 123}
 	re.NoError(storage.SaveMeta(meta))

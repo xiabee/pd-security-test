@@ -63,7 +63,7 @@ func TestGroupControlBurstable(t *testing.T) {
 		counter.limiter.Reconfigure(time.Now(), args)
 	}
 	gc.updateAvgRequestResourcePerSec()
-	re.True(gc.burstable.Load())
+	re.Equal(gc.burstable.Load(), true)
 }
 
 func TestRequestAndResponseConsumption(t *testing.T) {
