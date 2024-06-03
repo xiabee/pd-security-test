@@ -22,7 +22,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/suite"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 )
@@ -30,7 +30,7 @@ import (
 type labelsStoreTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 	stores    []*metapb.Store
 }
@@ -190,7 +190,7 @@ type strictlyLabelsStoreTestSuite struct {
 	suite.Suite
 	svr       *server.Server
 	grpcSvr   *server.GrpcServer
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 

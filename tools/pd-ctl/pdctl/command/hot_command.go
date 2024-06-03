@@ -24,7 +24,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/spf13/cobra"
-	"github.com/tikv/pd/pkg/storage"
+	"github.com/tikv/pd/server/storage"
 )
 
 const (
@@ -32,7 +32,6 @@ const (
 	hotWriteRegionsPrefix   = "pd/api/v1/hotspot/regions/write"
 	hotStoresPrefix         = "pd/api/v1/hotspot/stores"
 	hotRegionsHistoryPrefix = "pd/api/v1/hotspot/regions/history"
-	hotBucketsPrefix        = "pd/api/v1/hotspot/buckets"
 )
 
 // NewHotSpotCommand return a hot subcommand of rootCmd
@@ -45,7 +44,6 @@ func NewHotSpotCommand() *cobra.Command {
 	cmd.AddCommand(NewHotReadRegionCommand())
 	cmd.AddCommand(NewHotStoreCommand())
 	cmd.AddCommand(NewHotRegionsHistoryCommand())
-	cmd.AddCommand(NewHotBucketsCommand())
 	return cmd
 }
 
@@ -60,7 +58,7 @@ func NewHotWriteRegionCommand() *cobra.Command {
 }
 
 func showHotWriteRegionsCommandFunc(cmd *cobra.Command, args []string) {
-	prefix, err := parseOptionalArgs(hotWriteRegionsPrefix, "store_id", args)
+	prefix, err := parseOptionalArgs(hotWriteRegionsPrefix, args)
 	if err != nil {
 		cmd.Println(err)
 		return
@@ -84,7 +82,7 @@ func NewHotReadRegionCommand() *cobra.Command {
 }
 
 func showHotReadRegionsCommandFunc(cmd *cobra.Command, args []string) {
-	prefix, err := parseOptionalArgs(hotReadRegionsPrefix, "store_id", args)
+	prefix, err := parseOptionalArgs(hotReadRegionsPrefix, args)
 	if err != nil {
 		cmd.Println(err)
 		return
@@ -126,31 +124,6 @@ func NewHotRegionsHistoryCommand() *cobra.Command {
 		Run:   showHotRegionsHistoryCommandFunc,
 	}
 	return cmd
-}
-
-// NewHotBucketsCommand return a hot buckets subcommand of hotSpotCmd
-func NewHotBucketsCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "buckets [region_id]",
-		Short: "show the hot buckets",
-		Run:   showHotBucketsCommandFunc,
-	}
-	return cmd
-}
-
-func showHotBucketsCommandFunc(cmd *cobra.Command, args []string) {
-	prefix, err := parseOptionalArgs(hotBucketsPrefix, "region_id", args)
-	if err != nil {
-		cmd.Printf("Failed to get hotspot buckets: %s\n", err)
-		return
-	}
-
-	r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
-	if err != nil {
-		cmd.Printf("Failed to get hotspot buckets: %s\n", err)
-		return
-	}
-	cmd.Println(r)
 }
 
 func showHotRegionsHistoryCommandFunc(cmd *cobra.Command, args []string) {
@@ -198,19 +171,19 @@ func showHotRegionsHistoryCommandFunc(cmd *cobra.Command, args []string) {
 	cmd.Println(string(resp))
 }
 
-func parseOptionalArgs(prefix string, param string, args []string) (string, error) {
+func parseOptionalArgs(prefix string, args []string) (string, error) {
 	argsLen := len(args)
 	if argsLen > 0 {
 		prefix += "?"
 	}
 	for i, arg := range args {
 		if _, err := strconv.Atoi(arg); err != nil {
-			return "", errors.Errorf("args should be a number, but got %s", arg)
+			return "", errors.Errorf("store id should be a number, but got %s", arg)
 		}
 		if i != argsLen {
-			prefix = prefix + param + "=" + arg + "&"
+			prefix = prefix + "store_id=" + arg + "&"
 		} else {
-			prefix = prefix + param + "=" + arg
+			prefix = prefix + "store_id=" + arg
 		}
 	}
 	return prefix, nil

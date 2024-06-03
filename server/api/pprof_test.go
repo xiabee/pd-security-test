@@ -21,14 +21,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
 )
 
 type profTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   testutil.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 

@@ -24,17 +24,18 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/schedule/placement"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/apiutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule/placement"
 )
 
 type ruleTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
@@ -184,7 +185,7 @@ func (suite *ruleTestSuite) TestSet() {
 }
 
 func (suite *ruleTestSuite) TestGet() {
-	rule := placement.Rule{GroupID: "a", ID: "20", StartKeyHex: "1111", EndKeyHex: "3333", Role: "voter", Count: 1}
+	rule := &placement.Rule{GroupID: "a", ID: "20", StartKeyHex: "1111", EndKeyHex: "3333", Role: "voter", Count: 1}
 	data, err := json.Marshal(rule)
 	suite.NoError(err)
 	re := suite.Require()
@@ -193,7 +194,7 @@ func (suite *ruleTestSuite) TestGet() {
 
 	testCases := []struct {
 		name  string
-		rule  placement.Rule
+		rule  *placement.Rule
 		found bool
 		code  int
 	}{
@@ -201,13 +202,13 @@ func (suite *ruleTestSuite) TestGet() {
 			name:  "found",
 			rule:  rule,
 			found: true,
-			code:  http.StatusOK,
+			code:  200,
 		},
 		{
 			name:  "not found",
-			rule:  placement.Rule{GroupID: "a", ID: "30", StartKeyHex: "1111", EndKeyHex: "3333", Role: "voter", Count: 1},
+			rule:  &placement.Rule{GroupID: "a", ID: "30", StartKeyHex: "1111", EndKeyHex: "3333", Role: "voter", Count: 1},
 			found: false,
-			code:  http.StatusNotFound,
+			code:  404,
 		},
 	}
 	for _, testCase := range testCases {
@@ -216,7 +217,7 @@ func (suite *ruleTestSuite) TestGet() {
 		url := fmt.Sprintf("%s/rule/%s/%s", suite.urlPrefix, testCase.rule.GroupID, testCase.rule.ID)
 		if testCase.found {
 			err = tu.ReadGetJSON(re, testDialClient, url, &resp)
-			suite.compareRule(&resp, &testCase.rule)
+			suite.compareRule(&resp, testCase.rule)
 		} else {
 			err = tu.CheckGetJSON(testDialClient, url, nil, tu.Status(re, testCase.code))
 		}
@@ -399,7 +400,7 @@ func (suite *ruleTestSuite) TestGetAllByRegion() {
 	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/rule", data, tu.StatusOK(re))
 	suite.NoError(err)
 
-	r := core.NewTestRegionInfo(4, 1, []byte{0x22, 0x22}, []byte{0x33, 0x33})
+	r := newTestRegionInfo(4, 1, []byte{0x22, 0x22}, []byte{0x33, 0x33})
 	mustRegionHeartbeat(re, suite.svr, r)
 
 	testCases := []struct {
@@ -532,8 +533,9 @@ func (suite *ruleTestSuite) TestDelete() {
 		url := fmt.Sprintf("%s/rule/%s/%s", suite.urlPrefix, testCase.groupID, testCase.id)
 		// clear suspect keyRanges to prevent test case from others
 		suite.svr.GetRaftCluster().ClearSuspectKeyRanges()
-		err = tu.CheckDelete(testDialClient, url, tu.StatusOK(suite.Require()))
+		statusCode, err := apiutil.DoDelete(testDialClient, url)
 		suite.NoError(err)
+		suite.Equal(http.StatusOK, statusCode)
 		if len(testCase.popKeyRange) > 0 {
 			popKeyRangeMap := map[string]struct{}{}
 			for i := 0; i < len(testCase.popKeyRange)/2; i++ {
@@ -724,7 +726,7 @@ func (suite *ruleTestSuite) TestBundle() {
 	suite.compareBundle(bundles[1], b2)
 
 	// Delete
-	err = tu.CheckDelete(testDialClient, suite.urlPrefix+"/placement-rule/pd", tu.StatusOK(suite.Require()))
+	_, err = apiutil.DoDelete(testDialClient, suite.urlPrefix+"/placement-rule/pd")
 	suite.NoError(err)
 
 	// GetAll again
@@ -751,7 +753,7 @@ func (suite *ruleTestSuite) TestBundle() {
 	suite.compareBundle(bundles[2], b3)
 
 	// Delete using regexp
-	err = tu.CheckDelete(testDialClient, suite.urlPrefix+"/placement-rule/"+url.PathEscape("foo.*")+"?regexp", tu.StatusOK(suite.Require()))
+	_, err = apiutil.DoDelete(testDialClient, suite.urlPrefix+"/placement-rule/"+url.PathEscape("foo.*")+"?regexp")
 	suite.NoError(err)
 
 	// GetAll again
@@ -827,7 +829,7 @@ func (suite *ruleTestSuite) TestBundleBadRequest() {
 	}
 	for _, testCase := range testCases {
 		err := tu.CheckPostJSON(testDialClient, suite.urlPrefix+testCase.uri, []byte(testCase.data),
-			func(_ []byte, code int, _ http.Header) {
+			func(_ []byte, code int) {
 				suite.Equal(testCase.ok, code == http.StatusOK)
 			})
 		suite.NoError(err)
@@ -848,7 +850,7 @@ type regionRuleTestSuite struct {
 	suite.Suite
 	svr       *server.Server
 	grpcSvr   *server.GrpcServer
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 	stores    []*metapb.Store
 	regions   []*core.RegionInfo
@@ -964,7 +966,7 @@ func (suite *regionRuleTestSuite) TestRegionPlacementRule() {
 		re, "invalid region id"))
 	suite.NoError(err)
 
-	suite.svr.GetRaftCluster().GetReplicationConfig().EnablePlacementRules = false
+	suite.svr.GetRaftCluster().GetOpts().GetReplicationConfig().EnablePlacementRules = false
 	url = fmt.Sprintf("%s/config/rules/region/%d/detail", suite.urlPrefix, 1)
 	err = tu.CheckGetJSON(testDialClient, url, nil, tu.Status(re, http.StatusPreconditionFailed), tu.StringContain(
 		re, "placement rules feature is disabled"))

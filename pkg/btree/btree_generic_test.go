@@ -36,8 +36,6 @@ import (
 	"sort"
 	"sync"
 	"testing"
-
-	"github.com/tikv/pd/pkg/utils/syncutil"
 )
 
 // perm returns a random permutation of n Int items in the range [0, n).
@@ -754,7 +752,7 @@ func BenchmarkDescendLessOrEqual(b *testing.B) {
 
 const cloneTestSize = 10000
 
-func cloneTestG[T Item[T]](t *testing.T, b *BTreeG[T], start int, p []T, wg *sync.WaitGroup, trees *[]*BTreeG[T], lock *syncutil.Mutex) {
+func cloneTestG[T Item[T]](t *testing.T, b *BTreeG[T], start int, p []T, wg *sync.WaitGroup, trees *[]*BTreeG[T], lock *sync.Mutex) {
 	t.Logf("Starting new clone at %v", start)
 	lock.Lock()
 	*trees = append(*trees, b)
@@ -775,7 +773,7 @@ func TestCloneConcurrentOperationsG(t *testing.T) {
 	p := perm(cloneTestSize)
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go cloneTestG(t, b, 0, p, &wg, &trees, &syncutil.Mutex{})
+	go cloneTestG(t, b, 0, p, &wg, &trees, &sync.Mutex{})
 	wg.Wait()
 	want := rang(cloneTestSize)
 	t.Logf("Starting equality checks on %d trees", len(trees))

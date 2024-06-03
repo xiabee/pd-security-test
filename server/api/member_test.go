@@ -28,7 +28,6 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 )
@@ -37,7 +36,7 @@ type memberTestSuite struct {
 	suite.Suite
 	cfgs    []*config.Config
 	servers []*server.Server
-	clean   testutil.CleanupFunc
+	clean   func()
 }
 
 func TestMemberTestSuite(t *testing.T) {
@@ -159,7 +158,7 @@ type resignTestSuite struct {
 	suite.Suite
 	cfgs    []*config.Config
 	servers []*server.Server
-	clean   testutil.CleanupFunc
+	clean   func()
 }
 
 func TestResignTestSuite(t *testing.T) {

@@ -28,12 +28,9 @@ import (
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/assertutil"
-	"github.com/tikv/pd/pkg/utils/logutil"
-	"github.com/tikv/pd/pkg/utils/testutil"
-	"github.com/tikv/pd/pkg/versioninfo"
+	"github.com/tikv/pd/pkg/apiutil"
+	"github.com/tikv/pd/pkg/assertutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 	"go.uber.org/goleak"
@@ -72,14 +69,16 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m, testutil.LeakOptions...)
 }
 
-func mustNewServer(re *require.Assertions, opts ...func(cfg *config.Config)) (*server.Server, testutil.CleanupFunc) {
+type cleanUpFunc func()
+
+func mustNewServer(re *require.Assertions, opts ...func(cfg *config.Config)) (*server.Server, cleanUpFunc) {
 	_, svrs, cleanup := mustNewCluster(re, 1, opts...)
 	return svrs[0], cleanup
 }
 
 var zapLogOnce sync.Once
 
-func mustNewCluster(re *require.Assertions, num int, opts ...func(cfg *config.Config)) ([]*config.Config, []*server.Server, testutil.CleanupFunc) {
+func mustNewCluster(re *require.Assertions, num int, opts ...func(cfg *config.Config)) ([]*config.Config, []*server.Server, cleanUpFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	svrs := make([]*server.Server, 0, num)
 	cfgs := server.NewTestMultiConfig(assertutil.CheckerWithNilAssert(re), num)
@@ -87,15 +86,15 @@ func mustNewCluster(re *require.Assertions, num int, opts ...func(cfg *config.Co
 	ch := make(chan *server.Server, num)
 	for _, cfg := range cfgs {
 		go func(cfg *config.Config) {
-			err := logutil.SetupLogger(cfg.Log, &cfg.Logger, &cfg.LogProps, cfg.Security.RedactInfoLog)
+			err := cfg.SetupLogger()
 			re.NoError(err)
 			zapLogOnce.Do(func() {
-				log.ReplaceGlobals(cfg.Logger, cfg.LogProps)
+				log.ReplaceGlobals(cfg.GetZapLogger(), cfg.GetZapLogProperties())
 			})
 			for _, opt := range opts {
 				opt(cfg)
 			}
-			s, err := server.CreateServer(ctx, cfg, nil, NewHandler)
+			s, err := server.CreateServer(ctx, cfg, NewHandler)
 			re.NoError(err)
 			err = s.Run()
 			re.NoError(err)
@@ -137,57 +136,10 @@ func mustBootstrapCluster(re *require.Assertions, s *server.Server) {
 	re.Equal(pdpb.ErrorType_OK, resp.GetHeader().GetError().GetType())
 }
 
-func mustPutRegion(re *require.Assertions, svr *server.Server, regionID, storeID uint64, start, end []byte, opts ...core.RegionCreateOption) *core.RegionInfo {
-	leader := &metapb.Peer{
-		Id:      regionID,
-		StoreId: storeID,
-	}
-	metaRegion := &metapb.Region{
-		Id:          regionID,
-		StartKey:    start,
-		EndKey:      end,
-		Peers:       []*metapb.Peer{leader},
-		RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
-	}
-	r := core.NewRegionInfo(metaRegion, leader, opts...)
-	err := svr.GetRaftCluster().HandleRegionHeartbeat(r)
-	re.NoError(err)
-	return r
-}
-
-func mustPutStore(re *require.Assertions, svr *server.Server, id uint64, state metapb.StoreState, nodeState metapb.NodeState, labels []*metapb.StoreLabel) {
-	s := &server.GrpcServer{Server: svr}
-	_, err := s.PutStore(context.Background(), &pdpb.PutStoreRequest{
-		Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()},
-		Store: &metapb.Store{
-			Id:        id,
-			Address:   fmt.Sprintf("tikv%d", id),
-			State:     state,
-			NodeState: nodeState,
-			Labels:    labels,
-			Version:   versioninfo.MinSupportedVersion(versioninfo.Version2_0).String(),
-		},
-	})
-	re.NoError(err)
-	if state == metapb.StoreState_Up {
-		_, err = s.StoreHeartbeat(context.Background(), &pdpb.StoreHeartbeatRequest{
-			Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()},
-			Stats:  &pdpb.StoreStats{StoreId: id},
-		})
-		re.NoError(err)
-	}
-}
-
-func mustRegionHeartbeat(re *require.Assertions, svr *server.Server, region *core.RegionInfo) {
-	cluster := svr.GetRaftCluster()
-	err := cluster.HandleRegionHeartbeat(region)
-	re.NoError(err)
-}
-
 type serviceTestSuite struct {
 	suite.Suite
 	svr     *server.Server
-	cleanup testutil.CleanupFunc
+	cleanup cleanUpFunc
 }
 
 func TestServiceTestSuite(t *testing.T) {

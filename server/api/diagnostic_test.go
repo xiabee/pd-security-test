@@ -22,17 +22,19 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/schedule/schedulers"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/apiutil"
+	tu "github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedulers"
 )
 
 type diagnosticTestSuite struct {
 	suite.Suite
 	svr             *server.Server
-	cleanup         tu.CleanupFunc
+	cleanup         cleanUpFunc
 	urlPrefix       string
 	configPrefix    string
 	schedulerPrifex string
@@ -64,7 +66,7 @@ func (suite *diagnosticTestSuite) TearDownSuite() {
 func (suite *diagnosticTestSuite) checkStatus(status string, url string) {
 	re := suite.Require()
 	suite.Eventually(func() bool {
-		result := &schedulers.DiagnosticResult{}
+		result := &cluster.DiagnosticResult{}
 		err := tu.ReadGetJSON(re, testDialClient, url, result)
 		suite.NoError(err)
 		return result.Status == status
@@ -79,7 +81,7 @@ func (suite *diagnosticTestSuite) TestSchedulerDiagnosticAPI() {
 	suite.NoError(err)
 
 	suite.NoError(tu.ReadGetJSON(re, testDialClient, addr, cfg))
-	suite.True(cfg.Schedule.EnableDiagnostic)
+	suite.False(cfg.Schedule.EnableDiagnostic)
 
 	ms := map[string]interface{}{
 		"enable-diagnostic": "true",
@@ -93,7 +95,7 @@ func (suite *diagnosticTestSuite) TestSchedulerDiagnosticAPI() {
 	suite.True(cfg.Schedule.EnableDiagnostic)
 
 	balanceRegionURL := suite.urlPrefix + "/" + schedulers.BalanceRegionName
-	result := &schedulers.DiagnosticResult{}
+	result := &cluster.DiagnosticResult{}
 	err = tu.ReadGetJSON(re, testDialClient, balanceRegionURL, result)
 	suite.NoError(err)
 	suite.Equal("disabled", result.Status)
@@ -128,7 +130,7 @@ func (suite *diagnosticTestSuite) TestSchedulerDiagnosticAPI() {
 	suite.checkStatus("normal", balanceRegionURL)
 
 	deleteURL := fmt.Sprintf("%s/%s", suite.schedulerPrifex, schedulers.BalanceRegionName)
-	err = tu.CheckDelete(testDialClient, deleteURL, tu.StatusOK(re))
+	_, err = apiutil.DoDelete(testDialClient, deleteURL)
 	suite.NoError(err)
 	suite.checkStatus("disabled", balanceRegionURL)
 }

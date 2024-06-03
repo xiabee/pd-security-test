@@ -21,18 +21,17 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/suite"
-	sc "github.com/tikv/pd/pkg/schedule/config"
-	tu "github.com/tikv/pd/pkg/utils/testutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
-	"github.com/tikv/pd/pkg/versioninfo"
+	tu "github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/versioninfo"
 )
 
 type configTestSuite struct {
 	suite.Suite
 	svr       *server.Server
-	cleanup   tu.CleanupFunc
+	cleanup   cleanUpFunc
 	urlPrefix string
 }
 
@@ -166,23 +165,23 @@ func (suite *configTestSuite) TestConfigAll() {
 func (suite *configTestSuite) TestConfigSchedule() {
 	re := suite.Require()
 	addr := fmt.Sprintf("%s/config/schedule", suite.urlPrefix)
-	scheduleConfig := &sc.ScheduleConfig{}
-	suite.NoError(tu.ReadGetJSON(re, testDialClient, addr, scheduleConfig))
-	scheduleConfig.MaxStoreDownTime.Duration = time.Second
-	postData, err := json.Marshal(scheduleConfig)
+	sc := &config.ScheduleConfig{}
+	suite.NoError(tu.ReadGetJSON(re, testDialClient, addr, sc))
+	sc.MaxStoreDownTime.Duration = time.Second
+	postData, err := json.Marshal(sc)
 	suite.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, addr, postData, tu.StatusOK(re))
 	suite.NoError(err)
 
-	scheduleConfig1 := &sc.ScheduleConfig{}
-	suite.NoError(tu.ReadGetJSON(re, testDialClient, addr, scheduleConfig1))
-	suite.Equal(*scheduleConfig1, *scheduleConfig)
+	sc1 := &config.ScheduleConfig{}
+	suite.NoError(tu.ReadGetJSON(re, testDialClient, addr, sc1))
+	suite.Equal(*sc1, *sc)
 }
 
 func (suite *configTestSuite) TestConfigReplication() {
 	re := suite.Require()
 	addr := fmt.Sprintf("%s/config/replicate", suite.urlPrefix)
-	rc := &sc.ReplicationConfig{}
+	rc := &config.ReplicationConfig{}
 	err := tu.ReadGetJSON(re, testDialClient, addr, rc)
 	suite.NoError(err)
 
@@ -207,7 +206,7 @@ func (suite *configTestSuite) TestConfigReplication() {
 	err = tu.CheckPostJSON(testDialClient, addr, postData, tu.StatusOK(re))
 	suite.NoError(err)
 
-	rc4 := &sc.ReplicationConfig{}
+	rc4 := &config.ReplicationConfig{}
 	err = tu.ReadGetJSON(re, testDialClient, addr, rc4)
 	suite.NoError(err)
 

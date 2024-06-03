@@ -21,6 +21,7 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/suite"
+	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
@@ -31,6 +32,7 @@ type logTestSuite struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	cluster *tests.TestCluster
+	svr     *server.Server
 	pdAddrs []string
 }
 
@@ -52,9 +54,10 @@ func (suite *logTestSuite) SetupSuite() {
 		State:         metapb.StoreState_Up,
 		LastHeartbeat: time.Now().UnixNano(),
 	}
-	leaderServer := suite.cluster.GetLeaderServer()
+	leaderServer := suite.cluster.GetServer(suite.cluster.GetLeader())
 	suite.NoError(leaderServer.BootstrapCluster())
-	tests.MustPutStore(suite.Require(), suite.cluster, store)
+	suite.svr = leaderServer.GetServer()
+	pdctl.MustPutStore(suite.Require(), suite.svr, store)
 }
 
 func (suite *logTestSuite) TearDownSuite() {
@@ -94,7 +97,7 @@ func (suite *logTestSuite) TestLog() {
 	for _, testCase := range testCases {
 		_, err := pdctl.ExecuteCommand(cmd, testCase.cmd...)
 		suite.NoError(err)
-		suite.Equal(testCase.expect, suite.cluster.GetLeaderServer().GetConfig().Log.Level)
+		suite.Equal(testCase.expect, suite.svr.GetConfig().Log.Level)
 	}
 }
 

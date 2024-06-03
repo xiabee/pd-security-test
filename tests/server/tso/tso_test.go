@@ -24,10 +24,10 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/tso"
-	"github.com/tikv/pd/pkg/utils/grpcutil"
-	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/grpcutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/server/config"
+	"github.com/tikv/pd/server/tso"
 	"github.com/tikv/pd/tests"
 )
 
@@ -53,7 +53,7 @@ func TestLoadTimestamp(t *testing.T) {
 
 	lastTSMap := requestLocalTSOs(re, cluster, dcLocationConfig)
 
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/tso/systemTimeSlow", `return(true)`))
+	re.NoError(failpoint.Enable("github.com/tikv/pd/server/tso/systemTimeSlow", `return(true)`))
 
 	// Reboot the cluster.
 	re.NoError(cluster.StopAll())
@@ -70,13 +70,13 @@ func TestLoadTimestamp(t *testing.T) {
 		re.Greater(newTS.GetPhysical()-lastTS.GetPhysical(), int64(0))
 	}
 
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/tso/systemTimeSlow"))
+	failpoint.Disable("github.com/tikv/pd/server/tso/systemTimeSlow")
 }
 
 func requestLocalTSOs(re *require.Assertions, cluster *tests.TestCluster, dcLocationConfig map[string]string) map[string]*pdpb.Timestamp {
 	dcClientMap := make(map[string]pdpb.PDClient)
 	tsMap := make(map[string]*pdpb.Timestamp)
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	for _, dcLocation := range dcLocationConfig {
 		pdName := leaderServer.GetAllocatorLeader(dcLocation).GetName()
 		dcClientMap[dcLocation] = testutil.MustNewGrpcClient(re, cluster.GetServer(pdName).GetAddr())
@@ -125,7 +125,7 @@ func TestDisableLocalTSOAfterEnabling(t *testing.T) {
 	cluster.WaitLeader()
 
 	// Re-request the global TSOs.
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	grpcPDClient := testutil.MustNewGrpcClient(re, leaderServer.GetAddr())
 	clusterID := leaderServer.GetClusterID()
 	req := &pdpb.TsoRequest{
