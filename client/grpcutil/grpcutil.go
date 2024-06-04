@@ -18,16 +18,23 @@ import (
 	"context"
 	"crypto/tls"
 	"net/url"
+	"sync"
+	"time"
 
+	"github.com/pingcap/log"
 	"github.com/tikv/pd/client/errs"
+	"github.com/tikv/pd/client/tlsutil"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
 
-// ForwardMetadataKey is used to record the forwarded host of PD.
-const ForwardMetadataKey = "pd-forwarded-host"
+const (
+	dialTimeout = 3 * time.Second
+	// ForwardMetadataKey is used to record the forwarded host of PD.
+	ForwardMetadataKey = "pd-forwarded-host"
+)
 
 // GetClientConn returns a gRPC client connection.
 // creates a client connection to the given target. By default, it's
@@ -43,7 +50,7 @@ const ForwardMetadataKey = "pd-forwarded-host"
 // ctx will be noop. Users should call ClientConn.Close to terminate all the
 // pending operations after this function returns.
 func GetClientConn(ctx context.Context, addr string, tlsCfg *tls.Config, do ...grpc.DialOption) (*grpc.ClientConn, error) {
-	opt := grpc.WithTransportCredentials(insecure.NewCredentials())
+	opt := grpc.WithInsecure() //nolint
 	if tlsCfg != nil {
 		creds := credentials.NewTLS(tlsCfg)
 		opt = grpc.WithTransportCredentials(creds)
@@ -64,4 +71,32 @@ func GetClientConn(ctx context.Context, addr string, tlsCfg *tls.Config, do ...g
 func BuildForwardContext(ctx context.Context, addr string) context.Context {
 	md := metadata.Pairs(ForwardMetadataKey, addr)
 	return metadata.NewOutgoingContext(ctx, md)
+}
+
+// GetOrCreateGRPCConn returns the corresponding grpc client connection of the given addr.
+// Returns the old one if's already existed in the clientConns; otherwise creates a new one and returns it.
+func GetOrCreateGRPCConn(ctx context.Context, clientConns *sync.Map, addr string, tlsCfg *tlsutil.TLSConfig, opt ...grpc.DialOption) (*grpc.ClientConn, error) {
+	conn, ok := clientConns.Load(addr)
+	if ok {
+		return conn.(*grpc.ClientConn), nil
+	}
+	tlsConfig, err := tlsCfg.ToTLSConfig()
+	if err != nil {
+		return nil, err
+	}
+	dCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	cc, err := GetClientConn(dCtx, addr, tlsConfig, opt...)
+	if err != nil {
+		return nil, err
+	}
+	conn, loaded := clientConns.LoadOrStore(addr, cc)
+	if !loaded {
+		// Successfully stored the connection.
+		return cc, nil
+	}
+	cc.Close()
+	cc = conn.(*grpc.ClientConn)
+	log.Debug("use existing connection", zap.String("target", cc.Target()), zap.String("state", cc.GetState().String()))
+	return cc, nil
 }

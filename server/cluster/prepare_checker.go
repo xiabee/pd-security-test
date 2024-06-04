@@ -17,21 +17,22 @@ package cluster
 import (
 	"time"
 
-	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/syncutil"
-	"github.com/tikv/pd/server/core"
-	"go.uber.org/zap"
+	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/utils/syncutil"
 )
 
 type prepareChecker struct {
 	syncutil.RWMutex
-	start    time.Time
-	prepared bool
+	reactiveRegions map[uint64]int
+	start           time.Time
+	sum             int
+	prepared        bool
 }
 
 func newPrepareChecker() *prepareChecker {
 	return &prepareChecker{
-		start: time.Now(),
+		start:           time.Now(),
+		reactiveRegions: make(map[uint64]int),
 	}
 }
 
@@ -46,10 +47,8 @@ func (checker *prepareChecker) check(c *core.BasicCluster) bool {
 		checker.prepared = true
 		return true
 	}
-	notLoadedFromRegionsCnt := c.GetClusterNotFromStorageRegionsCnt()
-	totalRegionsCnt := c.GetRegionCount()
 	// The number of active regions should be more than total region of all stores * collectFactor
-	if float64(totalRegionsCnt)*collectFactor > float64(notLoadedFromRegionsCnt) {
+	if float64(c.GetRegionCount())*collectFactor > float64(checker.sum) {
 		return false
 	}
 	for _, store := range c.GetStores() {
@@ -58,13 +57,21 @@ func (checker *prepareChecker) check(c *core.BasicCluster) bool {
 		}
 		storeID := store.GetID()
 		// For each store, the number of active regions should be more than total region of the store * collectFactor
-		if float64(c.GetStoreRegionCount(storeID))*collectFactor > float64(c.GetNotFromStorageRegionsCntByStore(storeID)) {
+		if float64(c.GetStoreRegionCount(storeID))*collectFactor > float64(checker.reactiveRegions[storeID]) {
 			return false
 		}
 	}
-	log.Info("not loaded from storage region number is satisfied, finish prepare checker", zap.Int("not-from-storage-region", notLoadedFromRegionsCnt), zap.Int("total-region", totalRegionsCnt))
 	checker.prepared = true
 	return true
+}
+
+func (checker *prepareChecker) collect(region *core.RegionInfo) {
+	checker.Lock()
+	defer checker.Unlock()
+	for _, p := range region.GetPeers() {
+		checker.reactiveRegions[p.GetStoreId()]++
+	}
+	checker.sum++
 }
 
 func (checker *prepareChecker) isPrepared() bool {

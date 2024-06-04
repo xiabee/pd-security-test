@@ -23,9 +23,10 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/failpoint"
-	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/audit"
 	"github.com/tikv/pd/pkg/ratelimit"
+	"github.com/tikv/pd/pkg/tso"
+	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 )
@@ -84,10 +85,10 @@ func getFunctionName(f interface{}) string {
 // @BasePath       /pd/api/v1
 func createRouter(prefix string, svr *server.Server) *mux.Router {
 	serviceMiddle := newServiceMiddlewareBuilder(svr)
-	registerPrefix := func(router *mux.Router, prefixPath, name string,
+	registerPrefix := func(router *mux.Router, prefixPath string,
 		handleFunc func(http.ResponseWriter, *http.Request), opts ...createRouteOption) {
 		routeCreateFunc(router.PathPrefix(prefixPath), serviceMiddle.createHandler(handleFunc),
-			name, opts...)
+			getFunctionName(handleFunc), opts...)
 	}
 	registerFunc := func(router *mux.Router, path string,
 		handleFunc func(http.ResponseWriter, *http.Request), opts ...createRouteOption) {
@@ -147,8 +148,7 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 	registerFunc(clusterRouter, "/schedulers/diagnostic/{name}", diagnosticHandler.GetDiagnosticResult, setMethods(http.MethodGet), setAuditBackend(prometheus))
 
 	schedulerConfigHandler := newSchedulerConfigHandler(svr, rd)
-	registerPrefix(apiRouter, "/scheduler-config", "HandleSchedulerConfig", schedulerConfigHandler.HandleSchedulerConfig, setMethods(http.MethodPost, http.MethodDelete, http.MethodPut, http.MethodPatch), setAuditBackend(localLog, prometheus))
-	registerPrefix(apiRouter, "/scheduler-config", "GetSchedulerConfig", schedulerConfigHandler.HandleSchedulerConfig, setMethods(http.MethodGet), setAuditBackend(prometheus))
+	registerPrefix(apiRouter, "/scheduler-config", schedulerConfigHandler.GetSchedulerConfig, setAuditBackend(prometheus))
 
 	clusterHandler := newClusterHandler(svr, rd)
 	registerFunc(apiRouter, "/cluster", clusterHandler.GetCluster, setMethods(http.MethodGet), setAuditBackend(prometheus))
@@ -296,8 +296,6 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 	adminHandler := newAdminHandler(svr, rd)
 	registerFunc(clusterRouter, "/admin/cache/region/{id}", adminHandler.DeleteRegionCache, setMethods(http.MethodDelete), setAuditBackend(localLog, prometheus))
 	registerFunc(clusterRouter, "/admin/cache/regions", adminHandler.DeleteAllRegionCache, setMethods(http.MethodDelete), setAuditBackend(localLog, prometheus))
-	// br ebs restore phase 1 will reset ts, but at that time the cluster hasn't bootstrapped, so cannot use clusterRouter
-	registerFunc(apiRouter, "/admin/reset-ts", adminHandler.ResetTS, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 	registerFunc(apiRouter, "/admin/persist-file/{file_name}", adminHandler.SavePersistFile, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 	registerFunc(apiRouter, "/admin/persist-file/{file_name}", adminHandler.SavePersistFile, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 	registerFunc(apiRouter, "/admin/cluster/markers/snapshot-recovering", adminHandler.IsSnapshotRecovering, setMethods(http.MethodGet), setAuditBackend(localLog, prometheus))
@@ -326,10 +324,6 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 	// metric query use to query metric data, the protocol is compatible with prometheus.
 	registerFunc(apiRouter, "/metric/query", newQueryMetric(svr).QueryMetric, setMethods(http.MethodGet, http.MethodPost), setAuditBackend(prometheus))
 	registerFunc(apiRouter, "/metric/query_range", newQueryMetric(svr).QueryMetric, setMethods(http.MethodGet, http.MethodPost), setAuditBackend(prometheus))
-
-	// tso API
-	tsoHandler := newTSOHandler(svr, rd)
-	registerFunc(apiRouter, "/tso/allocator/transfer/{name}", tsoHandler.TransferLocalTSOAllocator, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 
 	pprofHandler := newPprofHandler(svr, rd)
 	// profile API
@@ -361,10 +355,17 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 	registerFunc(clusterRouter, "/admin/unsafe/remove-failed-stores/show",
 		unsafeOperationHandler.GetFailedStoresRemovalStatus, setMethods(http.MethodGet), setAuditBackend(prometheus))
 
+	// tso API
+	tsoHandler := newTSOHandler(svr, rd)
+	registerFunc(apiRouter, "/tso/allocator/transfer/{name}", tsoHandler.TransferLocalTSOAllocator, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
+	tsoAdminHandler := tso.NewAdminHandler(svr.GetHandler(), rd)
+	// br ebs restore phase 1 will reset ts, but at that time the cluster hasn't bootstrapped, so cannot use clusterRouter
+	registerFunc(apiRouter, "/admin/reset-ts", tsoAdminHandler.ResetTS, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
+
 	// API to set or unset failpoints
 	failpoint.Inject("enableFailpointAPI", func() {
 		// this function will be named to "func2". It may be used in test
-		registerPrefix(apiRouter, "/fail", "FailPoint", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		registerPrefix(apiRouter, "/fail", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// The HTTP handler of failpoint requires the full path to be the failpoint path.
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix+apiPrefix+"/fail")
 			new(failpoint.HttpHandler).ServeHTTP(w, r)

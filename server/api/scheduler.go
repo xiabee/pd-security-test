@@ -22,10 +22,10 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
-	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/schedule/schedulers"
+	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
-	"github.com/tikv/pd/server/schedulers"
 	"github.com/unrolled/render"
 )
 
@@ -155,8 +155,23 @@ func (h *schedulerHandler) CreateScheduler(w http.ResponseWriter, r *http.Reques
 			h.r.JSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+	case schedulers.BalanceWitnessName:
+		if err := h.AddBalanceWitnessScheduler(); err != nil {
+			h.r.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case schedulers.TransferWitnessLeaderName:
+		if err := h.AddTransferWitnessLeaderScheduler(); err != nil {
+			h.r.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	case schedulers.HotRegionName:
 		if err := h.AddBalanceHotRegionScheduler(); err != nil {
+			h.r.JSON(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case schedulers.EvictSlowTrendName:
+		if err := h.AddEvictSlowTrendScheduler(); err != nil {
 			h.r.JSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -357,7 +372,7 @@ func newSchedulerConfigHandler(svr *server.Server, rd *render.Render) *scheduler
 	}
 }
 
-func (h *schedulerConfigHandler) HandleSchedulerConfig(w http.ResponseWriter, r *http.Request) {
+func (h *schedulerConfigHandler) GetSchedulerConfig(w http.ResponseWriter, r *http.Request) {
 	handler := h.svr.GetHandler()
 	sh, err := handler.GetSchedulerConfigHandler()
 	if err == nil && sh != nil {

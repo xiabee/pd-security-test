@@ -16,9 +16,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/etcdutil"
-	"github.com/tikv/pd/pkg/testutil"
-	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
+	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server/config"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
@@ -69,7 +69,7 @@ func setupEtcd(t *testing.T) (*embed.Etcd, *clientv3.Client, error) {
 		return nil, nil, err
 	}
 
-	ep := etcdCfg.ListenClientUrls[0].String()
+	ep := etcdCfg.LCUrls[0].String()
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints: []string{ep},
 	})

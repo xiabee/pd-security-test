@@ -22,11 +22,11 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/grpcutil"
-	"github.com/tikv/pd/pkg/logutil"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/pkg/storage"
+	"github.com/tikv/pd/pkg/utils/grpcutil"
+	"github.com/tikv/pd/pkg/utils/logutil"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -126,9 +126,9 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 		log.Info("region syncer start load region")
 		start := time.Now()
 		err := storage.TryLoadRegionsOnce(ctx, regionStorage, bc.CheckAndPutRegion)
-		log.Info("region syncer finished load regions", zap.Duration("time-cost", time.Since(start)))
+		log.Info("region syncer finished load region", zap.Duration("time-cost", time.Since(start)))
 		if err != nil {
-			log.Warn("failed to load regions.", errs.ZapError(err))
+			log.Warn("failed to load regions", errs.ZapError(err))
 		}
 		// establish client.
 		var conn *grpc.ClientConn
@@ -207,22 +207,22 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 							core.SetWrittenKeys(stats[i].KeysWritten),
 							core.SetReadBytes(stats[i].BytesRead),
 							core.SetReadKeys(stats[i].KeysRead),
-							core.SetSource(core.Sync),
+							core.SetFromHeartbeat(false),
 						)
 					} else {
-						region = core.NewRegionInfo(r, regionLeader, core.SetSource(core.Sync))
+						region = core.NewRegionInfo(r, regionLeader, core.SetFromHeartbeat(false))
 					}
 
-					origin, err := bc.PreCheckPutRegion(region)
+					origin, _, err := bc.PreCheckPutRegion(region)
 					if err != nil {
 						log.Debug("region is stale", zap.Stringer("origin", origin.GetMeta()), errs.ZapError(err))
 						continue
 					}
-					saveKV, _, _ := regionGuide(region, origin)
+					_, saveKV, _, _ := regionGuide(region, origin)
 					overlaps := bc.PutRegion(region)
 
 					if hasBuckets {
-						if old := region.GetBuckets(); buckets[i].GetVersion() > old.GetVersion() {
+						if old := origin.GetBuckets(); buckets[i].GetVersion() > old.GetVersion() {
 							region.UpdateBuckets(buckets[i], old)
 						}
 					}

@@ -23,9 +23,9 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/grpcutil"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/storage"
+	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/storage"
+	"github.com/tikv/pd/pkg/utils/grpcutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -45,9 +45,9 @@ func TestLoadRegion(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		rs.SaveRegion(&metapb.Region{Id: uint64(i) + 1})
 	}
-	re.NoError(failpoint.Enable("github.com/tikv/pd/server/storage/base_backend/slowLoadRegion", "return(true)"))
+	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/storage/base_backend/slowLoadRegion", "return(true)"))
 	defer func() {
-		re.NoError(failpoint.Disable("github.com/tikv/pd/server/storage/base_backend/slowLoadRegion"))
+		re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/storage/base_backend/slowLoadRegion"))
 	}()
 
 	rc := NewRegionSyncer(server)
@@ -71,7 +71,7 @@ func TestErrorCode(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.TODO())
 	rc := NewRegionSyncer(server)
-	conn, err := grpcutil.GetClientConn(ctx, "http://127.0.0.1", nil)
+	conn, err := grpcutil.GetClientConn(ctx, "127.0.0.1", nil)
 	re.NoError(err)
 	cancel()
 	_, err = rc.syncRegion(ctx, conn)

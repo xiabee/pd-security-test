@@ -17,13 +17,17 @@ package server
 import (
 	"context"
 	"path"
+	"time"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/tikv/pd/server/keyspace"
-	"github.com/tikv/pd/server/storage/endpoint"
+	"github.com/pingcap/log"
+	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/keyspace"
+	"github.com/tikv/pd/pkg/storage/endpoint"
 	"go.etcd.io/etcd/clientv3"
+	"go.uber.org/zap"
 )
 
 // KeyspaceServer wraps GrpcServer to provide keyspace service.
@@ -57,7 +61,7 @@ func (s *KeyspaceServer) LoadKeyspace(_ context.Context, request *keyspacepb.Loa
 	}
 
 	manager := s.GetKeyspaceManager()
-	meta, err := manager.LoadKeyspace(request.Name)
+	meta, err := manager.LoadKeyspace(request.GetName())
 	if err != nil {
 		return &keyspacepb.LoadKeyspaceResponse{Header: s.getErrorHeader(err)}, nil
 	}
@@ -81,18 +85,32 @@ func (s *KeyspaceServer) WatchKeyspaces(request *keyspacepb.WatchKeyspacesReques
 	ctx, cancel := context.WithCancel(s.Context())
 	defer cancel()
 
-	err := s.sendAllKeyspaceMeta(ctx, stream)
+	revision, err := s.sendAllKeyspaceMeta(ctx, stream)
 	if err != nil {
 		return err
 	}
-	watchChan := s.client.Watch(ctx, path.Join(s.rootPath, endpoint.KeyspaceMetaPrefix()), clientv3.WithPrefix())
+
+	watcher := clientv3.NewWatcher(s.client)
+	defer watcher.Close()
+
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case res := <-watchChan:
-			keyspaces := make([]*keyspacepb.KeyspaceMeta, 0, len(res.Events))
-			for _, event := range res.Events {
+		rch := watcher.Watch(ctx, path.Join(s.rootPath, endpoint.KeyspaceMetaPrefix()), clientv3.WithPrefix(), clientv3.WithRev(revision))
+		for wresp := range rch {
+			if wresp.CompactRevision != 0 {
+				log.Warn("required revision has been compacted, use the compact revision",
+					zap.Int64("required-revision", revision),
+					zap.Int64("compact-revision", wresp.CompactRevision))
+				revision = wresp.CompactRevision
+				break
+			}
+			if wresp.Canceled {
+				log.Error("watcher is canceled with",
+					zap.Int64("revision", revision),
+					errs.ZapError(errs.ErrEtcdWatcherCancel, wresp.Err()))
+				return wresp.Err()
+			}
+			keyspaces := make([]*keyspacepb.KeyspaceMeta, 0, len(wresp.Events))
+			for _, event := range wresp.Events {
 				if event.Type != clientv3.EventTypePut {
 					continue
 				}
@@ -108,21 +126,52 @@ func (s *KeyspaceServer) WatchKeyspaces(request *keyspacepb.WatchKeyspacesReques
 				}
 			}
 		}
+		select {
+		case <-ctx.Done():
+			// server closed, return
+			return nil
+		default:
+		}
 	}
 }
 
-func (s *KeyspaceServer) sendAllKeyspaceMeta(ctx context.Context, stream keyspacepb.Keyspace_WatchKeyspacesServer) error {
+func (s *KeyspaceServer) sendAllKeyspaceMeta(ctx context.Context, stream keyspacepb.Keyspace_WatchKeyspacesServer) (int64, error) {
 	getResp, err := s.client.Get(ctx, path.Join(s.rootPath, endpoint.KeyspaceMetaPrefix()), clientv3.WithPrefix())
 	if err != nil {
-		return err
+		return 0, err
 	}
 	metas := make([]*keyspacepb.KeyspaceMeta, getResp.Count)
 	for i, kv := range getResp.Kvs {
 		meta := &keyspacepb.KeyspaceMeta{}
 		if err = proto.Unmarshal(kv.Value, meta); err != nil {
-			return err
+			return 0, err
 		}
 		metas[i] = meta
 	}
-	return stream.Send(&keyspacepb.WatchKeyspacesResponse{Header: s.header(), Keyspaces: metas})
+	var revision int64
+	if getResp.Header != nil {
+		// start from the next revision
+		revision = getResp.Header.GetRevision() + 1
+	}
+	return revision, stream.Send(&keyspacepb.WatchKeyspacesResponse{Header: s.header(), Keyspaces: metas})
+}
+
+// UpdateKeyspaceState updates the state of keyspace specified in the request.
+func (s *KeyspaceServer) UpdateKeyspaceState(_ context.Context, request *keyspacepb.UpdateKeyspaceStateRequest) (*keyspacepb.UpdateKeyspaceStateResponse, error) {
+	if err := s.validateRequest(request.GetHeader()); err != nil {
+		return nil, err
+	}
+	rc := s.GetRaftCluster()
+	if rc == nil {
+		return &keyspacepb.UpdateKeyspaceStateResponse{Header: s.notBootstrappedHeader()}, nil
+	}
+	manager := s.GetKeyspaceManager()
+	meta, err := manager.UpdateKeyspaceStateByID(request.GetId(), request.GetState(), time.Now().Unix())
+	if err != nil {
+		return &keyspacepb.UpdateKeyspaceStateResponse{Header: s.getErrorHeader(err)}, nil
+	}
+	return &keyspacepb.UpdateKeyspaceStateResponse{
+		Header:   s.header(),
+		Keyspace: meta,
+	}, nil
 }
