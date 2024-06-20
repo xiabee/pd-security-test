@@ -22,8 +22,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/tso"
@@ -167,21 +167,21 @@ func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 	}
 
 	// Ignore the error check here
-	configutil.AdjustCommandlineString(flagSet, &c.Log.Level, "log-level")
-	configutil.AdjustCommandlineString(flagSet, &c.Log.File.Filename, "log-file")
-	configutil.AdjustCommandlineString(flagSet, &c.Metric.PushAddress, "metrics-addr")
-	configutil.AdjustCommandlineString(flagSet, &c.Security.CAPath, "cacert")
-	configutil.AdjustCommandlineString(flagSet, &c.Security.CertPath, "cert")
-	configutil.AdjustCommandlineString(flagSet, &c.Security.KeyPath, "key")
-	configutil.AdjustCommandlineString(flagSet, &c.BackendEndpoints, "backend-endpoints")
-	configutil.AdjustCommandlineString(flagSet, &c.ListenAddr, "listen-addr")
-	configutil.AdjustCommandlineString(flagSet, &c.AdvertiseListenAddr, "advertise-listen-addr")
+	configutil.AdjustCommandLineString(flagSet, &c.Log.Level, "log-level")
+	configutil.AdjustCommandLineString(flagSet, &c.Log.File.Filename, "log-file")
+	configutil.AdjustCommandLineString(flagSet, &c.Metric.PushAddress, "metrics-addr")
+	configutil.AdjustCommandLineString(flagSet, &c.Security.CAPath, "cacert")
+	configutil.AdjustCommandLineString(flagSet, &c.Security.CertPath, "cert")
+	configutil.AdjustCommandLineString(flagSet, &c.Security.KeyPath, "key")
+	configutil.AdjustCommandLineString(flagSet, &c.BackendEndpoints, "backend-endpoints")
+	configutil.AdjustCommandLineString(flagSet, &c.ListenAddr, "listen-addr")
+	configutil.AdjustCommandLineString(flagSet, &c.AdvertiseListenAddr, "advertise-listen-addr")
 
-	return c.Adjust(meta, false)
+	return c.Adjust(meta)
 }
 
 // Adjust is used to adjust the TSO configurations.
-func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
+func (c *Config) Adjust(meta *toml.MetaData) error {
 	configMetaData := configutil.NewConfigMetadata(meta)
 	if err := configMetaData.CheckUndecoded(); err != nil {
 		c.WarningMsgs = append(c.WarningMsgs, err.Error())
@@ -226,10 +226,6 @@ func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
 	c.adjustLog(configMetaData.Child("log"))
 	c.Security.Encryption.Adjust()
 
-	if len(c.Log.Format) == 0 {
-		c.Log.Format = utils.DefaultLogFormat
-	}
-
 	return nil
 }
 
@@ -237,6 +233,8 @@ func (c *Config) adjustLog(meta *configutil.ConfigMetaData) {
 	if !meta.IsDefined("disable-error-verbose") {
 		c.Log.DisableErrorVerbose = utils.DefaultDisableErrorVerbose
 	}
+	configutil.AdjustString(&c.Log.Format, utils.DefaultLogFormat)
+	configutil.AdjustString(&c.Log.Level, utils.DefaultLogLevel)
 }
 
 // Validate is used to validate if some configurations are right.

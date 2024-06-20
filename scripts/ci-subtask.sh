@@ -1,50 +1,36 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# ./ci-subtask.sh <TOTAL_TASK_N> <TASK_INDEX> <INTEGRATION_TEST_ONLY>
+# ./ci-subtask.sh <TOTAL_TASK_N> <TASK_INDEX>
 
-if [[ $3 ]]; then
-    # Get integration test list.
-    makefile_dirs=($(find . -iname "Makefile" -exec dirname {} \; | sort -u))
-    submod_dirs=($(find . -iname "go.mod" -exec dirname {} \; | sort -u))
-    integration_tasks=$(comm -12 <(printf "%s\n" "${makefile_dirs[@]}") <(printf "%s\n" "${submod_dirs[@]}") | grep "./tests/integrations/*")
-    # Currently, we only have 3 integration tests, so we can hardcode the task index.
-    for t in ${integration_tasks[@]}; do
-        if [[ "$t" = "./tests/integrations/client" && "$2" = 9 ]]; then
-            printf "%s " "$t"
-            break
-        elif [[ "$t" = "./tests/integrations/tso" && "$2" = 7 ]]; then
-            printf "%s " "$t"
-            break
-        elif [[ "$t" = "./tests/integrations/mcs" && "$2" = 2 ]]; then
-            printf "%s " "$t"
-            break
-        fi
-    done
-else
-    # Get package test list.
-    packages=($(go list ./...))
-    dirs=($(find . -iname "*_test.go" -exec dirname {} \; | sort -u | sed -e "s/^\./github.com\/tikv\/pd/"))
-    tasks=($(comm -12 <(printf "%s\n" "${packages[@]}") <(printf "%s\n" "${dirs[@]}")))
+ROOT_PATH_COV=$(pwd)/covprofile
+# Currently, we only have 3 integration tests, so we can hardcode the task index.
+integrations_dir=$(pwd)/tests/integrations
 
-    weight() {
-        [[ $1 == "github.com/tikv/pd/server/api" ]] && return 30
-        [[ $1 == "github.com/tikv/pd/pkg/schedule" ]] && return 30
-        [[ $1 =~ "pd/tests" ]] && return 5
-        return 1
-    }
-
-    scores=($(seq "$1" | xargs -I{} echo 0))
-
-    res=()
-    for t in ${tasks[@]}; do
-        min_i=0
-        for i in ${!scores[@]}; do
-            [[ ${scores[i]} -lt ${scores[$min_i]} ]] && min_i=$i
-        done
-        weight $t
-        scores[$min_i]=$((${scores[$min_i]} + $?))
-        [[ $(($min_i + 1)) -eq $2 ]] && res+=($t)
-    done
-
-    printf "%s " "${res[@]}"
-fi
+case $1 in
+    1)
+        # unit tests ignore `tests`
+        ./bin/pd-ut run --race --ignore tests --coverprofile $ROOT_PATH_COV || exit 1
+        ;;
+    2)
+        # unit tests only in `tests`
+        ./bin/pd-ut run tests --race --coverprofile $ROOT_PATH_COV || exit 1
+        ;;
+    3)
+        # tools tests
+        cd ./tools && make ci-test-job && cat covprofile >> $ROOT_PATH_COV || exit 1
+        ;;
+    4)
+        # integration test client
+        ./bin/pd-ut it run client --race --coverprofile $ROOT_PATH_COV || exit 1
+        # client tests
+        cd ./client && make ci-test-job && cat covprofile >> $ROOT_PATH_COV || exit 1
+        ;;
+    5)
+        # integration test tso
+        ./bin/pd-ut it run tso --race --coverprofile $ROOT_PATH_COV || exit 1
+        ;;
+    6)
+        # integration test mcs
+        ./bin/pd-ut it run mcs --race --coverprofile $ROOT_PATH_COV || exit 1
+        ;;
+esac

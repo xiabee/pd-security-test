@@ -34,14 +34,14 @@ type tsoStreamBuilderFactory interface {
 
 type pdTSOStreamBuilderFactory struct{}
 
-func (f *pdTSOStreamBuilderFactory) makeBuilder(cc *grpc.ClientConn) tsoStreamBuilder {
-	return &pdTSOStreamBuilder{client: pdpb.NewPDClient(cc)}
+func (*pdTSOStreamBuilderFactory) makeBuilder(cc *grpc.ClientConn) tsoStreamBuilder {
+	return &pdTSOStreamBuilder{client: pdpb.NewPDClient(cc), serverURL: cc.Target()}
 }
 
 type tsoTSOStreamBuilderFactory struct{}
 
-func (f *tsoTSOStreamBuilderFactory) makeBuilder(cc *grpc.ClientConn) tsoStreamBuilder {
-	return &tsoTSOStreamBuilder{client: tsopb.NewTSOClient(cc)}
+func (*tsoTSOStreamBuilderFactory) makeBuilder(cc *grpc.ClientConn) tsoStreamBuilder {
+	return &tsoTSOStreamBuilder{client: tsopb.NewTSOClient(cc), serverURL: cc.Target()}
 }
 
 // TSO Stream Builder
@@ -51,7 +51,8 @@ type tsoStreamBuilder interface {
 }
 
 type pdTSOStreamBuilder struct {
-	client pdpb.PDClient
+	serverURL string
+	client    pdpb.PDClient
 }
 
 func (b *pdTSOStreamBuilder) build(ctx context.Context, cancel context.CancelFunc, timeout time.Duration) (tsoStream, error) {
@@ -61,32 +62,37 @@ func (b *pdTSOStreamBuilder) build(ctx context.Context, cancel context.CancelFun
 	stream, err := b.client.Tso(ctx)
 	done <- struct{}{}
 	if err == nil {
-		return &pdTSOStream{stream: stream}, nil
+		return &pdTSOStream{stream: stream, serverURL: b.serverURL}, nil
 	}
 	return nil, err
 }
 
 type tsoTSOStreamBuilder struct {
-	client tsopb.TSOClient
+	serverURL string
+	client    tsopb.TSOClient
 }
 
-func (b *tsoTSOStreamBuilder) build(ctx context.Context, cancel context.CancelFunc, timeout time.Duration) (tsoStream, error) {
+func (b *tsoTSOStreamBuilder) build(
+	ctx context.Context, cancel context.CancelFunc, timeout time.Duration,
+) (tsoStream, error) {
 	done := make(chan struct{})
 	// TODO: we need to handle a conner case that this goroutine is timeout while the stream is successfully created.
 	go checkStreamTimeout(ctx, cancel, done, timeout)
 	stream, err := b.client.Tso(ctx)
 	done <- struct{}{}
 	if err == nil {
-		return &tsoTSOStream{stream: stream}, nil
+		return &tsoTSOStream{stream: stream, serverURL: b.serverURL}, nil
 	}
 	return nil, err
 }
 
 func checkStreamTimeout(ctx context.Context, cancel context.CancelFunc, done chan struct{}, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case <-done:
 		return
-	case <-time.After(timeout):
+	case <-timer.C:
 		cancel()
 	case <-ctx.Done():
 	}
@@ -96,19 +102,27 @@ func checkStreamTimeout(ctx context.Context, cancel context.CancelFunc, done cha
 // TSO Stream
 
 type tsoStream interface {
+	getServerURL() string
 	// processRequests processes TSO requests in streaming mode to get timestamps
-	processRequests(clusterID uint64, dcLocation string, requests []*tsoRequest,
-		batchStartTime time.Time) (physical, logical int64, suffixBits uint32, err error)
+	processRequests(
+		clusterID uint64, keyspaceID, keyspaceGroupID uint32, dcLocation string,
+		count int64, batchStartTime time.Time,
+	) (respKeyspaceGroupID uint32, physical, logical int64, suffixBits uint32, err error)
 }
 
 type pdTSOStream struct {
-	stream pdpb.PD_TsoClient
+	serverURL string
+	stream    pdpb.PD_TsoClient
 }
 
-func (s *pdTSOStream) processRequests(clusterID uint64, dcLocation string, requests []*tsoRequest,
-	batchStartTime time.Time) (physical, logical int64, suffixBits uint32, err error) {
+func (s *pdTSOStream) getServerURL() string {
+	return s.serverURL
+}
+
+func (s *pdTSOStream) processRequests(
+	clusterID uint64, _, _ uint32, dcLocation string, count int64, batchStartTime time.Time,
+) (respKeyspaceGroupID uint32, physical, logical int64, suffixBits uint32, err error) {
 	start := time.Now()
-	count := int64(len(requests))
 	req := &pdpb.TsoRequest{
 		Header: &pdpb.RequestHeader{
 			ClusterId: clusterID,
@@ -144,21 +158,30 @@ func (s *pdTSOStream) processRequests(clusterID uint64, dcLocation string, reque
 	}
 
 	ts := resp.GetTimestamp()
+	respKeyspaceGroupID = defaultKeySpaceGroupID
 	physical, logical, suffixBits = ts.GetPhysical(), ts.GetLogical(), ts.GetSuffixBits()
 	return
 }
 
 type tsoTSOStream struct {
-	stream tsopb.TSO_TsoClient
+	serverURL string
+	stream    tsopb.TSO_TsoClient
 }
 
-func (s *tsoTSOStream) processRequests(clusterID uint64, dcLocation string, requests []*tsoRequest,
-	batchStartTime time.Time) (physical, logical int64, suffixBits uint32, err error) {
+func (s *tsoTSOStream) getServerURL() string {
+	return s.serverURL
+}
+
+func (s *tsoTSOStream) processRequests(
+	clusterID uint64, keyspaceID, keyspaceGroupID uint32, dcLocation string,
+	count int64, batchStartTime time.Time,
+) (respKeyspaceGroupID uint32, physical, logical int64, suffixBits uint32, err error) {
 	start := time.Now()
-	count := int64(len(requests))
 	req := &tsopb.TsoRequest{
 		Header: &tsopb.RequestHeader{
-			ClusterId: clusterID,
+			ClusterId:       clusterID,
+			KeyspaceId:      keyspaceID,
+			KeyspaceGroupId: keyspaceGroupID,
 		},
 		Count:      uint32(count),
 		DcLocation: dcLocation,
@@ -191,6 +214,7 @@ func (s *tsoTSOStream) processRequests(clusterID uint64, dcLocation string, requ
 	}
 
 	ts := resp.GetTimestamp()
+	respKeyspaceGroupID = resp.GetHeader().GetKeyspaceGroupId()
 	physical, logical, suffixBits = ts.GetPhysical(), ts.GetLogical(), ts.GetSuffixBits()
 	return
 }

@@ -97,7 +97,7 @@ func TestDelaySyncTimestamp(t *testing.T) {
 	cluster.WaitLeader()
 
 	var leaderServer, nextLeaderServer *tests.TestServer
-	leaderServer = cluster.GetServer(cluster.GetLeader())
+	leaderServer = cluster.GetLeaderServer()
 	re.NotNil(leaderServer)
 	for _, s := range cluster.GetServers() {
 		if s.GetConfig().Name != cluster.GetLeader() {
@@ -137,7 +137,7 @@ func TestLogicalOverflow(t *testing.T) {
 	runCase := func(updateInterval time.Duration) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		cluster, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, serverName string) {
+		cluster, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, _ string) {
 			conf.TSOUpdatePhysicalInterval = typeutil.Duration{Duration: updateInterval}
 		})
 		defer cluster.Destroy()
@@ -145,7 +145,7 @@ func TestLogicalOverflow(t *testing.T) {
 		re.NoError(cluster.RunInitialServers())
 		cluster.WaitLeader()
 
-		leaderServer := cluster.GetServer(cluster.GetLeader())
+		leaderServer := cluster.GetLeaderServer()
 		grpcPDClient := testutil.MustNewGrpcClient(re, leaderServer.GetAddr())
 		clusterID := leaderServer.GetClusterID()
 
@@ -165,7 +165,7 @@ func TestLogicalOverflow(t *testing.T) {
 			re.NoError(err)
 			if i == 1 {
 				// the 2nd request may (but not must) overflow, as max logical interval is 262144
-				re.Less(time.Since(begin), updateInterval+20*time.Millisecond) // additional 20ms for gRPC latency
+				re.Less(time.Since(begin), updateInterval+50*time.Millisecond) // additional 50ms for gRPC latency
 			}
 		}
 		// the 3rd request must overflow

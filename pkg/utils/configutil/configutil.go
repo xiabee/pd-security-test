@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/pkg/errors"
+	"github.com/pingcap/errors"
 	"github.com/spf13/pflag"
 	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/utils/grpcutil"
@@ -96,20 +96,20 @@ func PrintConfigCheckMsg(w io.Writer, warningMsgs []string) {
 }
 
 // ConfigFromFile loads config from file.
-func ConfigFromFile(c interface{}, path string) (*toml.MetaData, error) {
+func ConfigFromFile(c any, path string) (*toml.MetaData, error) {
 	meta, err := toml.DecodeFile(path, c)
 	return &meta, errors.WithStack(err)
 }
 
-// AdjustCommandlineString adjusts the value of a string variable from command line flags.
-func AdjustCommandlineString(flagSet *pflag.FlagSet, v *string, name string) {
+// AdjustCommandLineString adjusts the value of a string variable from command line flags.
+func AdjustCommandLineString(flagSet *pflag.FlagSet, v *string, name string) {
 	if value, _ := flagSet.GetString(name); value != "" {
 		*v = value
 	}
 }
 
-// AdjustCommandlineBool adjusts the value of a bool variable from command line flags.
-func AdjustCommandlineBool(flagSet *pflag.FlagSet, v *bool, name string) {
+// AdjustCommandLineBool adjusts the value of a bool variable from command line flags.
+func AdjustCommandLineBool(flagSet *pflag.FlagSet, v *bool, name string) {
 	if value, _ := flagSet.GetBool(name); value {
 		*v = value
 	}
@@ -169,5 +169,12 @@ func AdjustPath(p *string) {
 	absPath, err := filepath.Abs(*p)
 	if err == nil {
 		*p = absPath
+	}
+}
+
+// AdjustBool adjusts the value of a bool variable.
+func AdjustBool(v *bool, defValue bool) {
+	if !*v {
+		*v = defValue
 	}
 }

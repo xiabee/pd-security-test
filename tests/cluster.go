@@ -33,11 +33,13 @@ import (
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/id"
 	"github.com/tikv/pd/pkg/keyspace"
+	scheduling "github.com/tikv/pd/pkg/mcs/scheduling/server"
 	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
 	"github.com/tikv/pd/pkg/swaggerserver"
 	"github.com/tikv/pd/pkg/tso"
 	"github.com/tikv/pd/pkg/utils/logutil"
+	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
@@ -61,11 +63,13 @@ var (
 	WaitLeaderReturnDelay = 20 * time.Millisecond
 	// WaitLeaderCheckInterval represents the time interval of WaitLeader running check.
 	WaitLeaderCheckInterval = 500 * time.Millisecond
+	// WaitLeaderRetryTimes represents the maximum number of loops of WaitLeader.
+	WaitLeaderRetryTimes = 100
 )
 
 // TestServer is only for test.
 type TestServer struct {
-	sync.RWMutex
+	syncutil.RWMutex
 	server     *server.Server
 	grpcServer *server.GrpcServer
 	state      int32
@@ -84,6 +88,8 @@ func NewTestAPIServer(ctx context.Context, cfg *config.Config) (*TestServer, err
 }
 
 func createTestServer(ctx context.Context, cfg *config.Config, services []string) (*TestServer, error) {
+	//  disable the heartbeat async runner in test
+	cfg.Schedule.EnableHeartbeatConcurrentRunner = false
 	err := logutil.SetupLogger(cfg.Log, &cfg.Logger, &cfg.LogProps, cfg.Security.RedactInfoLog)
 	if err != nil {
 		return nil, err
@@ -149,6 +155,13 @@ func (s *TestServer) Destroy() error {
 	}
 	s.state = Destroy
 	return nil
+}
+
+// ResetPDLeader resigns the leader of the server.
+func (s *TestServer) ResetPDLeader() {
+	s.Lock()
+	defer s.Unlock()
+	s.server.GetMember().ResetLeader()
 }
 
 // ResignLeader resigns the leader of the server.
@@ -240,6 +253,13 @@ func (s *TestServer) GetKeyspaceManager() *keyspace.Manager {
 	s.RLock()
 	defer s.RUnlock()
 	return s.server.GetKeyspaceManager()
+}
+
+// SetKeyspaceManager sets the current TestServer's Keyspace Manager.
+func (s *TestServer) SetKeyspaceManager(km *keyspace.Manager) {
+	s.RLock()
+	defer s.RUnlock()
+	s.server.SetKeyspaceManager(km)
 }
 
 // GetCluster returns PD cluster.
@@ -410,7 +430,7 @@ func (s *TestServer) BootstrapCluster() error {
 // make a test know the PD leader has been elected as soon as possible.
 // If it exceeds the maximum number of loops, it will return nil.
 func (s *TestServer) WaitLeader() bool {
-	for i := 0; i < 100; i++ {
+	for i := 0; i < WaitLeaderRetryTimes; i++ {
 		if s.server.GetMember().IsLeader() {
 			return true
 		}
@@ -424,15 +444,21 @@ func (s *TestServer) GetTSOAllocatorManager() *tso.AllocatorManager {
 	return s.server.GetTSOAllocatorManager()
 }
 
+// GetServicePrimaryAddr returns the primary address of the service.
+func (s *TestServer) GetServicePrimaryAddr(ctx context.Context, serviceName string) (string, bool) {
+	return s.server.GetServicePrimaryAddr(ctx, serviceName)
+}
+
 // TestCluster is only for test.
 type TestCluster struct {
 	config  *clusterConfig
 	servers map[string]*TestServer
 	// tsPool is used to check the TSO uniqueness among the test cluster
 	tsPool struct {
-		sync.Mutex
+		syncutil.Mutex
 		pool map[uint64]struct{}
 	}
+	schedulingCluster *TestSchedulingCluster
 }
 
 // ConfigOption is used to define customize settings in test.
@@ -455,8 +481,8 @@ func createTestCluster(ctx context.Context, initialServerCount int, isAPIService
 	schedulers.Register()
 	config := newClusterConfig(initialServerCount)
 	servers := make(map[string]*TestServer)
-	for _, conf := range config.InitialServers {
-		serverConf, err := conf.Generate(opts...)
+	for _, cfg := range config.InitialServers {
+		serverConf, err := cfg.Generate(opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -469,13 +495,13 @@ func createTestCluster(ctx context.Context, initialServerCount int, isAPIService
 		if err != nil {
 			return nil, err
 		}
-		servers[conf.Name] = s
+		servers[cfg.Name] = s
 	}
 	return &TestCluster{
 		config:  config,
 		servers: servers,
 		tsPool: struct {
-			sync.Mutex
+			syncutil.Mutex
 			pool map[uint64]struct{}
 		}{
 			pool: make(map[uint64]struct{}),
@@ -483,18 +509,80 @@ func createTestCluster(ctx context.Context, initialServerCount int, isAPIService
 	}, nil
 }
 
+// RestartTestAPICluster restarts the API test cluster.
+func RestartTestAPICluster(ctx context.Context, cluster *TestCluster) (*TestCluster, error) {
+	return restartTestCluster(ctx, cluster, true)
+}
+
+func restartTestCluster(
+	ctx context.Context, cluster *TestCluster, isAPIServiceMode bool,
+) (newTestCluster *TestCluster, err error) {
+	schedulers.Register()
+	newTestCluster = &TestCluster{
+		config:  cluster.config,
+		servers: make(map[string]*TestServer, len(cluster.servers)),
+		tsPool: struct {
+			syncutil.Mutex
+			pool map[uint64]struct{}
+		}{
+			pool: make(map[uint64]struct{}),
+		},
+	}
+
+	var serverMap sync.Map
+	var errorMap sync.Map
+	wg := sync.WaitGroup{}
+	for serverName, server := range newTestCluster.servers {
+		serverCfg := server.GetConfig()
+		wg.Add(1)
+		go func(serverName string, server *TestServer) {
+			defer wg.Done()
+			server.Destroy()
+			var (
+				newServer *TestServer
+				serverErr error
+			)
+			if isAPIServiceMode {
+				newServer, serverErr = NewTestAPIServer(ctx, serverCfg)
+			} else {
+				newServer, serverErr = NewTestServer(ctx, serverCfg)
+			}
+			serverMap.Store(serverName, newServer)
+			errorMap.Store(serverName, serverErr)
+		}(serverName, server)
+	}
+	wg.Wait()
+
+	errorMap.Range(func(key, value any) bool {
+		if value != nil {
+			err = value.(error)
+			return false
+		}
+		serverName := key.(string)
+		newServer, _ := serverMap.Load(serverName)
+		newTestCluster.servers[serverName] = newServer.(*TestServer)
+		return true
+	})
+
+	if err != nil {
+		return nil, errors.New("failed to restart cluster. " + err.Error())
+	}
+
+	return newTestCluster, nil
+}
+
 // RunServer starts to run TestServer.
-func (c *TestCluster) RunServer(server *TestServer) <-chan error {
+func RunServer(server *TestServer) <-chan error {
 	resC := make(chan error)
 	go func() { resC <- server.Run() }()
 	return resC
 }
 
 // RunServers starts to run multiple TestServer.
-func (c *TestCluster) RunServers(servers []*TestServer) error {
+func RunServers(servers []*TestServer) error {
 	res := make([]<-chan error, len(servers))
 	for i, s := range servers {
-		res[i] = c.RunServer(s)
+		res[i] = RunServer(s)
 	}
 	for _, c := range res {
 		if err := <-c; err != nil {
@@ -510,7 +598,7 @@ func (c *TestCluster) RunInitialServers() error {
 	for _, conf := range c.config.InitialServers {
 		servers = append(servers, c.GetServer(conf.Name))
 	}
-	return c.RunServers(servers)
+	return RunServers(servers)
 }
 
 // StopAll is used to stop all servers.
@@ -553,11 +641,16 @@ func (c *TestCluster) GetFollower() string {
 	return ""
 }
 
+// GetLeaderServer returns the leader server of all servers
+func (c *TestCluster) GetLeaderServer() *TestServer {
+	return c.GetServer(c.GetLeader())
+}
+
 // WaitLeader is used to get leader.
 // If it exceeds the maximum number of loops, it will return an empty string.
 func (c *TestCluster) WaitLeader(ops ...WaitOption) string {
 	option := &WaitOp{
-		retryTimes:   100,
+		retryTimes:   WaitLeaderRetryTimes,
 		waitInterval: WaitLeaderCheckInterval,
 	}
 	for _, op := range ops {
@@ -567,9 +660,11 @@ func (c *TestCluster) WaitLeader(ops ...WaitOption) string {
 		counter := make(map[string]int)
 		running := 0
 		for _, s := range c.servers {
+			s.RLock()
 			if s.state == Running {
 				running++
 			}
+			s.RUnlock()
 			n := s.GetLeader().GetName()
 			if n != "" {
 				counter[n]++
@@ -624,7 +719,7 @@ func (c *TestCluster) ResignLeader() error {
 // If it exceeds the maximum number of loops, it will return an empty string.
 func (c *TestCluster) WaitAllocatorLeader(dcLocation string, ops ...WaitOption) string {
 	option := &WaitOp{
-		retryTimes:   100,
+		retryTimes:   WaitLeaderRetryTimes,
 		waitInterval: WaitLeaderCheckInterval,
 	}
 	for _, op := range ops {
@@ -706,6 +801,13 @@ func (c *TestCluster) HandleRegionHeartbeat(region *core.RegionInfo) error {
 	return cluster.HandleRegionHeartbeat(region)
 }
 
+// HandleReportBuckets processes BucketInfo reports from the client.
+func (c *TestCluster) HandleReportBuckets(b *metapb.Buckets) error {
+	leader := c.GetLeader()
+	cluster := c.servers[leader].GetRaftCluster()
+	return cluster.HandleReportBuckets(b)
+}
+
 // Join is used to add a new TestServer into the cluster.
 func (c *TestCluster) Join(ctx context.Context, opts ...ConfigOption) (*TestServer, error) {
 	conf, err := c.config.Join().Generate(opts...)
@@ -742,6 +844,9 @@ func (c *TestCluster) Destroy() {
 			log.Error("failed to destroy the cluster:", errs.ZapError(err))
 		}
 	}
+	if c.schedulingCluster != nil {
+		c.schedulingCluster.Destroy()
+	}
 }
 
 // CheckClusterDCLocation will force the cluster to do the dc-location check in order to speed up the test.
@@ -749,8 +854,8 @@ func (c *TestCluster) CheckClusterDCLocation() {
 	wg := sync.WaitGroup{}
 	for _, server := range c.GetServers() {
 		wg.Add(1)
-		go func(ser *TestServer) {
-			ser.GetTSOAllocatorManager().ClusterDCLocationChecker()
+		go func(s *TestServer) {
+			s.GetTSOAllocatorManager().ClusterDCLocationChecker()
 			wg.Done()
 		}(server)
 	}
@@ -766,6 +871,19 @@ func (c *TestCluster) CheckTSOUnique(ts uint64) bool {
 	}
 	c.tsPool.pool[ts] = struct{}{}
 	return true
+}
+
+// GetSchedulingPrimaryServer returns the scheduling primary server.
+func (c *TestCluster) GetSchedulingPrimaryServer() *scheduling.Server {
+	if c.schedulingCluster == nil {
+		return nil
+	}
+	return c.schedulingCluster.GetPrimaryServer()
+}
+
+// SetSchedulingCluster sets the scheduling cluster.
+func (c *TestCluster) SetSchedulingCluster(cluster *TestSchedulingCluster) {
+	c.schedulingCluster = cluster
 }
 
 // WaitOp represent the wait configuration

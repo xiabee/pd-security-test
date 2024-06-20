@@ -18,7 +18,9 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/storage/kv"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"go.etcd.io/etcd/clientv3"
 )
 
@@ -71,8 +73,20 @@ func IsUserKindValid(kind string) bool {
 }
 
 // KeyspaceGroupMember defines an election member which campaigns for the primary of the keyspace group.
+// Its `Priority` is used in keyspace group primary weighted-election to balance primaries' distribution.
+// Among multiple replicas of a keyspace group, the higher the priority, the more likely
+// the replica is to be elected as primary.
 type KeyspaceGroupMember struct {
-	Address string `json:"address"`
+	Address  string `json:"address"`
+	Priority int    `json:"priority"`
+}
+
+// CompareAddress compares the address with the given address.
+// It compares the address without the scheme.
+// Otherwise, it will not work when we update the scheme from http to https.
+// Issue: https://github.com/tikv/pd/issues/8284
+func (m *KeyspaceGroupMember) CompareAddress(addr string) bool {
+	return typeutil.EqualBaseURLs(m.Address, addr)
 }
 
 // SplitState defines the split state of a keyspace group.
@@ -83,12 +97,20 @@ type SplitState struct {
 	SplitSource uint32 `json:"split-source"`
 }
 
+// MergeState defines the merging state of a keyspace group.
+type MergeState struct {
+	// MergeList is the list of keyspace group IDs which are merging to this target keyspace group.
+	MergeList []uint32 `json:"merge-list"`
+}
+
 // KeyspaceGroup is the keyspace group.
 type KeyspaceGroup struct {
 	ID       uint32 `json:"id"`
 	UserKind string `json:"user-kind"`
 	// SplitState is the current split state of the keyspace group.
 	SplitState *SplitState `json:"split-state,omitempty"`
+	// MergeState is the current merging state of the keyspace group.
+	MergeState *MergeState `json:"merge-state,omitempty"`
 	// Members are the election members which campaign for the primary of the keyspace group.
 	Members []KeyspaceGroupMember `json:"members"`
 	// Keyspaces are the keyspace IDs which belong to the keyspace group.
@@ -122,6 +144,21 @@ func (kg *KeyspaceGroup) SplitSource() uint32 {
 	return 0
 }
 
+// IsMerging checks if the keyspace group is in merging state.
+func (kg *KeyspaceGroup) IsMerging() bool {
+	return kg != nil && kg.MergeState != nil
+}
+
+// IsMergeTarget checks if the keyspace group is in merging state and is the merge target.
+func (kg *KeyspaceGroup) IsMergeTarget() bool {
+	return kg.IsMerging() && !slice.Contains(kg.MergeState.MergeList, kg.ID)
+}
+
+// IsMergeSource checks if the keyspace group is in merging state and is the merge source.
+func (kg *KeyspaceGroup) IsMergeSource() bool {
+	return kg.IsMerging() && slice.Contains(kg.MergeState.MergeList, kg.ID)
+}
+
 // KeyspaceGroupStorage is the interface for keyspace group storage.
 type KeyspaceGroupStorage interface {
 	LoadKeyspaceGroups(startID uint32, limit int) ([]*KeyspaceGroup, error)
@@ -135,7 +172,7 @@ type KeyspaceGroupStorage interface {
 var _ KeyspaceGroupStorage = (*StorageEndpoint)(nil)
 
 // LoadKeyspaceGroup loads the keyspace group by ID.
-func (se *StorageEndpoint) LoadKeyspaceGroup(txn kv.Txn, id uint32) (*KeyspaceGroup, error) {
+func (*StorageEndpoint) LoadKeyspaceGroup(txn kv.Txn, id uint32) (*KeyspaceGroup, error) {
 	value, err := txn.Load(KeyspaceGroupIDPath(id))
 	if err != nil || value == "" {
 		return nil, err
@@ -148,17 +185,12 @@ func (se *StorageEndpoint) LoadKeyspaceGroup(txn kv.Txn, id uint32) (*KeyspaceGr
 }
 
 // SaveKeyspaceGroup saves the keyspace group.
-func (se *StorageEndpoint) SaveKeyspaceGroup(txn kv.Txn, kg *KeyspaceGroup) error {
-	key := KeyspaceGroupIDPath(kg.ID)
-	value, err := json.Marshal(kg)
-	if err != nil {
-		return err
-	}
-	return txn.Save(key, string(value))
+func (*StorageEndpoint) SaveKeyspaceGroup(txn kv.Txn, kg *KeyspaceGroup) error {
+	return saveJSONInTxn(txn, KeyspaceGroupIDPath(kg.ID), kg)
 }
 
 // DeleteKeyspaceGroup deletes the keyspace group.
-func (se *StorageEndpoint) DeleteKeyspaceGroup(txn kv.Txn, id uint32) error {
+func (*StorageEndpoint) DeleteKeyspaceGroup(txn kv.Txn, id uint32) error {
 	return txn.Remove(KeyspaceGroupIDPath(id))
 }
 

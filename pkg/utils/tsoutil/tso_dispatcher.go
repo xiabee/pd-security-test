@@ -24,6 +24,8 @@ import (
 	"github.com/pingcap/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/timerpool"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -57,20 +59,20 @@ func NewTSODispatcher(tsoProxyHandleDuration, tsoProxyBatchSize prometheus.Histo
 	return tsoDispatcher
 }
 
-// DispatchRequest is the entry point for dispatching/forwarding a tso request to the detination host
+// DispatchRequest is the entry point for dispatching/forwarding a tso request to the destination host
 func (s *TSODispatcher) DispatchRequest(
 	ctx context.Context,
 	req Request,
 	tsoProtoFactory ProtoFactory,
 	doneCh <-chan struct{},
 	errCh chan<- error,
-	updateServicePrimaryAddrChs ...chan<- struct{}) {
+	tsoPrimaryWatchers ...*etcdutil.LoopWatcher) {
 	val, loaded := s.dispatchChs.LoadOrStore(req.getForwardedHost(), make(chan Request, maxMergeRequests))
 	reqCh := val.(chan Request)
 	if !loaded {
-		tsDeadlineCh := make(chan deadline, 1)
-		go s.dispatch(ctx, tsoProtoFactory, req.getForwardedHost(), req.getClientConn(), reqCh, tsDeadlineCh, doneCh, errCh, updateServicePrimaryAddrChs...)
-		go watchTSDeadline(ctx, tsDeadlineCh)
+		tsDeadlineCh := make(chan *TSDeadline, 1)
+		go s.dispatch(ctx, tsoProtoFactory, req.getForwardedHost(), req.getClientConn(), reqCh, tsDeadlineCh, doneCh, errCh, tsoPrimaryWatchers...)
+		go WatchTSDeadline(ctx, tsDeadlineCh)
 	}
 	reqCh <- req
 }
@@ -81,16 +83,15 @@ func (s *TSODispatcher) dispatch(
 	forwardedHost string,
 	clientConn *grpc.ClientConn,
 	tsoRequestCh <-chan Request,
-	tsDeadlineCh chan<- deadline,
+	tsDeadlineCh chan<- *TSDeadline,
 	doneCh <-chan struct{},
 	errCh chan<- error,
-	updateServicePrimaryAddrChs ...chan<- struct{}) {
+	tsoPrimaryWatchers ...*etcdutil.LoopWatcher) {
 	defer logutil.LogPanic()
 	dispatcherCtx, ctxCancel := context.WithCancel(ctx)
 	defer ctxCancel()
 	defer s.dispatchChs.Delete(forwardedHost)
 
-	log.Info("create tso forward stream", zap.String("forwarded-host", forwardedHost))
 	forwardStream, cancel, err := tsoProtoFactory.createForwardStream(ctx, clientConn)
 	if err != nil || forwardStream == nil {
 		log.Error("create tso forwarding stream error",
@@ -111,7 +112,7 @@ func (s *TSODispatcher) dispatch(
 	defer cancel()
 
 	requests := make([]Request, maxMergeRequests+1)
-	needUpdateServicePrimaryAddr := len(updateServicePrimaryAddrChs) > 0 && updateServicePrimaryAddrChs[0] != nil
+	needUpdateServicePrimaryAddr := len(tsoPrimaryWatchers) > 0 && tsoPrimaryWatchers[0] != nil
 	for {
 		select {
 		case first := <-tsoRequestCh:
@@ -121,29 +122,20 @@ func (s *TSODispatcher) dispatch(
 				requests[i] = <-tsoRequestCh
 			}
 			done := make(chan struct{})
-			dl := deadline{
-				timer:  time.After(DefaultTSOProxyTimeout),
-				done:   done,
-				cancel: cancel,
-			}
+			dl := NewTSDeadline(DefaultTSOProxyTimeout, done, cancel)
 			select {
 			case tsDeadlineCh <- dl:
 			case <-dispatcherCtx.Done():
 				return
 			}
-			err = s.processRequests(forwardStream, requests[:pendingTSOReqCount], tsoProtoFactory)
+			err = s.processRequests(forwardStream, requests[:pendingTSOReqCount])
 			close(done)
 			if err != nil {
 				log.Error("proxy forward tso error",
 					zap.String("forwarded-host", forwardedHost),
 					errs.ZapError(errs.ErrGRPCSend, err))
-				if needUpdateServicePrimaryAddr {
-					if strings.Contains(err.Error(), errs.NotLeaderErr) || strings.Contains(err.Error(), errs.MismatchLeaderErr) {
-						select {
-						case updateServicePrimaryAddrChs[0] <- struct{}{}:
-						default:
-						}
-					}
+				if needUpdateServicePrimaryAddr && strings.Contains(err.Error(), errs.NotLeaderErr) {
+					tsoPrimaryWatchers[0].ForceLoad()
 				}
 				select {
 				case <-dispatcherCtx.Done():
@@ -163,7 +155,7 @@ func (s *TSODispatcher) dispatch(
 	}
 }
 
-func (s *TSODispatcher) processRequests(forwardStream stream, requests []Request, tsoProtoFactory ProtoFactory) error {
+func (s *TSODispatcher) processRequests(forwardStream stream, requests []Request) error {
 	// Merge the requests
 	count := uint32(0)
 	for _, request := range requests {
@@ -171,7 +163,7 @@ func (s *TSODispatcher) processRequests(forwardStream stream, requests []Request
 	}
 
 	start := time.Now()
-	resp, err := requests[0].process(forwardStream, count, tsoProtoFactory)
+	resp, err := requests[0].process(forwardStream, count)
 	if err != nil {
 		return err
 	}
@@ -192,7 +184,7 @@ func addLogical(logical, count int64, suffixBits uint32) int64 {
 	return logical + count<<suffixBits
 }
 
-func (s *TSODispatcher) finishRequest(requests []Request, physical, firstLogical int64, suffixBits uint32) error {
+func (*TSODispatcher) finishRequest(requests []Request, physical, firstLogical int64, suffixBits uint32) error {
 	countSum := int64(0)
 	for i := 0; i < len(requests); i++ {
 		newCountSum, err := requests[i].postProcess(countSum, physical, firstLogical, suffixBits)
@@ -204,13 +196,29 @@ func (s *TSODispatcher) finishRequest(requests []Request, physical, firstLogical
 	return nil
 }
 
-type deadline struct {
-	timer  <-chan time.Time
+// TSDeadline is used to watch the deadline of each tso request.
+type TSDeadline struct {
+	timer  *time.Timer
 	done   chan struct{}
 	cancel context.CancelFunc
 }
 
-func watchTSDeadline(ctx context.Context, tsDeadlineCh <-chan deadline) {
+// NewTSDeadline creates a new TSDeadline.
+func NewTSDeadline(
+	timeout time.Duration,
+	done chan struct{},
+	cancel context.CancelFunc,
+) *TSDeadline {
+	timer := timerpool.GlobalTimerPool.Get(timeout)
+	return &TSDeadline{
+		timer:  timer,
+		done:   done,
+		cancel: cancel,
+	}
+}
+
+// WatchTSDeadline watches the deadline of each tso request.
+func WatchTSDeadline(ctx context.Context, tsDeadlineCh <-chan *TSDeadline) {
 	defer logutil.LogPanic()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -218,30 +226,19 @@ func watchTSDeadline(ctx context.Context, tsDeadlineCh <-chan deadline) {
 		select {
 		case d := <-tsDeadlineCh:
 			select {
-			case <-d.timer:
+			case <-d.timer.C:
 				log.Error("tso proxy request processing is canceled due to timeout",
 					errs.ZapError(errs.ErrProxyTSOTimeout))
 				d.cancel()
+				timerpool.GlobalTimerPool.Put(d.timer)
 			case <-d.done:
-				continue
+				timerpool.GlobalTimerPool.Put(d.timer)
 			case <-ctx.Done():
+				timerpool.GlobalTimerPool.Put(d.timer)
 				return
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
-}
-
-func checkStream(streamCtx context.Context, cancel context.CancelFunc, done chan struct{}) {
-	defer logutil.LogPanic()
-
-	select {
-	case <-done:
-		return
-	case <-time.After(3 * time.Second):
-		cancel()
-	case <-streamCtx.Done():
-	}
-	<-done
 }

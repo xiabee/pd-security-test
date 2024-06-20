@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//revive:disable
 package controller
 
 import (
@@ -52,12 +51,23 @@ const (
 	// According to the resource control Grafana panel and Prometheus sampling period, the period should be the factor of 15.
 	defaultTargetPeriod = 5 * time.Second
 	// defaultMaxWaitDuration is the max duration to wait for the token before throwing error.
-	defaultMaxWaitDuration = time.Second
+	defaultMaxWaitDuration = 30 * time.Second
+	// defaultWaitRetryTimes is the times to retry when waiting for the token.
+	defaultWaitRetryTimes = 10
+	// defaultWaitRetryInterval is the interval to retry when waiting for the token.
+	defaultWaitRetryInterval = 50 * time.Millisecond
 )
 
 const (
-	defaultReadBaseCost  = 0.25
+
+	// 1 RU = 8 storage read requests
+	defaultReadBaseCost = 1. / 8 // 0.125
+	// 1 RU = 2 storage read batch requests
+	defaultReadPerBatchBaseCost = 1. / 2 // 0.5
+	// 1 RU = 1 storage write request
 	defaultWriteBaseCost = 1
+	// 1 RU = 1 storage write batch request
+	defaultWritePerBatchBaseCost = 1
 	// 1 RU = 64 KiB read bytes
 	defaultReadCostPerByte = 1. / (64 * 1024)
 	// 1 RU = 1 KiB written bytes
@@ -67,24 +77,41 @@ const (
 
 	// Because the resource manager has not been deployed in microservice mode,
 	// do not enable this function.
-	defaultDegradedModeWaitDuration = "0s"
+	defaultDegradedModeWaitDuration = 0
+	defaultAvgBatchProportion       = 0.7
 )
 
-// ControllerConfig is the configuration of the resource manager controller which includes some option for client needed.
-type ControllerConfig struct {
+// Config is the configuration of the resource manager controller which includes some option for client needed.
+type Config struct {
 	// EnableDegradedMode is to control whether resource control client enable degraded mode when server is disconnect.
-	DegradedModeWaitDuration string `toml:"degraded-mode-wait-duration" json:"degraded-mode-wait-duration"`
+	DegradedModeWaitDuration Duration `toml:"degraded-mode-wait-duration" json:"degraded-mode-wait-duration"`
+
+	// LTBMaxWaitDuration is the max wait time duration for local token bucket.
+	LTBMaxWaitDuration Duration `toml:"ltb-max-wait-duration" json:"ltb-max-wait-duration"`
+
+	// WaitRetryInterval is the interval to retry when waiting for the token.
+	WaitRetryInterval Duration `toml:"wait-retry-interval" json:"wait-retry-interval"`
+
+	// WaitRetryTimes is the times to retry when waiting for the token.
+	WaitRetryTimes int `toml:"wait-retry-times" json:"wait-retry-times"`
 
 	// RequestUnit is the configuration determines the coefficients of the RRU and WRU cost.
 	// This configuration should be modified carefully.
 	RequestUnit RequestUnitConfig `toml:"request-unit" json:"request-unit"`
+
+	// EnableControllerTraceLog is to control whether resource control client enable trace.
+	EnableControllerTraceLog bool `toml:"enable-controller-trace-log" json:"enable-controller-trace-log,string"`
 }
 
-// DefaultControllerConfig returns the default resource manager controller configuration.
-func DefaultControllerConfig() *ControllerConfig {
-	return &ControllerConfig{
-		DegradedModeWaitDuration: defaultDegradedModeWaitDuration,
+// DefaultConfig returns the default resource manager controller configuration.
+func DefaultConfig() *Config {
+	return &Config{
+		DegradedModeWaitDuration: NewDuration(defaultDegradedModeWaitDuration),
+		LTBMaxWaitDuration:       NewDuration(defaultMaxWaitDuration),
+		WaitRetryInterval:        NewDuration(defaultWaitRetryInterval),
+		WaitRetryTimes:           defaultWaitRetryTimes,
 		RequestUnit:              DefaultRequestUnitConfig(),
+		EnableControllerTraceLog: false,
 	}
 }
 
@@ -94,11 +121,15 @@ type RequestUnitConfig struct {
 	// ReadBaseCost is the base cost for a read request. No matter how many bytes read/written or
 	// the CPU times taken for a request, this cost is inevitable.
 	ReadBaseCost float64 `toml:"read-base-cost" json:"read-base-cost"`
+	// ReadPerBatchBaseCost is the base cost for a read request with batch.
+	ReadPerBatchBaseCost float64 `toml:"read-per-batch-base-cost" json:"read-per-batch-base-cost"`
 	// ReadCostPerByte is the cost for each byte read. It's 1 RU = 64 KiB by default.
 	ReadCostPerByte float64 `toml:"read-cost-per-byte" json:"read-cost-per-byte"`
 	// WriteBaseCost is the base cost for a write request. No matter how many bytes read/written or
 	// the CPU times taken for a request, this cost is inevitable.
 	WriteBaseCost float64 `toml:"write-base-cost" json:"write-base-cost"`
+	// WritePerBatchBaseCost is the base cost for a write request with batch.
+	WritePerBatchBaseCost float64 `toml:"write-per-batch-base-cost" json:"write-per-batch-base-cost"`
 	// WriteCostPerByte is the cost for each byte written. It's 1 RU = 1 KiB by default.
 	WriteCostPerByte float64 `toml:"write-cost-per-byte" json:"write-cost-per-byte"`
 	// CPUMsCost is the cost for each millisecond of CPU time taken.
@@ -109,52 +140,58 @@ type RequestUnitConfig struct {
 // DefaultRequestUnitConfig returns the default request unit configuration.
 func DefaultRequestUnitConfig() RequestUnitConfig {
 	return RequestUnitConfig{
-		ReadBaseCost:     defaultReadBaseCost,
-		ReadCostPerByte:  defaultReadCostPerByte,
-		WriteBaseCost:    defaultWriteBaseCost,
-		WriteCostPerByte: defaultWriteCostPerByte,
-		CPUMsCost:        defaultCPUMsCost,
+		ReadBaseCost:          defaultReadBaseCost,
+		ReadPerBatchBaseCost:  defaultReadPerBatchBaseCost,
+		ReadCostPerByte:       defaultReadCostPerByte,
+		WriteBaseCost:         defaultWriteBaseCost,
+		WritePerBatchBaseCost: defaultWritePerBatchBaseCost,
+		WriteCostPerByte:      defaultWriteCostPerByte,
+		CPUMsCost:             defaultCPUMsCost,
 	}
 }
 
-// Config is the configuration of the resource units, which gives the read/write request
+// RUConfig is the configuration of the resource units, which gives the read/write request
 // units or request resource cost standards. It should be calculated by a given `RequestUnitConfig`
 // or `RequestResourceConfig`.
-type Config struct {
+type RUConfig struct {
 	// RU model config
-	ReadBaseCost   RequestUnit
-	ReadBytesCost  RequestUnit
-	WriteBaseCost  RequestUnit
-	WriteBytesCost RequestUnit
-	CPUMsCost      RequestUnit
+	ReadBaseCost          RequestUnit
+	ReadPerBatchBaseCost  RequestUnit
+	ReadBytesCost         RequestUnit
+	WriteBaseCost         RequestUnit
+	WritePerBatchBaseCost RequestUnit
+	WriteBytesCost        RequestUnit
+	CPUMsCost             RequestUnit
 	// The CPU statistics need to distinguish between different environments.
-	isSingleGroupByKeyspace  bool
-	maxWaitDuration          time.Duration
+	isSingleGroupByKeyspace bool
+
+	// some config for client
+	LTBMaxWaitDuration       time.Duration
+	WaitRetryInterval        time.Duration
+	WaitRetryTimes           int
 	DegradedModeWaitDuration time.Duration
 }
 
-// DefaultConfig returns the default configuration.
-func DefaultConfig() *Config {
-	return GenerateConfig(
-		DefaultControllerConfig(),
+// DefaultRUConfig returns the default configuration.
+func DefaultRUConfig() *RUConfig {
+	return GenerateRUConfig(
+		DefaultConfig(),
 	)
 }
 
-// GenerateConfig generates the configuration by the given request unit configuration.
-func GenerateConfig(config *ControllerConfig) *Config {
-	cfg := &Config{
-		ReadBaseCost:    RequestUnit(config.RequestUnit.ReadBaseCost),
-		ReadBytesCost:   RequestUnit(config.RequestUnit.ReadCostPerByte),
-		WriteBaseCost:   RequestUnit(config.RequestUnit.WriteBaseCost),
-		WriteBytesCost:  RequestUnit(config.RequestUnit.WriteCostPerByte),
-		CPUMsCost:       RequestUnit(config.RequestUnit.CPUMsCost),
-		maxWaitDuration: defaultMaxWaitDuration,
+// GenerateRUConfig generates the configuration by the given request unit configuration.
+func GenerateRUConfig(config *Config) *RUConfig {
+	return &RUConfig{
+		ReadBaseCost:             RequestUnit(config.RequestUnit.ReadBaseCost),
+		ReadPerBatchBaseCost:     RequestUnit(config.RequestUnit.ReadPerBatchBaseCost),
+		ReadBytesCost:            RequestUnit(config.RequestUnit.ReadCostPerByte),
+		WriteBaseCost:            RequestUnit(config.RequestUnit.WriteBaseCost),
+		WritePerBatchBaseCost:    RequestUnit(config.RequestUnit.WritePerBatchBaseCost),
+		WriteBytesCost:           RequestUnit(config.RequestUnit.WriteCostPerByte),
+		CPUMsCost:                RequestUnit(config.RequestUnit.CPUMsCost),
+		LTBMaxWaitDuration:       config.LTBMaxWaitDuration.Duration,
+		WaitRetryInterval:        config.WaitRetryInterval.Duration,
+		WaitRetryTimes:           config.WaitRetryTimes,
+		DegradedModeWaitDuration: config.DegradedModeWaitDuration.Duration,
 	}
-	duration, err := time.ParseDuration(config.DegradedModeWaitDuration)
-	if err != nil {
-		cfg.DegradedModeWaitDuration, _ = time.ParseDuration(defaultDegradedModeWaitDuration)
-	} else {
-		cfg.DegradedModeWaitDuration = duration
-	}
-	return cfg
 }
