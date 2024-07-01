@@ -48,7 +48,6 @@ var (
 type randomMergeSchedulerConfig struct {
 	Name   string          `json:"name"`
 	Ranges []core.KeyRange `json:"ranges"`
-	// TODO: When we prepare to use Ranges, we will need to implement the ReloadConfig function for this scheduler.
 }
 
 type randomMergeScheduler struct {
@@ -70,7 +69,7 @@ func (s *randomMergeScheduler) GetName() string {
 	return s.conf.Name
 }
 
-func (*randomMergeScheduler) GetType() string {
+func (s *randomMergeScheduler) GetType() string {
 	return RandomMergeType
 }
 
@@ -86,7 +85,7 @@ func (s *randomMergeScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) 
 	return allowed
 }
 
-func (s *randomMergeScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) ([]*operator.Operator, []plan.Plan) {
+func (s *randomMergeScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	randomMergeCounter.Inc()
 
 	store := filter.NewCandidates(cluster.GetStores()).
@@ -113,7 +112,7 @@ func (s *randomMergeScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) (
 		return nil, nil
 	}
 
-	if !allowMerge(cluster, region, target) {
+	if !s.allowMerge(cluster, region, target) {
 		randomMergeNotAllowedCounter.Inc()
 		return nil, nil
 	}
@@ -129,7 +128,7 @@ func (s *randomMergeScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) (
 	return ops, nil
 }
 
-func allowMerge(cluster sche.SchedulerCluster, region, target *core.RegionInfo) bool {
+func (s *randomMergeScheduler) allowMerge(cluster sche.SchedulerCluster, region, target *core.RegionInfo) bool {
 	if !filter.IsRegionHealthy(region) || !filter.IsRegionHealthy(target) {
 		return false
 	}

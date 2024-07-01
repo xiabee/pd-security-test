@@ -18,8 +18,8 @@ import "github.com/tikv/pd/pkg/ratelimit"
 
 const (
 	defaultEnableAuditMiddleware         = true
-	defaultEnableRateLimitMiddleware     = true
-	defaultEnableGRPCRateLimitMiddleware = true
+	defaultEnableRateLimitMiddleware     = false
+	defaultEnableGRPCRateLimitMiddleware = false
 )
 
 // ServiceMiddlewareConfig is the configuration for PD Service middleware.
@@ -78,12 +78,7 @@ type RateLimitConfig struct {
 
 // Clone returns a cloned rate limit config.
 func (c *RateLimitConfig) Clone() *RateLimitConfig {
-	m := make(map[string]ratelimit.DimensionConfig, len(c.LimiterConfig))
-	for k, v := range c.LimiterConfig {
-		m[k] = v
-	}
 	cfg := *c
-	cfg.LimiterConfig = m
 	return &cfg
 }
 
@@ -97,11 +92,6 @@ type GRPCRateLimitConfig struct {
 
 // Clone returns a cloned rate limit config.
 func (c *GRPCRateLimitConfig) Clone() *GRPCRateLimitConfig {
-	m := make(map[string]ratelimit.DimensionConfig, len(c.LimiterConfig))
-	for k, v := range c.LimiterConfig {
-		m[k] = v
-	}
 	cfg := *c
-	cfg.LimiterConfig = m
 	return &cfg
 }

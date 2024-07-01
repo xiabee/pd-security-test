@@ -175,15 +175,15 @@ func MakeRegionBound(id uint32) *RegionBound {
 	}
 }
 
-// MakeKeyRanges encodes keyspace ID to correct LabelRule data.
-func MakeKeyRanges(id uint32) []any {
+// makeKeyRanges encodes keyspace ID to correct LabelRule data.
+func makeKeyRanges(id uint32) []interface{} {
 	regionBound := MakeRegionBound(id)
-	return []any{
-		map[string]any{
+	return []interface{}{
+		map[string]interface{}{
 			"start_key": hex.EncodeToString(regionBound.RawLeftBound),
 			"end_key":   hex.EncodeToString(regionBound.RawRightBound),
 		},
-		map[string]any{
+		map[string]interface{}{
 			"start_key": hex.EncodeToString(regionBound.TxnLeftBound),
 			"end_key":   hex.EncodeToString(regionBound.TxnRightBound),
 		},
@@ -207,7 +207,7 @@ func MakeLabelRule(id uint32) *labeler.LabelRule {
 			},
 		},
 		RuleType: labeler.KeyRange,
-		Data:     MakeKeyRanges(id),
+		Data:     makeKeyRanges(id),
 	}
 }
 
@@ -246,14 +246,14 @@ func (hp *indexedHeap) Swap(i, j int) {
 }
 
 // Implementing heap.Interface.
-func (hp *indexedHeap) Push(x any) {
+func (hp *indexedHeap) Push(x interface{}) {
 	item := x.(*endpoint.KeyspaceGroup)
 	hp.index[item.ID] = hp.Len()
 	hp.items = append(hp.items, item)
 }
 
 // Implementing heap.Interface.
-func (hp *indexedHeap) Pop() any {
+func (hp *indexedHeap) Pop() interface{} {
 	l := hp.Len()
 	item := hp.items[l-1]
 	hp.items = hp.items[:l-1]

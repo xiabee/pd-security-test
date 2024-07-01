@@ -31,7 +31,7 @@ import (
 )
 
 // DefaultCacheSize is the default length of waiting list.
-const DefaultCacheSize = 100000
+const DefaultCacheSize = 1000
 
 var denyCheckersByLabelerCounter = labeler.LabelerEventCounter.WithLabelValues("checkers", "deny")
 
@@ -219,11 +219,6 @@ func (c *Controller) PopOneSuspectKeyRange() ([2][]byte, bool) {
 // ClearSuspectKeyRanges clears the suspect keyRanges, only for unit test
 func (c *Controller) ClearSuspectKeyRanges() {
 	c.suspectKeyRanges.Clear()
-}
-
-// ClearSuspectRegions clears the suspect regions, only for unit test
-func (c *Controller) ClearSuspectRegions() {
-	c.suspectRegions.Clear()
 }
 
 // IsPendingRegion returns true if the given region is in the pending list.

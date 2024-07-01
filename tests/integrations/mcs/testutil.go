@@ -106,7 +106,7 @@ func WaitForMultiKeyspacesTSOAvailable(
 
 	clients := make([]pd.Client, 0, len(keyspaceIDs))
 	for _, keyspaceID := range keyspaceIDs {
-		cli := SetupClientWithKeyspaceID(ctx, re, keyspaceID, backendEndpoints, pd.WithForwardingOption(true))
+		cli := SetupClientWithKeyspaceID(ctx, re, keyspaceID, backendEndpoints)
 		re.NotNil(cli)
 		clients = append(clients, cli)
 

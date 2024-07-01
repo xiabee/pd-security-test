@@ -261,14 +261,14 @@ func (hp *indexedHeap) Swap(i, j int) {
 }
 
 // Implementing heap.Interface.
-func (hp *indexedHeap) Push(x any) {
+func (hp *indexedHeap) Push(x interface{}) {
 	item := x.(TopNItem)
 	hp.index[item.ID()] = hp.Len()
 	hp.items = append(hp.items, item)
 }
 
 // Implementing heap.Interface.
-func (hp *indexedHeap) Pop() any {
+func (hp *indexedHeap) Pop() interface{} {
 	l := hp.Len()
 	item := hp.items[l-1]
 	hp.items = hp.items[:l-1]

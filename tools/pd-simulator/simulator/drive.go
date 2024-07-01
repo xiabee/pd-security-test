@@ -16,24 +16,16 @@ package simulator
 
 import (
 	"context"
-	"net/http"
-	"net/http/pprof"
 	"path"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	pd "github.com/tikv/pd/client"
-	pdHttp "github.com/tikv/pd/client/http"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/cases"
-	"github.com/tikv/pd/tools/pd-simulator/simulator/config"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
 	"go.etcd.io/etcd/clientv3"
@@ -42,39 +34,38 @@ import (
 
 // Driver promotes the cluster status change.
 type Driver struct {
-	wg            sync.WaitGroup
-	pdAddr        string
-	statusAddress string
-	simCase       *cases.Case
-	tickCount     int64
-	eventRunner   *EventRunner
-	raftEngine    *RaftEngine
-	conn          *Connection
-	simConfig     *config.SimConfig
-	pdConfig      *config.PDConfig
+	wg          sync.WaitGroup
+	pdAddr      string
+	simCase     *cases.Case
+	client      Client
+	tickCount   int64
+	eventRunner *EventRunner
+	raftEngine  *RaftEngine
+	conn        *Connection
+	simConfig   *SimConfig
+	pdConfig    *PDConfig
 }
 
 // NewDriver returns a driver.
-func NewDriver(pdAddr, statusAddress, caseName string, simConfig *config.SimConfig) (*Driver, error) {
-	simCase := cases.NewCase(caseName, simConfig)
+func NewDriver(pdAddr string, caseName string, simConfig *SimConfig) (*Driver, error) {
+	simCase := cases.NewCase(caseName)
 	if simCase == nil {
 		return nil, errors.Errorf("failed to create case %s", caseName)
 	}
-	pdConfig := &config.PDConfig{}
+	pdConfig := &PDConfig{}
 	pdConfig.PlacementRules = simCase.Rules
 	pdConfig.LocationLabels = simCase.Labels
 	return &Driver{
-		pdAddr:        pdAddr,
-		statusAddress: statusAddress,
-		simCase:       simCase,
-		simConfig:     simConfig,
-		pdConfig:      pdConfig,
+		pdAddr:    pdAddr,
+		simCase:   simCase,
+		simConfig: simConfig,
+		pdConfig:  pdConfig,
 	}, nil
 }
 
 // Prepare initializes cluster information, bootstraps cluster and starts nodes.
 func (d *Driver) Prepare() error {
-	conn, err := NewConnection(d.simCase, d.simConfig)
+	conn, err := NewConnection(d.simCase, d.pdAddr, d.simConfig)
 	if err != nil {
 		return err
 	}
@@ -82,27 +73,19 @@ func (d *Driver) Prepare() error {
 
 	d.raftEngine = NewRaftEngine(d.simCase, d.conn, d.simConfig)
 	d.eventRunner = NewEventRunner(d.simCase.Events, d.raftEngine)
+
 	d.updateNodeAvailable()
 
-	if d.statusAddress != "" {
-		go d.runHTTPServer()
-	}
-
-	if err = d.allocID(); err != nil {
-		return err
-	}
-
-	return d.Start()
-}
-
-func (d *Driver) allocID() error {
 	// Bootstrap.
 	store, region, err := d.GetBootstrapInfo(d.raftEngine)
 	if err != nil {
 		return err
 	}
+	d.client = d.conn.Nodes[store.GetId()].client
 
-	leaderURL, pdCli, err := Bootstrap(context.Background(), d.pdAddr, store, region)
+	ctx, cancel := context.WithTimeout(context.Background(), pdTimeout)
+	err = d.client.Bootstrap(ctx, store, region)
+	cancel()
 	if err != nil {
 		simutil.Logger.Fatal("bootstrap error", zap.Error(err))
 	} else {
@@ -111,18 +94,19 @@ func (d *Driver) allocID() error {
 
 	// Setup alloc id.
 	// TODO: This is a hack way. Once we have reset alloc ID API, we need to replace it.
-	maxID := simutil.IDAllocator.GetID()
+	maxID := cases.IDAllocator.GetID()
 	requestTimeout := 10 * time.Second
 	etcdTimeout := 3 * time.Second
 	etcdClient, err := clientv3.New(clientv3.Config{
-		Endpoints:   []string{leaderURL},
+		Endpoints:   []string{d.pdAddr},
 		DialTimeout: etcdTimeout,
 	})
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	rootPath := path.Join("/pd", strconv.FormatUint(ClusterID, 10))
+	ctx, cancel = context.WithTimeout(context.Background(), requestTimeout)
+	clusterID := d.client.GetClusterID(ctx)
+	rootPath := path.Join("/pd", strconv.FormatUint(clusterID, 10))
 	allocIDPath := path.Join(rootPath, "alloc_id")
 	_, err = etcdClient.Put(ctx, allocIDPath, string(typeutil.Uint64ToBytes(maxID+1000)))
 	if err != nil {
@@ -132,34 +116,22 @@ func (d *Driver) allocID() error {
 	cancel()
 
 	for {
-		var resp *pdpb.AllocIDResponse
-		resp, err = pdCli.AllocID(context.Background(), &pdpb.AllocIDRequest{
-			Header: requestHeader(),
-		})
+		var id uint64
+		id, err = d.client.AllocID(context.Background())
 		if err != nil {
 			return errors.WithStack(err)
 		}
-		if resp.Id > maxID {
-			simutil.IDAllocator.ResetID()
+		if id > maxID {
+			cases.IDAllocator.ResetID()
 			break
 		}
 	}
-	return nil
-}
 
-func (d *Driver) updateNodesClient() error {
-	urls := strings.Split(d.pdAddr, ",")
-	ctx, cancel := context.WithCancel(context.Background())
-	sd = pd.NewDefaultPDServiceDiscovery(ctx, cancel, urls, nil)
-	if err := sd.Init(); err != nil {
+	err = d.Start()
+	if err != nil {
 		return err
 	}
-	// Init PD HTTP client.
-	PDHTTPClient = pdHttp.NewClientWithServiceDiscovery("pd-simulator", sd)
 
-	for _, node := range d.conn.Nodes {
-		node.client = NewRetryClient(node)
-	}
 	return nil
 }
 
@@ -193,18 +165,19 @@ func (d *Driver) Check() bool {
 
 // Start starts all nodes.
 func (d *Driver) Start() error {
-	if err := d.updateNodesClient(); err != nil {
-		return err
-	}
-
 	for _, n := range d.conn.Nodes {
 		err := n.Start()
 		if err != nil {
 			return err
 		}
 	}
+	d.ChangePDConfig()
+	return nil
+}
 
-	PutPDConfig(d.pdConfig)
+// ChangePDConfig changes pd config
+func (d *Driver) ChangePDConfig() error {
+	d.client.PutPDConfig(d.pdConfig)
 	return nil
 }
 
@@ -251,21 +224,4 @@ func (d *Driver) updateNodeAvailable() {
 			n.stats.StoreStats.Available = n.stats.StoreStats.Capacity - uint64(d.raftEngine.regionsInfo.GetStoreRegionSize(storeID))
 		}
 	}
-}
-
-func (d *Driver) runHTTPServer() {
-	http.Handle("/metrics", promhttp.Handler())
-	// profile API
-	http.HandleFunc("/pprof/profile", pprof.Profile)
-	http.HandleFunc("/pprof/trace", pprof.Trace)
-	http.HandleFunc("/pprof/symbol", pprof.Symbol)
-	http.Handle("/pprof/heap", pprof.Handler("heap"))
-	http.Handle("/pprof/mutex", pprof.Handler("mutex"))
-	http.Handle("/pprof/allocs", pprof.Handler("allocs"))
-	http.Handle("/pprof/block", pprof.Handler("block"))
-	http.Handle("/pprof/goroutine", pprof.Handler("goroutine"))
-	eventHandler := newEventHandler(d.eventRunner)
-	http.HandleFunc("/event", eventHandler.createEvent)
-	// nolint
-	http.ListenAndServe(d.statusAddress, nil)
 }

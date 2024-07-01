@@ -19,27 +19,25 @@ import (
 
 	"github.com/docker/go-units"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	pdHttp "github.com/tikv/pd/client/http"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/schedule/placement"
-	sc "github.com/tikv/pd/tools/pd-simulator/simulator/config"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
 	"go.uber.org/zap"
 )
 
-func newRule1(_ *sc.SimConfig) *Case {
+func newRule1() *Case {
 	var simCase Case
 
-	simCase.Rules = make([]*pdHttp.Rule, 0)
-	simCase.Rules = append(simCase.Rules, &pdHttp.Rule{
+	simCase.Rules = make([]*placement.Rule, 0)
+	simCase.Rules = append(simCase.Rules, &placement.Rule{
 		GroupID:     "test1",
 		ID:          "test1",
 		StartKeyHex: "",
 		EndKeyHex:   "",
-		Role:        pdHttp.Learner,
+		Role:        placement.Learner,
 		Count:       1,
-		LabelConstraints: []pdHttp.LabelConstraint{
+		LabelConstraints: []placement.LabelConstraint{
 			{
 				Key:    "region",
 				Op:     "in",
@@ -47,14 +45,14 @@ func newRule1(_ *sc.SimConfig) *Case {
 			},
 		},
 		LocationLabels: []string{"host"},
-	}, &pdHttp.Rule{
-		GroupID:     placement.DefaultGroupID,
-		ID:          placement.DefaultRuleID,
+	}, &placement.Rule{
+		GroupID:     "pd",
+		ID:          "default",
 		StartKeyHex: "",
 		EndKeyHex:   "",
-		Role:        pdHttp.Voter,
+		Role:        placement.Voter,
 		Count:       5,
-		LabelConstraints: []pdHttp.LabelConstraint{
+		LabelConstraints: []placement.LabelConstraint{
 			{
 				Key:    "region",
 				Op:     "in",
@@ -102,7 +100,7 @@ func newRule1(_ *sc.SimConfig) *Case {
 
 	storesLastUpdateTime := make([]int64, storeNum+1)
 	storeLastAvailable := make([]uint64, storeNum+1)
-	simCase.Checker = func(_ *core.RegionsInfo, stats []info.StoreStats) bool {
+	simCase.Checker = func(regions *core.RegionsInfo, stats []info.StoreStats) bool {
 		res := true
 		curTime := time.Now().Unix()
 		storesAvailable := make([]uint64, 0, storeNum+1)
@@ -128,19 +126,19 @@ func newRule1(_ *sc.SimConfig) *Case {
 	return &simCase
 }
 
-func newRule2(_ *sc.SimConfig) *Case {
+func newRule2() *Case {
 	var simCase Case
 
-	simCase.Rules = make([]*pdHttp.Rule, 0)
+	simCase.Rules = make([]*placement.Rule, 0)
 	simCase.Rules = append(simCase.Rules,
-		&pdHttp.Rule{
+		&placement.Rule{
 			GroupID:     "test1",
 			ID:          "test1",
 			StartKeyHex: "",
 			EndKeyHex:   "",
-			Role:        pdHttp.Leader,
+			Role:        placement.Leader,
 			Count:       1,
-			LabelConstraints: []pdHttp.LabelConstraint{
+			LabelConstraints: []placement.LabelConstraint{
 				{
 					Key:    "region",
 					Op:     "in",
@@ -181,7 +179,7 @@ func newRule2(_ *sc.SimConfig) *Case {
 
 	storesLastUpdateTime := make([]int64, storeNum+1)
 	storeLastAvailable := make([]uint64, storeNum+1)
-	simCase.Checker = func(_ *core.RegionsInfo, stats []info.StoreStats) bool {
+	simCase.Checker = func(regions *core.RegionsInfo, stats []info.StoreStats) bool {
 		res := true
 		curTime := time.Now().Unix()
 		storesAvailable := make([]uint64, 0, storeNum+1)

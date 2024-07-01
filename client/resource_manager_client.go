@@ -16,6 +16,7 @@ package pd
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
@@ -34,6 +35,10 @@ const (
 	modify                     actionType = 1
 	groupSettingsPathPrefix               = "resource_group/settings"
 	controllerConfigPathPrefix            = "resource_group/controller"
+	// errNotPrimary is returned when the requested server is not primary.
+	errNotPrimary = "not primary"
+	// errNotLeader is returned when the requested server is not pd leader.
+	errNotLeader = "not leader"
 )
 
 // GroupSettingsPathPrefixBytes is used to watch or get resource groups.
@@ -44,8 +49,8 @@ var ControllerConfigPathPrefixBytes = []byte(controllerConfigPathPrefix)
 
 // ResourceManagerClient manages resource group info and token request.
 type ResourceManagerClient interface {
-	ListResourceGroups(ctx context.Context, opts ...GetResourceGroupOption) ([]*rmpb.ResourceGroup, error)
-	GetResourceGroup(ctx context.Context, resourceGroupName string, opts ...GetResourceGroupOption) (*rmpb.ResourceGroup, error)
+	ListResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, error)
+	GetResourceGroup(ctx context.Context, resourceGroupName string) (*rmpb.ResourceGroup, error)
 	AddResourceGroup(ctx context.Context, metaGroup *rmpb.ResourceGroup) (string, error)
 	ModifyResourceGroup(ctx context.Context, metaGroup *rmpb.ResourceGroup) (string, error)
 	DeleteResourceGroup(ctx context.Context, resourceGroupName string) (string, error)
@@ -54,22 +59,9 @@ type ResourceManagerClient interface {
 	Watch(ctx context.Context, key []byte, opts ...OpOption) (chan []*meta_storagepb.Event, error)
 }
 
-// GetResourceGroupOp represents available options when getting resource group.
-type GetResourceGroupOp struct {
-	withRUStats bool
-}
-
-// GetResourceGroupOption configures GetResourceGroupOp.
-type GetResourceGroupOption func(*GetResourceGroupOp)
-
-// WithRUStats specifies to return resource group with ru statistics data.
-func WithRUStats(op *GetResourceGroupOp) {
-	op.withRUStats = true
-}
-
 // resourceManagerClient gets the ResourceManager client of current PD leader.
 func (c *client) resourceManagerClient() (rmpb.ResourceManagerClient, error) {
-	cc, err := c.pdSvcDiscovery.GetOrCreateGRPCConn(c.GetLeaderURL())
+	cc, err := c.pdSvcDiscovery.GetOrCreateGRPCConn(c.GetLeaderAddr())
 	if err != nil {
 		return nil, err
 	}
@@ -78,24 +70,18 @@ func (c *client) resourceManagerClient() (rmpb.ResourceManagerClient, error) {
 
 // gRPCErrorHandler is used to handle the gRPC error returned by the resource manager service.
 func (c *client) gRPCErrorHandler(err error) {
-	if errs.IsLeaderChange(err) {
+	if strings.Contains(err.Error(), errNotPrimary) || strings.Contains(err.Error(), errNotLeader) {
 		c.pdSvcDiscovery.ScheduleCheckMemberChanged()
 	}
 }
 
 // ListResourceGroups loads and returns all metadata of resource groups.
-func (c *client) ListResourceGroups(ctx context.Context, ops ...GetResourceGroupOption) ([]*rmpb.ResourceGroup, error) {
+func (c *client) ListResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, error) {
 	cc, err := c.resourceManagerClient()
 	if err != nil {
 		return nil, err
 	}
-	getOp := &GetResourceGroupOp{}
-	for _, op := range ops {
-		op(getOp)
-	}
-	req := &rmpb.ListResourceGroupsRequest{
-		WithRuStats: getOp.withRUStats,
-	}
+	req := &rmpb.ListResourceGroupsRequest{}
 	resp, err := cc.ListResourceGroups(ctx, req)
 	if err != nil {
 		c.gRPCErrorHandler(err)
@@ -108,18 +94,13 @@ func (c *client) ListResourceGroups(ctx context.Context, ops ...GetResourceGroup
 	return resp.GetGroups(), nil
 }
 
-func (c *client) GetResourceGroup(ctx context.Context, resourceGroupName string, ops ...GetResourceGroupOption) (*rmpb.ResourceGroup, error) {
+func (c *client) GetResourceGroup(ctx context.Context, resourceGroupName string) (*rmpb.ResourceGroup, error) {
 	cc, err := c.resourceManagerClient()
 	if err != nil {
 		return nil, err
 	}
-	getOp := &GetResourceGroupOp{}
-	for _, op := range ops {
-		op(getOp)
-	}
 	req := &rmpb.GetResourceGroupRequest{
 		ResourceGroupName: resourceGroupName,
-		WithRuStats:       getOp.withRUStats,
 	}
 	resp, err := cc.GetResourceGroup(ctx, req)
 	if err != nil {
@@ -319,9 +300,7 @@ func (c *client) handleResourceTokenDispatcher(dispatcherCtx context.Context, tb
 		// If the stream is nil or the leader has changed, try to reconnect.
 		if toReconnect {
 			connection.reset()
-			if err := c.tryResourceManagerConnect(dispatcherCtx, &connection); err != nil {
-				log.Error("[resource_manager] try to connect token leader failed", errs.ZapError(err))
-			}
+			c.tryResourceManagerConnect(dispatcherCtx, &connection)
 			log.Info("[resource_manager] token leader may change, try to reconnect the stream")
 			stream, streamCtx = connection.stream, connection.ctx
 		}

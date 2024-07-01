@@ -25,9 +25,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/tikv/pd/pkg/ratelimit"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/cases"
-	sc "github.com/tikv/pd/tools/pd-simulator/simulator/config"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
 	"go.uber.org/zap"
@@ -41,25 +39,24 @@ const (
 // Node simulates a TiKV.
 type Node struct {
 	*metapb.Store
-	syncutil.RWMutex
-	stats             *info.StoreStats
-	tick              uint64
-	wg                sync.WaitGroup
-	tasks             map[uint64]*Task
-	ctx               context.Context
-	cancel            context.CancelFunc
-	raftEngine        *RaftEngine
-	limiter           *ratelimit.RateLimiter
-	sizeMutex         syncutil.Mutex
-	hasExtraUsedSpace bool
-	snapStats         []*pdpb.SnapshotStat
-	// PD client
+	sync.RWMutex
+	stats                    *info.StoreStats
+	tick                     uint64
+	wg                       sync.WaitGroup
+	tasks                    map[uint64]*Task
 	client                   Client
 	receiveRegionHeartbeatCh <-chan *pdpb.RegionHeartbeatResponse
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	raftEngine               *RaftEngine
+	limiter                  *ratelimit.RateLimiter
+	sizeMutex                sync.Mutex
+	hasExtraUsedSpace        bool
+	snapStats                []*pdpb.SnapshotStat
 }
 
 // NewNode returns a Node.
-func NewNode(s *cases.Store, config *sc.SimConfig) (*Node, error) {
+func NewNode(s *cases.Store, pdAddr string, config *SimConfig) (*Node, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	store := &metapb.Store{
 		Id:      s.ID,
@@ -73,22 +70,42 @@ func NewNode(s *cases.Store, config *sc.SimConfig) (*Node, error) {
 			StoreId:   s.ID,
 			Capacity:  uint64(config.RaftStore.Capacity),
 			StartTime: uint32(time.Now().Unix()),
-			Available: uint64(config.RaftStore.Capacity),
 		},
 	}
+	tag := fmt.Sprintf("store %d", s.ID)
+	var (
+		client                   Client
+		receiveRegionHeartbeatCh <-chan *pdpb.RegionHeartbeatResponse
+		err                      error
+	)
 
-	ratio := config.Speed()
+	// Client should wait if PD server is not ready.
+	for i := 0; i < maxInitClusterRetries; i++ {
+		client, receiveRegionHeartbeatCh, err = NewClient(pdAddr, tag)
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	ratio := config.speed()
 	speed := config.StoreIOMBPerSecond * units.MiB * int64(ratio)
 	return &Node{
-		Store:             store,
-		stats:             stats,
-		ctx:               ctx,
-		cancel:            cancel,
-		tasks:             make(map[uint64]*Task),
-		limiter:           ratelimit.NewRateLimiter(float64(speed), int(speed)),
-		tick:              uint64(rand.Intn(storeHeartBeatPeriod)),
-		hasExtraUsedSpace: s.HasExtraUsedSpace,
-		snapStats:         make([]*pdpb.SnapshotStat, 0),
+		Store:                    store,
+		stats:                    stats,
+		client:                   client,
+		ctx:                      ctx,
+		cancel:                   cancel,
+		tasks:                    make(map[uint64]*Task),
+		receiveRegionHeartbeatCh: receiveRegionHeartbeatCh,
+		limiter:                  ratelimit.NewRateLimiter(float64(speed), int(speed)),
+		tick:                     uint64(rand.Intn(storeHeartBeatPeriod)),
+		hasExtraUsedSpace:        s.HasExtraUsedSpace,
+		snapStats:                make([]*pdpb.SnapshotStat, 0),
 	}, nil
 }
 
@@ -152,8 +169,6 @@ func (n *Node) stepTask() {
 	}
 }
 
-var schedulerCheck sync.Once
-
 func (n *Node) stepHeartBeat() {
 	config := n.raftEngine.storeConfig
 
@@ -164,7 +179,6 @@ func (n *Node) stepHeartBeat() {
 	period = uint64(config.RaftStore.RegionHeartBeatInterval.Duration / config.SimTickInterval.Duration)
 	if n.tick%period == 0 {
 		n.regionHeartBeat()
-		schedulerCheck.Do(func() { ChooseToHaltPDSchedule(false) })
 	}
 }
 
@@ -185,7 +199,7 @@ func (n *Node) storeHeartBeat() {
 	n.stats.SnapshotStats = stats
 	err := n.client.StoreHeartbeat(ctx, &n.stats.StoreStats)
 	if err != nil {
-		simutil.Logger.Info("report store heartbeat error",
+		simutil.Logger.Info("report heartbeat error",
 			zap.Uint64("node-id", n.GetId()),
 			zap.Error(err))
 	}
@@ -210,7 +224,7 @@ func (n *Node) regionHeartBeat() {
 			ctx, cancel := context.WithTimeout(n.ctx, pdTimeout)
 			err := n.client.RegionHeartbeat(ctx, region)
 			if err != nil {
-				simutil.Logger.Info("report region heartbeat error",
+				simutil.Logger.Info("report heartbeat error",
 					zap.Uint64("node-id", n.Id),
 					zap.Uint64("region-id", region.GetID()),
 					zap.Error(err))
@@ -227,7 +241,7 @@ func (n *Node) reportRegionChange() {
 		ctx, cancel := context.WithTimeout(n.ctx, pdTimeout)
 		err := n.client.RegionHeartbeat(ctx, region)
 		if err != nil {
-			simutil.Logger.Info("report region change heartbeat error",
+			simutil.Logger.Info("report heartbeat error",
 				zap.Uint64("node-id", n.Id),
 				zap.Uint64("region-id", region.GetID()),
 				zap.Error(err))

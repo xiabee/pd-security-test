@@ -169,7 +169,13 @@ func (se *StorageEndpoint) SaveServiceGCSafePoint(ssp *ServiceSafePoint) error {
 		return errors.New("TTL of gc_worker's service safe point must be infinity")
 	}
 
-	return se.saveJSON(gcSafePointServicePath(ssp.ServiceID), ssp)
+	key := gcSafePointServicePath(ssp.ServiceID)
+	value, err := json.Marshal(ssp)
+	if err != nil {
+		return err
+	}
+
+	return se.Save(key, string(value))
 }
 
 // RemoveServiceGCSafePoint removes a GC safepoint for the service

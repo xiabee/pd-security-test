@@ -189,13 +189,13 @@ func (m *Manager) Init(ctx context.Context) error {
 }
 
 // UpdateControllerConfigItem updates the controller config item.
-func (m *Manager) UpdateControllerConfigItem(key string, value any) error {
+func (m *Manager) UpdateControllerConfigItem(key string, value interface{}) error {
 	kp := strings.Split(key, ".")
 	if len(kp) == 0 {
 		return errors.Errorf("invalid key %s", key)
 	}
 	m.Lock()
-	var config any
+	var config interface{}
 	switch kp[0] {
 	case "request-unit":
 		config = &m.controllerConfig.RequestUnit
@@ -288,11 +288,11 @@ func (m *Manager) DeleteResourceGroup(name string) error {
 }
 
 // GetResourceGroup returns a copy of a resource group.
-func (m *Manager) GetResourceGroup(name string, withStats bool) *ResourceGroup {
+func (m *Manager) GetResourceGroup(name string) *ResourceGroup {
 	m.RLock()
 	defer m.RUnlock()
 	if group, ok := m.groups[name]; ok {
-		return group.Clone(withStats)
+		return group.Clone()
 	}
 	return nil
 }
@@ -308,11 +308,11 @@ func (m *Manager) GetMutableResourceGroup(name string) *ResourceGroup {
 }
 
 // GetResourceGroupList returns copies of resource group list.
-func (m *Manager) GetResourceGroupList(withStats bool) []*ResourceGroup {
+func (m *Manager) GetResourceGroupList() []*ResourceGroup {
 	m.RLock()
 	res := make([]*ResourceGroup, 0, len(m.groups))
 	for _, group := range m.groups {
-		res = append(res, group.Clone(withStats))
+		res = append(res, group.Clone())
 	}
 	m.RUnlock()
 	sort.Slice(res, func(i, j int) bool {
@@ -348,10 +348,12 @@ func (m *Manager) persistResourceGroupRunningState() {
 	for idx := 0; idx < len(keys); idx++ {
 		m.RLock()
 		group, ok := m.groups[keys[idx]]
-		if ok {
-			group.persistStates(m.storage)
-		}
 		m.RUnlock()
+		if ok {
+			m.Lock()
+			group.persistStates(m.storage)
+			m.Unlock()
+		}
 	}
 }
 
@@ -433,10 +435,6 @@ func (m *Manager) backgroundMetricsFlush(ctx context.Context) {
 
 			m.consumptionRecord[consumptionRecordKey{name: name, ruType: ruLabelType}] = time.Now()
 
-			// TODO: maybe we need to distinguish background ru.
-			if rg := m.GetMutableResourceGroup(name); rg != nil {
-				rg.UpdateRUConsumption(consumptionInfo.Consumption)
-			}
 		case <-cleanUpTicker.C:
 			// Clean up the metrics that have not been updated for a long time.
 			for r, lastTime := range m.consumptionRecord {

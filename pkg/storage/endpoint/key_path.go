@@ -31,7 +31,6 @@ const (
 	serviceMiddlewarePath     = "service_middleware"
 	schedulePath              = "schedule"
 	gcPath                    = "gc"
-	ruleCommonPath            = "rule"
 	rulesPath                 = "rules"
 	ruleGroupPath             = "rule_group"
 	regionLabelPath           = "region_label"
@@ -103,11 +102,6 @@ func RulesPathPrefix(clusterID uint64) string {
 	return path.Join(PDRootPath(clusterID), rulesPath)
 }
 
-// RuleCommonPathPrefix returns the path prefix to save the placement rule common config.
-func RuleCommonPathPrefix(clusterID uint64) string {
-	return path.Join(PDRootPath(clusterID), ruleCommonPath)
-}
-
 // RuleGroupPathPrefix returns the path prefix to save the placement rule groups.
 func RuleGroupPathPrefix(clusterID uint64) string {
 	return path.Join(PDRootPath(clusterID), ruleGroupPath)
@@ -149,23 +143,24 @@ func storeRegionWeightPath(storeID uint64) string {
 // RegionPath returns the region meta info key path with the given region ID.
 func RegionPath(regionID uint64) string {
 	var buf strings.Builder
-	buf.Grow(len(regionPathPrefix) + 1 + keyLen) // Preallocate memory
-
 	buf.WriteString(regionPathPrefix)
 	buf.WriteString("/")
 	s := strconv.FormatUint(regionID, 10)
-	b := make([]byte, keyLen)
-	copy(b, s)
-	if len(s) < keyLen {
+	if len(s) > keyLen {
+		s = s[len(s)-keyLen:]
+	} else {
+		b := make([]byte, keyLen)
 		diff := keyLen - len(s)
-		copy(b[diff:], s)
-		for i := 0; i < diff; i++ {
-			b[i] = '0'
+		for i := 0; i < keyLen; i++ {
+			if i < diff {
+				b[i] = 48
+			} else {
+				b[i] = s[i-diff]
+			}
 		}
-	} else if len(s) > keyLen {
-		copy(b, s[len(s)-keyLen:])
+		s = string(b)
 	}
-	buf.Write(b)
+	buf.WriteString(s)
 
 	return buf.String()
 }

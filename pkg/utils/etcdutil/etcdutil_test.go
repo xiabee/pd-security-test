@@ -154,11 +154,11 @@ func TestInitClusterID(t *testing.T) {
 	// Get any cluster key to parse the cluster ID.
 	resp, err := EtcdKVGet(client, pdClusterIDPath)
 	re.NoError(err)
-	re.Empty(resp.Kvs)
+	re.Equal(0, len(resp.Kvs))
 
 	clusterID, err := InitClusterID(client, pdClusterIDPath)
 	re.NoError(err)
-	re.NotZero(clusterID)
+	re.NotEqual(0, clusterID)
 
 	clusterID1, err := InitClusterID(client, pdClusterIDPath)
 	re.NoError(err)
@@ -172,7 +172,6 @@ func TestEtcdClientSync(t *testing.T) {
 	servers, client1, clean := NewTestEtcdCluster(t, 1)
 	defer clean()
 	etcd1, cfg1 := servers[0], servers[0].Config()
-	defer etcd1.Close()
 
 	// Add a new member.
 	etcd2 := MustAddEtcdMember(t, &cfg1, client1)
@@ -181,22 +180,10 @@ func TestEtcdClientSync(t *testing.T) {
 	// wait for etcd client sync endpoints
 	checkEtcdEndpointNum(re, client1, 2)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	// remove one member that is not the one we connected to.
-	resp, err := ListEtcdMembers(ctx, client1)
+	// Remove the first member and close the etcd1.
+	_, err := RemoveEtcdMember(client1, uint64(etcd1.Server.ID()))
 	re.NoError(err)
-
-	var memIDToRemove uint64
-	for _, m := range resp.Members {
-		if m.ID != resp.Header.MemberId {
-			memIDToRemove = m.ID
-			break
-		}
-	}
-
-	_, err = RemoveEtcdMember(client1, memIDToRemove)
-	re.NoError(err)
+	etcd1.Close()
 
 	// Check the client can get the new member with the new endpoints.
 	checkEtcdEndpointNum(re, client1, 1)
@@ -252,7 +239,7 @@ func TestRandomKillEtcd(t *testing.T) {
 
 	// Randomly kill an etcd server and restart it
 	cfgs := []embed.Config{etcds[0].Config(), etcds[1].Config(), etcds[2].Config()}
-	for i := 0; i < len(cfgs)*2; i++ {
+	for i := 0; i < 10; i++ {
 		killIndex := rand.Intn(len(etcds))
 		etcds[killIndex].Close()
 		checkEtcdEndpointNum(re, client1, 2)
@@ -298,11 +285,9 @@ func checkEtcdWithHangLeader(t *testing.T) error {
 	// Create a proxy to etcd1.
 	proxyAddr := tempurl.Alloc()
 	var enableDiscard atomic.Bool
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go proxyWithDiscard(ctx, re, cfg1.ListenClientUrls[0].String(), proxyAddr, &enableDiscard)
+	go proxyWithDiscard(re, cfg1.ListenClientUrls[0].String(), proxyAddr, &enableDiscard)
 
-	// Create an etcd client with etcd1 as endpoint.
+	// Create a etcd client with etcd1 as endpoint.
 	urls, err := types.NewURLs([]string{proxyAddr})
 	re.NoError(err)
 	client1, err := CreateEtcdClient(nil, urls)
@@ -313,56 +298,39 @@ func checkEtcdWithHangLeader(t *testing.T) error {
 	etcd2 := MustAddEtcdMember(t, &cfg1, client1)
 	defer etcd2.Close()
 	checkMembers(re, client1, []*embed.Etcd{etcd1, etcd2})
+	time.Sleep(1 * time.Second) // wait for etcd client sync endpoints
 
 	// Hang the etcd1 and wait for the client to connect to etcd2.
 	enableDiscard.Store(true)
-	time.Sleep(3 * time.Second)
+	time.Sleep(time.Second)
 	_, err = EtcdKVGet(client1, "test/key1")
 	return err
 }
 
-func proxyWithDiscard(ctx context.Context, re *require.Assertions, server, proxy string, enableDiscard *atomic.Bool) {
+func proxyWithDiscard(re *require.Assertions, server, proxy string, enableDiscard *atomic.Bool) {
 	server = strings.TrimPrefix(server, "http://")
 	proxy = strings.TrimPrefix(proxy, "http://")
 	l, err := net.Listen("tcp", proxy)
 	re.NoError(err)
-	defer l.Close()
 	for {
-		type accepted struct {
-			conn net.Conn
-			err  error
-		}
-		accept := make(chan accepted, 1)
-		go func() {
-			// closed by `l.Close()`
-			conn, err := l.Accept()
-			accept <- accepted{conn, err}
-		}()
-
-		select {
-		case <-ctx.Done():
-			return
-		case a := <-accept:
-			if a.err != nil {
-				return
-			}
-			go func(connect net.Conn) {
-				serverConnect, err := net.DialTimeout("tcp", server, 3*time.Second)
-				re.NoError(err)
-				pipe(ctx, connect, serverConnect, enableDiscard)
-			}(a.conn)
-		}
+		connect, err := l.Accept()
+		re.NoError(err)
+		go func(connect net.Conn) {
+			serverConnect, err := net.Dial("tcp", server)
+			re.NoError(err)
+			pipe(connect, serverConnect, enableDiscard)
+		}(connect)
 	}
 }
 
-func pipe(ctx context.Context, src net.Conn, dst net.Conn, enableDiscard *atomic.Bool) {
+func pipe(src net.Conn, dst net.Conn, enableDiscard *atomic.Bool) {
 	errChan := make(chan error, 1)
 	go func() {
-		err := ioCopy(ctx, src, dst, enableDiscard)
+		err := ioCopy(src, dst, enableDiscard)
 		errChan <- err
 	}()
 	go func() {
-		err := ioCopy(ctx, dst, src, enableDiscard)
+		err := ioCopy(dst, src, enableDiscard)
 		errChan <- err
 	}()
 	<-errChan
@@ -370,32 +338,28 @@ func pipe(ctx context.Context, src net.Conn, dst net.Conn, enableDiscard *atomic
 	src.Close()
 }
 
-func ioCopy(ctx context.Context, dst io.Writer, src io.Reader, enableDiscard *atomic.Bool) error {
+func ioCopy(dst io.Writer, src io.Reader, enableDiscard *atomic.Bool) (err error) {
 	buffer := make([]byte, 32*1024)
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-			if enableDiscard.Load() {
-				_, err := io.Copy(io.Discard, src)
-				return err
+		if enableDiscard.Load() {
+			io.Copy(io.Discard, src)
+		}
+		readNum, errRead := src.Read(buffer)
+		if readNum > 0 {
+			writeNum, errWrite := dst.Write(buffer[:readNum])
+			if errWrite != nil {
+				return errWrite
 			}
-			readNum, errRead := src.Read(buffer)
-			if readNum > 0 {
-				writeNum, errWrite := dst.Write(buffer[:readNum])
-				if errWrite != nil {
-					return errWrite
-				}
-				if readNum != writeNum {
-					return io.ErrShortWrite
-				}
-			}
-			if errRead != nil {
-				return errRead
+			if readNum != writeNum {
+				return io.ErrShortWrite
 			}
 		}
+		if errRead != nil {
+			err = errRead
+			break
+		}
 	}
+	return err
 }
 
 type loopWatcherTestSuite struct {
@@ -414,16 +378,15 @@ func TestLoopWatcherTestSuite(t *testing.T) {
 }
 
 func (suite *loopWatcherTestSuite) SetupSuite() {
-	re := suite.Require()
 	var err error
+	t := suite.T()
 	suite.ctx, suite.cancel = context.WithCancel(context.Background())
 	suite.cleans = make([]func(), 0)
 	// Start a etcd server and create a client with etcd1 as endpoint.
-	suite.config = NewTestSingleConfig()
-	suite.config.Dir = suite.T().TempDir()
-	suite.startEtcd(re)
+	suite.config = newTestSingleConfig(t)
+	suite.startEtcd()
 	suite.client, err = CreateEtcdClient(nil, suite.config.ListenClientUrls)
-	re.NoError(err)
+	suite.NoError(err)
 	suite.cleans = append(suite.cleans, func() {
 		suite.client.Close()
 	})
@@ -437,61 +400,37 @@ func (suite *loopWatcherTestSuite) TearDownSuite() {
 	}
 }
 
-func (suite *loopWatcherTestSuite) TestLoadNoExistedKey() {
-	re := suite.Require()
-	cache := make(map[string]struct{})
+func (suite *loopWatcherTestSuite) TestLoadWithoutKey() {
+	cache := struct {
+		syncutil.RWMutex
+		data map[string]struct{}
+	}{
+		data: make(map[string]struct{}),
+	}
 	watcher := NewLoopWatcher(
 		suite.ctx,
 		&suite.wg,
 		suite.client,
 		"test",
-		"TestLoadNoExistedKey",
-		func([]*clientv3.Event) error { return nil },
+		"TestLoadWithoutKey",
 		func(kv *mvccpb.KeyValue) error {
-			cache[string(kv.Key)] = struct{}{}
+			cache.Lock()
+			defer cache.Unlock()
+			cache.data[string(kv.Key)] = struct{}{}
 			return nil
 		},
-		func(*mvccpb.KeyValue) error { return nil },
-		func([]*clientv3.Event) error { return nil },
-		false, /* withPrefix */
+		func(kv *mvccpb.KeyValue) error { return nil },
+		func() error { return nil },
 	)
 	watcher.StartWatchLoop()
 	err := watcher.WaitLoad()
-	re.NoError(err) // although no key, watcher returns no error
-	re.Empty(cache)
-}
-
-func (suite *loopWatcherTestSuite) TestLoadWithLimitChange() {
-	re := suite.Require()
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/utils/etcdutil/meetEtcdError", `return()`))
-	cache := make(map[string]struct{})
-	testutil.GenerateTestDataConcurrently(int(maxLoadBatchSize)*2, func(i int) {
-		suite.put(re, fmt.Sprintf("TestLoadWithLimitChange%d", i), "")
-	})
-	watcher := NewLoopWatcher(
-		suite.ctx,
-		&suite.wg,
-		suite.client,
-		"test",
-		"TestLoadWithLimitChange",
-		func([]*clientv3.Event) error { return nil },
-		func(kv *mvccpb.KeyValue) error {
-			cache[string(kv.Key)] = struct{}{}
-			return nil
-		},
-		func(*mvccpb.KeyValue) error { return nil },
-		func([]*clientv3.Event) error { return nil },
-		true, /* withPrefix */
-	)
-	watcher.StartWatchLoop()
-	err := watcher.WaitLoad()
-	re.NoError(err)
-	re.Len(cache, int(maxLoadBatchSize)*2)
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/utils/etcdutil/meetEtcdError"))
+	suite.NoError(err) // although no key, watcher returns no error
+	cache.RLock()
+	defer cache.RUnlock()
+	suite.Len(cache.data, 0)
 }
 
 func (suite *loopWatcherTestSuite) TestCallBack() {
-	re := suite.Require()
 	cache := struct {
 		syncutil.RWMutex
 		data map[string]struct{}
@@ -505,7 +444,6 @@ func (suite *loopWatcherTestSuite) TestCallBack() {
 		suite.client,
 		"test",
 		"TestCallBack",
-		func([]*clientv3.Event) error { return nil },
 		func(kv *mvccpb.KeyValue) error {
 			result = append(result, string(kv.Key))
 			return nil
@@ -516,7 +454,7 @@ func (suite *loopWatcherTestSuite) TestCallBack() {
 			delete(cache.data, string(kv.Key))
 			return nil
 		},
-		func([]*clientv3.Event) error {
+		func() error {
 			cache.Lock()
 			defer cache.Unlock()
 			for _, r := range result {
@@ -525,114 +463,84 @@ func (suite *loopWatcherTestSuite) TestCallBack() {
 			result = result[:0]
 			return nil
 		},
-		true, /* withPrefix */
+		clientv3.WithPrefix(),
 	)
 	watcher.StartWatchLoop()
 	err := watcher.WaitLoad()
-	re.NoError(err)
+	suite.NoError(err)
 
 	// put 10 keys
 	for i := 0; i < 10; i++ {
-		suite.put(re, fmt.Sprintf("TestCallBack%d", i), "")
+		suite.put(fmt.Sprintf("TestCallBack%d", i), "")
 	}
 	time.Sleep(time.Second)
 	cache.RLock()
-	re.Len(cache.data, 10)
+	suite.Len(cache.data, 10)
 	cache.RUnlock()
 
 	// delete 10 keys
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("TestCallBack%d", i)
 		_, err = suite.client.Delete(suite.ctx, key)
-		re.NoError(err)
+		suite.NoError(err)
 	}
 	time.Sleep(time.Second)
 	cache.RLock()
-	re.Empty(cache.data)
+	suite.Empty(cache.data)
 	cache.RUnlock()
 }
 
 func (suite *loopWatcherTestSuite) TestWatcherLoadLimit() {
-	re := suite.Require()
 	for count := 1; count < 10; count++ {
 		for limit := 0; limit < 10; limit++ {
 			ctx, cancel := context.WithCancel(suite.ctx)
 			for i := 0; i < count; i++ {
-				suite.put(re, fmt.Sprintf("TestWatcherLoadLimit%d", i), "")
+				suite.put(fmt.Sprintf("TestWatcherLoadLimit%d", i), "")
 			}
-			cache := make([]string, 0)
+			cache := struct {
+				syncutil.RWMutex
+				data []string
+			}{
+				data: make([]string, 0),
+			}
 			watcher := NewLoopWatcher(
 				ctx,
 				&suite.wg,
 				suite.client,
 				"test",
 				"TestWatcherLoadLimit",
-				func([]*clientv3.Event) error { return nil },
 				func(kv *mvccpb.KeyValue) error {
-					cache = append(cache, string(kv.Key))
+					cache.Lock()
+					defer cache.Unlock()
+					cache.data = append(cache.data, string(kv.Key))
 					return nil
 				},
-				func(*mvccpb.KeyValue) error {
+				func(kv *mvccpb.KeyValue) error {
 					return nil
 				},
-				func([]*clientv3.Event) error {
+				func() error {
 					return nil
 				},
-				true, /* withPrefix */
+				clientv3.WithPrefix(),
 			)
-			watcher.SetLoadBatchSize(int64(limit))
 			watcher.StartWatchLoop()
 			err := watcher.WaitLoad()
-			re.NoError(err)
-			re.Len(cache, count)
+			suite.NoError(err)
+			cache.RLock()
+			suite.Len(cache.data, count)
+			cache.RUnlock()
 			cancel()
 		}
 	}
 }
 
-func (suite *loopWatcherTestSuite) TestWatcherLoadLargeKey() {
-	re := suite.Require()
-	// use default limit to test 65536 key in etcd
-	count := 65536
-	ctx, cancel := context.WithCancel(suite.ctx)
-	defer cancel()
-	testutil.GenerateTestDataConcurrently(count, func(i int) {
-		suite.put(re, fmt.Sprintf("TestWatcherLoadLargeKey/test-%d", i), "")
-	})
-	cache := make([]string, 0)
-	watcher := NewLoopWatcher(
-		ctx,
-		&suite.wg,
-		suite.client,
-		"test",
-		"TestWatcherLoadLargeKey",
-		func([]*clientv3.Event) error { return nil },
-		func(kv *mvccpb.KeyValue) error {
-			cache = append(cache, string(kv.Key))
-			return nil
-		},
-		func(*mvccpb.KeyValue) error {
-			return nil
-		},
-		func([]*clientv3.Event) error {
-			return nil
-		},
-		true, /* withPrefix */
-	)
-	watcher.StartWatchLoop()
-	err := watcher.WaitLoad()
-	re.NoError(err)
-	re.Len(cache, count)
-}
-
 func (suite *loopWatcherTestSuite) TestWatcherBreak() {
-	re := suite.Require()
 	cache := struct {
 		syncutil.RWMutex
 		data string
 	}{}
 	checkCache := func(expect string) {
-		testutil.Eventually(re, func() bool {
+		testutil.Eventually(suite.Require(), func() bool {
 			cache.RLock()
 			defer cache.RUnlock()
 			return cache.data == expect
@@ -645,7 +553,6 @@ func (suite *loopWatcherTestSuite) TestWatcherBreak() {
 		suite.client,
 		"test",
 		"TestWatcherBreak",
-		func([]*clientv3.Event) error { return nil },
 		func(kv *mvccpb.KeyValue) error {
 			if string(kv.Key) == "TestWatcherBreak" {
 				cache.Lock()
@@ -654,58 +561,57 @@ func (suite *loopWatcherTestSuite) TestWatcherBreak() {
 			}
 			return nil
 		},
-		func(*mvccpb.KeyValue) error { return nil },
-		func([]*clientv3.Event) error { return nil },
-		false, /* withPrefix */
+		func(kv *mvccpb.KeyValue) error { return nil },
+		func() error { return nil },
 	)
 	watcher.watchChangeRetryInterval = 100 * time.Millisecond
 	watcher.StartWatchLoop()
 	err := watcher.WaitLoad()
-	re.NoError(err)
+	suite.NoError(err)
 	checkCache("")
 
 	// we use close client and update client in failpoint to simulate the network error and recover
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/utils/etcdutil/updateClient", "return(true)"))
+	failpoint.Enable("github.com/tikv/pd/pkg/utils/etcdutil/updateClient", "return(true)")
 
 	// Case1: restart the etcd server
 	suite.etcd.Close()
-	suite.startEtcd(re)
-	suite.put(re, "TestWatcherBreak", "0")
+	suite.startEtcd()
+	suite.put("TestWatcherBreak", "0")
 	checkCache("0")
 	suite.etcd.Server.Stop()
 	time.Sleep(DefaultRequestTimeout)
 	suite.etcd.Close()
-	suite.startEtcd(re)
-	suite.put(re, "TestWatcherBreak", "1")
+	suite.startEtcd()
+	suite.put("TestWatcherBreak", "1")
 	checkCache("1")
 
 	// Case2: close the etcd client and put a new value after watcher restarts
 	suite.client.Close()
 	suite.client, err = CreateEtcdClient(nil, suite.config.ListenClientUrls)
-	re.NoError(err)
+	suite.NoError(err)
 	watcher.updateClientCh <- suite.client
-	suite.put(re, "TestWatcherBreak", "2")
+	suite.put("TestWatcherBreak", "2")
 	checkCache("2")
 
 	// Case3: close the etcd client and put a new value before watcher restarts
 	suite.client.Close()
 	suite.client, err = CreateEtcdClient(nil, suite.config.ListenClientUrls)
-	re.NoError(err)
-	suite.put(re, "TestWatcherBreak", "3")
+	suite.NoError(err)
+	suite.put("TestWatcherBreak", "3")
 	watcher.updateClientCh <- suite.client
 	checkCache("3")
 
 	// Case4: close the etcd client and put a new value with compact
 	suite.client.Close()
 	suite.client, err = CreateEtcdClient(nil, suite.config.ListenClientUrls)
-	re.NoError(err)
-	suite.put(re, "TestWatcherBreak", "4")
+	suite.NoError(err)
+	suite.put("TestWatcherBreak", "4")
 	resp, err := EtcdKVGet(suite.client, "TestWatcherBreak")
-	re.NoError(err)
+	suite.NoError(err)
 	revision := resp.Header.Revision
 	resp2, err := suite.etcd.Server.Compact(suite.ctx, &etcdserverpb.CompactionRequest{Revision: revision})
-	re.NoError(err)
-	re.Equal(revision, resp2.Header.Revision)
+	suite.NoError(err)
+	suite.Equal(revision, resp2.Header.Revision)
 	watcher.updateClientCh <- suite.client
 	checkCache("4")
 
@@ -716,11 +622,10 @@ func (suite *loopWatcherTestSuite) TestWatcherBreak() {
 	watcher.ForceLoad()
 	checkCache("4")
 
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/utils/etcdutil/updateClient"))
+	failpoint.Disable("github.com/tikv/pd/pkg/utils/etcdutil/updateClient")
 }
 
 func (suite *loopWatcherTestSuite) TestWatcherRequestProgress() {
-	re := suite.Require()
 	checkWatcherRequestProgress := func(injectWatchChanBlock bool) {
 		fname := testutil.InitTempFileLogger("debug")
 		defer os.RemoveAll(fname)
@@ -731,13 +636,10 @@ func (suite *loopWatcherTestSuite) TestWatcherRequestProgress() {
 			suite.client,
 			"test",
 			"TestWatcherChanBlock",
-			func([]*clientv3.Event) error { return nil },
-			func(*mvccpb.KeyValue) error { return nil },
-			func(*mvccpb.KeyValue) error { return nil },
-			func([]*clientv3.Event) error { return nil },
-			false, /* withPrefix */
+			func(kv *mvccpb.KeyValue) error { return nil },
+			func(kv *mvccpb.KeyValue) error { return nil },
+			func() error { return nil },
 		)
-		watcher.watchChTimeoutDuration = 2 * RequestProgressInterval
 
 		suite.wg.Add(1)
 		go func() {
@@ -747,14 +649,14 @@ func (suite *loopWatcherTestSuite) TestWatcherRequestProgress() {
 
 		if injectWatchChanBlock {
 			failpoint.Enable("github.com/tikv/pd/pkg/utils/etcdutil/watchChanBlock", "return(true)")
-			testutil.Eventually(re, func() bool {
+			testutil.Eventually(suite.Require(), func() bool {
 				b, _ := os.ReadFile(fname)
 				l := string(b)
 				return strings.Contains(l, "watch channel is blocked for a long time")
 			})
 			failpoint.Disable("github.com/tikv/pd/pkg/utils/etcdutil/watchChanBlock")
 		} else {
-			testutil.Eventually(re, func() bool {
+			testutil.Eventually(suite.Require(), func() bool {
 				b, _ := os.ReadFile(fname)
 				l := string(b)
 				return strings.Contains(l, "watcher receives progress notify in watch loop")
@@ -765,9 +667,9 @@ func (suite *loopWatcherTestSuite) TestWatcherRequestProgress() {
 	checkWatcherRequestProgress(true)
 }
 
-func (suite *loopWatcherTestSuite) startEtcd(re *require.Assertions) {
+func (suite *loopWatcherTestSuite) startEtcd() {
 	etcd1, err := embed.StartEtcd(suite.config)
-	re.NoError(err)
+	suite.NoError(err)
 	suite.etcd = etcd1
 	<-etcd1.Server.ReadyNotify()
 	suite.cleans = append(suite.cleans, func() {
@@ -775,11 +677,11 @@ func (suite *loopWatcherTestSuite) startEtcd(re *require.Assertions) {
 	})
 }
 
-func (suite *loopWatcherTestSuite) put(re *require.Assertions, key, value string) {
+func (suite *loopWatcherTestSuite) put(key, value string) {
 	kv := clientv3.NewKV(suite.client)
 	_, err := kv.Put(suite.ctx, key, value)
-	re.NoError(err)
+	suite.NoError(err)
 	resp, err := kv.Get(suite.ctx, key)
-	re.NoError(err)
-	re.Equal(value, string(resp.Kvs[0].Value))
+	suite.NoError(err)
+	suite.Equal(value, string(resp.Kvs[0].Value))
 }

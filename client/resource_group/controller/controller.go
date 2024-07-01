@@ -39,6 +39,8 @@ import (
 
 const (
 	controllerConfigPath    = "resource_group/controller"
+	maxRetry                = 10
+	retryInterval           = 50 * time.Millisecond
 	maxNotificationChanLen  = 200
 	needTokensAmplification = 1.1
 	trickleReserveDuration  = 1250 * time.Millisecond
@@ -73,15 +75,14 @@ type ResourceGroupKVInterceptor interface {
 
 // ResourceGroupProvider provides some api to interact with resource manager server.
 type ResourceGroupProvider interface {
-	GetResourceGroup(ctx context.Context, resourceGroupName string, opts ...pd.GetResourceGroupOption) (*rmpb.ResourceGroup, error)
-	ListResourceGroups(ctx context.Context, opts ...pd.GetResourceGroupOption) ([]*rmpb.ResourceGroup, error)
+	GetResourceGroup(ctx context.Context, resourceGroupName string) (*rmpb.ResourceGroup, error)
 	AddResourceGroup(ctx context.Context, metaGroup *rmpb.ResourceGroup) (string, error)
 	ModifyResourceGroup(ctx context.Context, metaGroup *rmpb.ResourceGroup) (string, error)
 	DeleteResourceGroup(ctx context.Context, resourceGroupName string) (string, error)
 	AcquireTokenBuckets(ctx context.Context, request *rmpb.TokenBucketsRequest) ([]*rmpb.TokenBucketResponse, error)
+	LoadResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, int64, error)
 
 	// meta storage client
-	LoadResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, int64, error)
 	Watch(ctx context.Context, key []byte, opts ...pd.OpOption) (chan []*meta_storagepb.Event, error)
 	Get(ctx context.Context, key []byte, opts ...pd.OpOption) (*meta_storagepb.GetResponse, error)
 }
@@ -100,27 +101,6 @@ func EnableSingleGroupByKeyspace() ResourceControlCreateOption {
 func WithMaxWaitDuration(d time.Duration) ResourceControlCreateOption {
 	return func(controller *ResourceGroupsController) {
 		controller.ruConfig.LTBMaxWaitDuration = d
-	}
-}
-
-// WithWaitRetryInterval is the option to set the retry interval when waiting for the token.
-func WithWaitRetryInterval(d time.Duration) ResourceControlCreateOption {
-	return func(controller *ResourceGroupsController) {
-		controller.ruConfig.WaitRetryInterval = d
-	}
-}
-
-// WithWaitRetryTimes is the option to set the times to retry when waiting for the token.
-func WithWaitRetryTimes(times int) ResourceControlCreateOption {
-	return func(controller *ResourceGroupsController) {
-		controller.ruConfig.WaitRetryTimes = times
-	}
-}
-
-// WithDegradedModeWaitDuration is the option to set the wait duration for degraded mode.
-func WithDegradedModeWaitDuration(d time.Duration) ResourceControlCreateOption {
-	return func(controller *ResourceGroupsController) {
-		controller.ruConfig.DegradedModeWaitDuration = d
 	}
 }
 
@@ -205,7 +185,7 @@ func loadServerConfig(ctx context.Context, provider ResourceGroupProvider) (*Con
 		log.Warn("[resource group controller] server does not save config, load config failed")
 		return DefaultConfig(), nil
 	}
-	config := DefaultConfig()
+	config := &Config{}
 	err = json.Unmarshal(kvs[0].GetValue(), config)
 	if err != nil {
 		return nil, err
@@ -386,7 +366,7 @@ func (c *ResourceGroupsController) Start(ctx context.Context) {
 				}
 				for _, item := range resp {
 					cfgRevision = item.Kv.ModRevision
-					config := DefaultConfig()
+					config := &Config{}
 					if err := json.Unmarshal(item.Kv.Value, config); err != nil {
 						continue
 					}
@@ -405,7 +385,8 @@ func (c *ResourceGroupsController) Start(ctx context.Context) {
 				}
 
 			case gc := <-c.tokenBucketUpdateChan:
-				go gc.handleTokenBucketUpdateEvent(c.loopCtx)
+				now := gc.run.now
+				go gc.handleTokenBucketUpdateEvent(c.loopCtx, now)
 			}
 		}
 	}()
@@ -479,7 +460,7 @@ func (c *ResourceGroupsController) cleanUpResourceGroup() {
 }
 
 func (c *ResourceGroupsController) executeOnAllGroups(f func(controller *groupCostController)) {
-	c.groupsController.Range(func(_, value any) bool {
+	c.groupsController.Range(func(name, value any) bool {
 		f(value.(*groupCostController))
 		return true
 	})
@@ -510,7 +491,7 @@ func (c *ResourceGroupsController) handleTokenBucketResponse(resp []*rmpb.TokenB
 
 func (c *ResourceGroupsController) collectTokenBucketRequests(ctx context.Context, source string, typ selectType) {
 	c.run.currentRequests = make([]*rmpb.TokenBucketRequest, 0)
-	c.groupsController.Range(func(_, value any) bool {
+	c.groupsController.Range(func(name, value any) bool {
 		gc := value.(*groupCostController)
 		request := gc.collectRequestAndConsumption(typ)
 		if request != nil {
@@ -879,7 +860,7 @@ func (gc *groupCostController) resetEmergencyTokenAcquisition() {
 	}
 }
 
-func (gc *groupCostController) handleTokenBucketUpdateEvent(ctx context.Context) {
+func (gc *groupCostController) handleTokenBucketUpdateEvent(ctx context.Context, now time.Time) {
 	switch gc.mode {
 	case rmpb.GroupMode_RawMode:
 		for _, counter := range gc.run.resourceTokens {
@@ -896,7 +877,7 @@ func (gc *groupCostController) handleTokenBucketUpdateEvent(ctx context.Context)
 				counter.notify.setupNotificationCh = nil
 				threshold := counter.notify.setupNotificationThreshold
 				counter.notify.mu.Unlock()
-				counter.limiter.SetupNotificationThreshold(threshold)
+				counter.limiter.SetupNotificationThreshold(now, threshold)
 			case <-ctx.Done():
 				return
 			}
@@ -917,7 +898,7 @@ func (gc *groupCostController) handleTokenBucketUpdateEvent(ctx context.Context)
 				counter.notify.setupNotificationCh = nil
 				threshold := counter.notify.setupNotificationThreshold
 				counter.notify.mu.Unlock()
-				counter.limiter.SetupNotificationThreshold(threshold)
+				counter.limiter.SetupNotificationThreshold(now, threshold)
 			case <-ctx.Done():
 				return
 			}
@@ -1241,7 +1222,7 @@ func (gc *groupCostController) onRequestWait(
 		var i int
 		var d time.Duration
 	retryLoop:
-		for i = 0; i < gc.mainCfg.WaitRetryTimes; i++ {
+		for i = 0; i < maxRetry; i++ {
 			switch gc.mode {
 			case rmpb.GroupMode_RawMode:
 				res := make([]*Reservation, 0, len(requestResourceLimitTypeList))
@@ -1265,8 +1246,8 @@ func (gc *groupCostController) onRequestWait(
 				}
 			}
 			gc.metrics.requestRetryCounter.Inc()
-			time.Sleep(gc.mainCfg.WaitRetryInterval)
-			waitDuration += gc.mainCfg.WaitRetryInterval
+			time.Sleep(retryInterval)
+			waitDuration += retryInterval
 		}
 		if err != nil {
 			if errs.ErrClientResourceGroupThrottled.Equal(err) {

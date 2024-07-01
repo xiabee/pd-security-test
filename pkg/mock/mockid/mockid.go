@@ -38,6 +38,6 @@ func (alloc *IDAllocator) SetBase(newBase uint64) error {
 }
 
 // Rebase implements the IDAllocator interface.
-func (*IDAllocator) Rebase() error {
+func (alloc *IDAllocator) Rebase() error {
 	return nil
 }

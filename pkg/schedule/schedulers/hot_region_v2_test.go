@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/pkg/schedule/operator"
+	"github.com/tikv/pd/pkg/statistics"
 	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/storage"
 	"github.com/tikv/pd/pkg/utils/operatorutil"
@@ -32,14 +33,17 @@ func TestHotWriteRegionScheduleWithRevertRegionsDimSecond(t *testing.T) {
 	re := require.New(t)
 	cancel, _, tc, oc := prepareSchedulersTest()
 	defer cancel()
+	statistics.Denoising = false
+	statisticsInterval = 0
+	statistics.HistorySampleDuration = 0
 	sche, err := CreateScheduler(utils.Write.String(), oc, storage.NewStorageWithMemoryBackend(), nil, nil)
 	re.NoError(err)
 	hb := sche.(*hotScheduler)
 	hb.conf.SetDstToleranceRatio(0.0)
 	hb.conf.SetSrcToleranceRatio(0.0)
 	hb.conf.SetRankFormulaVersion("v1")
-	hb.conf.SetHistorySampleDuration(0)
 	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.SetHotRegionCacheHitsThreshold(0)
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -92,14 +96,16 @@ func TestHotWriteRegionScheduleWithRevertRegionsDimFirst(t *testing.T) {
 	re := require.New(t)
 	cancel, _, tc, oc := prepareSchedulersTest()
 	defer cancel()
+	statistics.Denoising = false
+
 	sche, err := CreateScheduler(utils.Write.String(), oc, storage.NewStorageWithMemoryBackend(), nil, nil)
 	re.NoError(err)
 	hb := sche.(*hotScheduler)
 	hb.conf.SetDstToleranceRatio(0.0)
 	hb.conf.SetSrcToleranceRatio(0.0)
 	hb.conf.SetRankFormulaVersion("v1")
-	hb.conf.SetHistorySampleDuration(0)
 	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.SetHotRegionCacheHitsThreshold(0)
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -141,6 +147,10 @@ func TestHotWriteRegionScheduleWithRevertRegionsDimFirst(t *testing.T) {
 func TestHotWriteRegionScheduleWithRevertRegionsDimFirstOnly(t *testing.T) {
 	// This is a test that searchRevertRegions finds a solution of rank -2.
 	re := require.New(t)
+	statistics.Denoising = false
+	statisticsInterval = 0
+	statistics.HistorySampleDuration = 0
+
 	cancel, _, tc, oc := prepareSchedulersTest()
 	defer cancel()
 	sche, err := CreateScheduler(utils.Write.String(), oc, storage.NewStorageWithMemoryBackend(), nil, nil)
@@ -149,8 +159,8 @@ func TestHotWriteRegionScheduleWithRevertRegionsDimFirstOnly(t *testing.T) {
 	hb.conf.SetDstToleranceRatio(0.0)
 	hb.conf.SetSrcToleranceRatio(0.0)
 	hb.conf.SetRankFormulaVersion("v1")
-	hb.conf.SetHistorySampleDuration(0)
 	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.SetHotRegionCacheHitsThreshold(0)
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -201,6 +211,10 @@ func TestHotWriteRegionScheduleWithRevertRegionsDimFirstOnly(t *testing.T) {
 func TestHotReadRegionScheduleWithRevertRegionsDimSecond(t *testing.T) {
 	// This is a test that searchRevertRegions finds a solution of rank -1.
 	re := require.New(t)
+	statistics.Denoising = false
+	statisticsInterval = 0
+	statistics.HistorySampleDuration = 0
+
 	cancel, _, tc, oc := prepareSchedulersTest()
 	defer cancel()
 	sche, err := CreateScheduler(utils.Read.String(), oc, storage.NewStorageWithMemoryBackend(), nil, nil)
@@ -209,8 +223,8 @@ func TestHotReadRegionScheduleWithRevertRegionsDimSecond(t *testing.T) {
 	hb.conf.SetDstToleranceRatio(0.0)
 	hb.conf.SetSrcToleranceRatio(0.0)
 	hb.conf.SetRankFormulaVersion("v1")
-	hb.conf.SetHistorySampleDuration(0)
 	tc.SetClusterVersion(versioninfo.MinSupportedVersion(versioninfo.Version4_0))
+	tc.SetHotRegionCacheHitsThreshold(0)
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -260,6 +274,10 @@ func TestHotReadRegionScheduleWithRevertRegionsDimSecond(t *testing.T) {
 
 func TestSkipUniformStore(t *testing.T) {
 	re := require.New(t)
+	statistics.Denoising = false
+	statisticsInterval = 0
+	statistics.HistorySampleDuration = 0
+
 	cancel, _, tc, oc := prepareSchedulersTest()
 	defer cancel()
 	hb, err := CreateScheduler(utils.Read.String(), oc, storage.NewStorageWithMemoryBackend(), nil, nil)
@@ -268,7 +286,7 @@ func TestSkipUniformStore(t *testing.T) {
 	hb.(*hotScheduler).conf.SetDstToleranceRatio(1)
 	hb.(*hotScheduler).conf.SetRankFormulaVersion("v2")
 	hb.(*hotScheduler).conf.ReadPriorities = []string{utils.BytePriority, utils.KeyPriority}
-	hb.(*hotScheduler).conf.SetHistorySampleDuration(0)
+	tc.SetHotRegionCacheHitsThreshold(0)
 	tc.AddRegionStore(1, 20)
 	tc.AddRegionStore(2, 20)
 	tc.AddRegionStore(3, 20)
@@ -291,7 +309,7 @@ func TestSkipUniformStore(t *testing.T) {
 	// when there is uniform store filter, not schedule
 	stddevThreshold = 0.1
 	ops, _ = hb.Schedule(tc, false)
-	re.Empty(ops)
+	re.Len(ops, 0)
 	clearPendingInfluence(hb.(*hotScheduler))
 
 	// Case2: the first dim is enough uniform, we should schedule the second dim
@@ -362,7 +380,7 @@ func TestHotReadRegionScheduleWithSmallHotRegion(t *testing.T) {
 	ops = checkHotReadRegionScheduleWithSmallHotRegion(re, highLoad, lowLoad, emptyFunc)
 	re.Len(ops, 1)
 	ops = checkHotReadRegionScheduleWithSmallHotRegion(re, lowLoad, highLoad, emptyFunc)
-	re.Empty(ops)
+	re.Len(ops, 0)
 
 	// Case3: If there is larger hot region, we will schedule it.
 	hotRegionID := uint64(100)
@@ -400,7 +418,7 @@ func TestHotReadRegionScheduleWithSmallHotRegion(t *testing.T) {
 		tc.AddRegionWithReadInfo(hotRegionID+1, 2, bigHotRegionByte, 0, bigHotRegionQuery, utils.StoreHeartBeatReportInterval, []uint64{1, 3})
 		tc.AddRegionWithReadInfo(hotRegionID+1, 1, bigHotRegionByte, 0, bigHotRegionQuery, utils.StoreHeartBeatReportInterval, []uint64{2, 3})
 	})
-	re.Empty(ops)
+	re.Len(ops, 0)
 	topnPosition = origin
 
 	// Case7: If there are more than topnPosition hot regions, but them are pending,
@@ -412,7 +430,7 @@ func TestHotReadRegionScheduleWithSmallHotRegion(t *testing.T) {
 		tc.AddRegionWithReadInfo(hotRegionID+1, 1, bigHotRegionByte, 0, bigHotRegionQuery, utils.StoreHeartBeatReportInterval, []uint64{2, 3})
 		hb.regionPendings[hotRegionID+1] = &pendingInfluence{}
 	})
-	re.Empty(ops)
+	re.Len(ops, 0)
 	topnPosition = origin
 }
 
@@ -420,6 +438,7 @@ func checkHotReadRegionScheduleWithSmallHotRegion(re *require.Assertions, highLo
 	addOtherRegions func(*mockcluster.Cluster, *hotScheduler)) []*operator.Operator {
 	cancel, _, tc, oc := prepareSchedulersTest()
 	defer cancel()
+	statistics.Denoising = false
 	sche, err := CreateScheduler(utils.Read.String(), oc, storage.NewStorageWithMemoryBackend(), nil, nil)
 	re.NoError(err)
 	hb := sche.(*hotScheduler)
@@ -427,6 +446,7 @@ func checkHotReadRegionScheduleWithSmallHotRegion(re *require.Assertions, highLo
 	hb.conf.SetDstToleranceRatio(1)
 	hb.conf.SetRankFormulaVersion("v2")
 	hb.conf.ReadPriorities = []string{utils.QueryPriority, utils.BytePriority}
+	tc.SetHotRegionCacheHitsThreshold(0)
 	tc.AddRegionStore(1, 40)
 	tc.AddRegionStore(2, 10)
 	tc.AddRegionStore(3, 10)
@@ -449,6 +469,7 @@ func checkHotReadRegionScheduleWithSmallHotRegion(re *require.Assertions, highLo
 		}
 	}
 	addRegionInfo(tc, utils.Read, regions)
+	tc.SetHotRegionCacheHitsThreshold(1)
 	addOtherRegions(tc, hb)
 	ops, _ := hb.Schedule(tc, false)
 	return ops

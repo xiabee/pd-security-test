@@ -185,7 +185,7 @@ func scatterSpecial(re *require.Assertions, numOrdinaryStores, numSpecialStores,
 	}
 	tc.SetEnablePlacementRules(true)
 	re.NoError(tc.RuleManager.SetRule(&placement.Rule{
-		GroupID: placement.DefaultGroupID, ID: "learner", Role: placement.Learner, Count: 3,
+		GroupID: "pd", ID: "learner", Role: placement.Learner, Count: 3,
 		LabelConstraints: []placement.LabelConstraint{{Key: "engine", Op: placement.In, Values: []string{"tiflash"}}}}))
 
 	// Region 1 has the same distribution with the Region 2, which is used to test selectPeerToReplace.
@@ -216,7 +216,7 @@ func scatterSpecial(re *require.Assertions, numOrdinaryStores, numSpecialStores,
 		leaderStoreID := region.GetLeader().GetStoreId()
 		for _, peer := range region.GetPeers() {
 			storeID := peer.GetStoreId()
-			store := tc.GetStore(storeID)
+			store := tc.Stores.GetStore(storeID)
 			if store.GetLabelValue("engine") == "tiflash" {
 				countSpecialPeers[storeID]++
 			} else {
@@ -350,7 +350,7 @@ func TestSomeStoresFilteredScatterGroupInConcurrency(t *testing.T) {
 		// prevent store from being disconnected
 		tc.SetStoreLastHeartbeatInterval(i, 40*time.Minute)
 	}
-	re.True(tc.GetStore(uint64(6)).IsDisconnected())
+	re.Equal(tc.GetStore(uint64(6)).IsDisconnected(), true)
 	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 	var wg sync.WaitGroup
 	for j := 0; j < 10; j++ {
@@ -466,7 +466,7 @@ func TestScatterForManyRegion(t *testing.T) {
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/scatter/scatterHbStreamsDrain", `return(true)`))
 	scatterer.scatterRegions(regions, failures, group, 3, false)
 	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/schedule/scatter/scatterHbStreamsDrain"))
-	re.Empty(failures)
+	re.Len(failures, 0)
 }
 
 func TestScattersGroup(t *testing.T) {
@@ -575,8 +575,8 @@ func TestRegionHasLearner(t *testing.T) {
 		tc.AddLabelsStore(i, 0, map[string]string{"zone": "z2"})
 	}
 	tc.RuleManager.SetRule(&placement.Rule{
-		GroupID: placement.DefaultGroupID,
-		ID:      placement.DefaultRuleID,
+		GroupID: "pd",
+		ID:      "default",
 		Role:    placement.Voter,
 		Count:   3,
 		LabelConstraints: []placement.LabelConstraint{
@@ -588,7 +588,7 @@ func TestRegionHasLearner(t *testing.T) {
 		},
 	})
 	tc.RuleManager.SetRule(&placement.Rule{
-		GroupID: placement.DefaultGroupID,
+		GroupID: "pd",
 		ID:      "learner",
 		Role:    placement.Learner,
 		Count:   1,
@@ -679,7 +679,7 @@ func TestSelectedStoresTooFewPeers(t *testing.T) {
 		re.NoError(err)
 		re.False(isPeerCountChanged(op))
 		if op != nil {
-			re.Equal(group, op.GetAdditionalInfo("group"))
+			re.Equal(group, op.AdditionalInfos["group"])
 		}
 	}
 }

@@ -90,7 +90,7 @@ func (r *Rule) String() string {
 // Clone returns a copy of Rule.
 func (r *Rule) Clone() *Rule {
 	var clone Rule
-	_ = json.Unmarshal([]byte(r.String()), &clone)
+	json.Unmarshal([]byte(r.String()), &clone)
 	clone.StartKey = append(r.StartKey[:0:0], r.StartKey...)
 	clone.EndKey = append(r.EndKey[:0:0], r.EndKey...)
 	return &clone
@@ -137,15 +137,6 @@ func (g *RuleGroup) isDefault() bool {
 func (g *RuleGroup) String() string {
 	b, _ := json.Marshal(g)
 	return string(b)
-}
-
-// Clone returns a copy of RuleGroup.
-func (g *RuleGroup) Clone() *RuleGroup {
-	return &RuleGroup{
-		ID:       g.ID,
-		Index:    g.Index,
-		Override: g.Override,
-	}
 }
 
 // Rules are ordered by (GroupID, Index, ID).

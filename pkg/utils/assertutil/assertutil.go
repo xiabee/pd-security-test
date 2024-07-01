@@ -19,7 +19,7 @@ import "github.com/stretchr/testify/require"
 // Checker accepts the injection of check functions and context from test files.
 // Any check function should be set before usage unless the test will fail.
 type Checker struct {
-	IsNil   func(obtained any)
+	IsNil   func(obtained interface{})
 	FailNow func()
 }
 
@@ -34,14 +34,14 @@ func CheckerWithNilAssert(re *require.Assertions) *Checker {
 	checker.FailNow = func() {
 		re.FailNow("should be nil")
 	}
-	checker.IsNil = func(obtained any) {
+	checker.IsNil = func(obtained interface{}) {
 		re.Nil(obtained)
 	}
 	return checker
 }
 
 // AssertNil calls the injected IsNil assertion.
-func (c *Checker) AssertNil(obtained any) {
+func (c *Checker) AssertNil(obtained interface{}) {
 	if c.IsNil == nil {
 		c.FailNow()
 		return

@@ -34,7 +34,6 @@ const (
 	// TransferWitnessLeaderBatchSize is the number of operators to to transfer
 	// leaders by one scheduling
 	transferWitnessLeaderBatchSize = 3
-	// TODO: When we prepare to use Ranges, we will need to implement the ReloadConfig function for this scheduler.
 	// TransferWitnessLeaderRecvMaxRegionSize is the max number of region can receive
 	// TODO: make it a reasonable value
 	transferWitnessLeaderRecvMaxRegionSize = 10000
@@ -60,19 +59,19 @@ func newTransferWitnessLeaderScheduler(opController *operator.Controller) Schedu
 	}
 }
 
-func (*transferWitnessLeaderScheduler) GetName() string {
+func (s *transferWitnessLeaderScheduler) GetName() string {
 	return TransferWitnessLeaderName
 }
 
-func (*transferWitnessLeaderScheduler) GetType() string {
+func (s *transferWitnessLeaderScheduler) GetType() string {
 	return TransferWitnessLeaderType
 }
 
-func (*transferWitnessLeaderScheduler) IsScheduleAllowed(sche.SchedulerCluster) bool {
+func (s *transferWitnessLeaderScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
 	return true
 }
 
-func (s *transferWitnessLeaderScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) ([]*operator.Operator, []plan.Plan) {
+func (s *transferWitnessLeaderScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	transferWitnessLeaderCounter.Inc()
 	return s.scheduleTransferWitnessLeaderBatch(s.GetName(), s.GetType(), cluster, transferWitnessLeaderBatchSize), nil
 }
@@ -83,7 +82,7 @@ batchLoop:
 	for i := 0; i < batchSize; i++ {
 		select {
 		case region := <-s.regions:
-			op, err := scheduleTransferWitnessLeader(name, typ, cluster, region)
+			op, err := s.scheduleTransferWitnessLeader(name, typ, cluster, region)
 			if err != nil {
 				log.Debug("fail to create transfer leader operator", errs.ZapError(err))
 				continue
@@ -100,7 +99,7 @@ batchLoop:
 	return ops
 }
 
-func scheduleTransferWitnessLeader(name, typ string, cluster sche.SchedulerCluster, region *core.RegionInfo) (*operator.Operator, error) {
+func (s *transferWitnessLeaderScheduler) scheduleTransferWitnessLeader(name, typ string, cluster sche.SchedulerCluster, region *core.RegionInfo) (*operator.Operator, error) {
 	var filters []filter.Filter
 	unhealthyPeerStores := make(map[uint64]struct{})
 	for _, peer := range region.GetDownPeers() {
@@ -123,7 +122,7 @@ func scheduleTransferWitnessLeader(name, typ string, cluster sche.SchedulerClust
 	for _, t := range targets {
 		targetIDs = append(targetIDs, t.GetID())
 	}
-	return operator.CreateTransferLeaderOperator(typ, cluster, region, target.GetID(), targetIDs, operator.OpWitnessLeader)
+	return operator.CreateTransferLeaderOperator(typ, cluster, region, region.GetLeader().GetStoreId(), target.GetID(), targetIDs, operator.OpWitnessLeader)
 }
 
 // RecvRegionInfo receives a checked region from coordinator

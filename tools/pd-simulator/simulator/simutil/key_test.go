@@ -102,13 +102,13 @@ func TestGenerateKeys(t *testing.T) {
 
 	numKeys := 10
 	actual := GenerateKeys(numKeys)
-	re.Len(actual, numKeys)
+	re.Equal(len(actual), numKeys)
 
 	// make sure every key:
 	// i.  has length `keyLen`
 	// ii. has only characters from `keyChars`
 	for _, key := range actual {
-		re.Len(key, keyLen)
+		re.Equal(len(key), keyLen)
 		for _, char := range key {
 			re.True(strings.ContainsRune(keyChars, char))
 		}

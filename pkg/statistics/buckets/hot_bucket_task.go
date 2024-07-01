@@ -55,7 +55,7 @@ func NewCheckPeerTask(buckets *metapb.Buckets) flowBucketsItemTask {
 	}
 }
 
-func (*checkBucketsTask) taskType() flowItemTaskKind {
+func (t *checkBucketsTask) taskType() flowItemTaskKind {
 	return checkBucketsTaskType
 }
 
@@ -79,7 +79,7 @@ func NewCollectBucketStatsTask(minDegree int, regionIDs ...uint64) *collectBucke
 	}
 }
 
-func (*collectBucketStatsTask) taskType() flowItemTaskKind {
+func (t *collectBucketStatsTask) taskType() flowItemTaskKind {
 	return collectBucketStatsTaskType
 }
 

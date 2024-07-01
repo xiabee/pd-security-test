@@ -36,7 +36,6 @@ import (
 	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/mvcc/mvccpb"
 	"go.uber.org/zap"
@@ -182,6 +181,10 @@ func (m *GroupManager) allocNodesToAllKeyspaceGroups(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
+		countOfNodes := m.GetNodesCount()
+		if countOfNodes < utils.DefaultKeyspaceGroupReplicaCount {
+			continue
+		}
 		groups, err := m.store.LoadKeyspaceGroups(utils.DefaultKeyspaceGroupID, 0)
 		if err != nil {
 			log.Error("failed to load all keyspace groups", zap.Error(err))
@@ -191,31 +194,29 @@ func (m *GroupManager) allocNodesToAllKeyspaceGroups(ctx context.Context) {
 		if len(groups) == 0 {
 			continue
 		}
+		withError := false
 		for _, group := range groups {
-			existMembers := make(map[string]struct{})
-			for _, member := range group.Members {
-				if exist, addr := m.IsExistNode(member.Address); exist {
-					existMembers[addr] = struct{}{}
-				}
-			}
-			numExistMembers := len(existMembers)
-			if numExistMembers != 0 && numExistMembers == len(group.Members) && numExistMembers == m.GetNodesCount() {
-				continue
-			}
-			if numExistMembers < utils.DefaultKeyspaceGroupReplicaCount {
-				nodes, err := m.AllocNodesForKeyspaceGroup(group.ID, existMembers, utils.DefaultKeyspaceGroupReplicaCount)
+			if len(group.Members) < utils.DefaultKeyspaceGroupReplicaCount {
+				nodes, err := m.AllocNodesForKeyspaceGroup(group.ID, utils.DefaultKeyspaceGroupReplicaCount)
 				if err != nil {
+					withError = true
 					log.Error("failed to alloc nodes for keyspace group", zap.Uint32("keyspace-group-id", group.ID), zap.Error(err))
 					continue
 				}
 				group.Members = nodes
 			}
 		}
+		if !withError {
+			// all keyspace groups have equal or more than default replica count
+			log.Info("all keyspace groups have equal or more than default replica count, stop to alloc node")
+			return
+		}
 	}
 }
 
 func (m *GroupManager) initTSONodesWatcher(client *clientv3.Client, clusterID uint64) {
 	tsoServiceKey := discovery.TSOPath(clusterID)
+	tsoServiceEndKey := clientv3.GetPrefixRangeEnd(tsoServiceKey)
 
 	putFn := func(kv *mvccpb.KeyValue) error {
 		s := &discovery.ServiceRegistryEntry{}
@@ -244,11 +245,10 @@ func (m *GroupManager) initTSONodesWatcher(client *clientv3.Client, clusterID ui
 		client,
 		"tso-nodes-watcher",
 		tsoServiceKey,
-		func([]*clientv3.Event) error { return nil },
 		putFn,
 		deleteFn,
-		func([]*clientv3.Event) error { return nil },
-		true, /* withPrefix */
+		func() error { return nil },
+		clientv3.WithRange(tsoServiceEndKey),
 	)
 }
 
@@ -426,7 +426,7 @@ func (m *GroupManager) UpdateKeyspaceForGroup(userKind endpoint.UserKind, groupI
 	failpoint.Inject("externalAllocNode", func(val failpoint.Value) {
 		failpointOnce.Do(func() {
 			addrs := val.(string)
-			_ = m.SetNodesForKeyspaceGroup(utils.DefaultKeyspaceGroupID, strings.Split(addrs, ","))
+			m.SetNodesForKeyspaceGroup(utils.DefaultKeyspaceGroupID, strings.Split(addrs, ","))
 		})
 	})
 	m.Lock()
@@ -745,7 +745,7 @@ func (m *GroupManager) GetNodesCount() int {
 }
 
 // AllocNodesForKeyspaceGroup allocates nodes for the keyspace group.
-func (m *GroupManager) AllocNodesForKeyspaceGroup(id uint32, existMembers map[string]struct{}, desiredReplicaCount int) ([]endpoint.KeyspaceGroupMember, error) {
+func (m *GroupManager) AllocNodesForKeyspaceGroup(id uint32, desiredReplicaCount int) ([]endpoint.KeyspaceGroupMember, error) {
 	m.Lock()
 	defer m.Unlock()
 	ctx, cancel := context.WithTimeout(m.ctx, allocNodesTimeout)
@@ -770,34 +770,32 @@ func (m *GroupManager) AllocNodesForKeyspaceGroup(id uint32, existMembers map[st
 		if kg.IsMerging() {
 			return ErrKeyspaceGroupInMerging(id)
 		}
-
-		for addr := range existMembers {
-			nodes = append(nodes, endpoint.KeyspaceGroupMember{
-				Address:  addr,
-				Priority: utils.DefaultKeyspaceGroupReplicaPriority,
-			})
+		exists := make(map[string]struct{})
+		for _, member := range kg.Members {
+			exists[member.Address] = struct{}{}
+			nodes = append(nodes, member)
 		}
-
-		for len(existMembers) < desiredReplicaCount {
+		if len(exists) >= desiredReplicaCount {
+			return nil
+		}
+		for len(exists) < desiredReplicaCount {
 			select {
 			case <-ctx.Done():
 				return nil
 			case <-ticker.C:
 			}
-			if m.GetNodesCount() == 0 { // double check
+			countOfNodes := m.GetNodesCount()
+			if countOfNodes < desiredReplicaCount || countOfNodes == 0 { // double check
 				return ErrNoAvailableNode
-			}
-			if len(existMembers) == m.GetNodesCount() {
-				break
 			}
 			addr := m.nodesBalancer.Next()
 			if addr == "" {
 				return ErrNoAvailableNode
 			}
-			if _, ok := existMembers[addr]; ok {
+			if _, ok := exists[addr]; ok {
 				continue
 			}
-			existMembers[addr] = struct{}{}
+			exists[addr] = struct{}{}
 			nodes = append(nodes, endpoint.KeyspaceGroupMember{
 				Address:  addr,
 				Priority: utils.DefaultKeyspaceGroupReplicaPriority,
@@ -876,7 +874,7 @@ func (m *GroupManager) SetPriorityForKeyspaceGroup(id uint32, node string, prior
 		inKeyspaceGroup := false
 		members := make([]endpoint.KeyspaceGroupMember, 0, len(kg.Members))
 		for _, member := range kg.Members {
-			if member.CompareAddress(node) {
+			if member.Address == node {
 				inKeyspaceGroup = true
 				member.Priority = priority
 			}
@@ -896,14 +894,14 @@ func (m *GroupManager) SetPriorityForKeyspaceGroup(id uint32, node string, prior
 }
 
 // IsExistNode checks if the node exists.
-func (m *GroupManager) IsExistNode(addr string) (bool, string) {
+func (m *GroupManager) IsExistNode(addr string) bool {
 	nodes := m.nodesBalancer.GetAll()
 	for _, node := range nodes {
-		if typeutil.EqualBaseURLs(node, addr) {
-			return true, node
+		if node == addr {
+			return true
 		}
 	}
-	return false, ""
+	return false
 }
 
 // MergeKeyspaceGroups merges the keyspace group in the list into the target keyspace group.
@@ -916,7 +914,7 @@ func (m *GroupManager) MergeKeyspaceGroups(mergeTargetID uint32, mergeList []uin
 	//   - Load and delete the keyspace groups in the merge list.
 	//   - Load and update the target keyspace group.
 	// So we pre-check the number of operations to avoid exceeding the maximum number of etcd transaction.
-	if (mergeListNum+1)*2 > etcdutil.MaxEtcdTxnOps {
+	if (mergeListNum+1)*2 > MaxEtcdTxnOps {
 		return ErrExceedMaxEtcdTxnOps
 	}
 	if slice.Contains(mergeList, utils.DefaultKeyspaceGroupID) {
@@ -1063,7 +1061,7 @@ func (m *GroupManager) MergeAllIntoDefaultKeyspaceGroup() error {
 			continue
 		}
 		var (
-			maxBatchSize  = etcdutil.MaxEtcdTxnOps/2 - 1
+			maxBatchSize  = MaxEtcdTxnOps/2 - 1
 			groupsToMerge = make([]uint32, 0, maxBatchSize)
 		)
 		for idx, group := range groups.GetAll() {

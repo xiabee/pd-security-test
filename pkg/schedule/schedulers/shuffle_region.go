@@ -68,11 +68,11 @@ func (s *shuffleRegionScheduler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	s.conf.ServeHTTP(w, r)
 }
 
-func (*shuffleRegionScheduler) GetName() string {
+func (s *shuffleRegionScheduler) GetName() string {
 	return ShuffleRegionName
 }
 
-func (*shuffleRegionScheduler) GetType() string {
+func (s *shuffleRegionScheduler) GetType() string {
 	return ShuffleRegionType
 }
 
@@ -107,7 +107,7 @@ func (s *shuffleRegionScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster
 	return allowed
 }
 
-func (s *shuffleRegionScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) ([]*operator.Operator, []plan.Plan) {
+func (s *shuffleRegionScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	shuffleRegionCounter.Inc()
 	region, oldPeer := s.scheduleRemovePeer(cluster)
 	if region == nil {
@@ -139,19 +139,18 @@ func (s *shuffleRegionScheduler) scheduleRemovePeer(cluster sche.SchedulerCluste
 	pendingFilter := filter.NewRegionPendingFilter()
 	downFilter := filter.NewRegionDownFilter()
 	replicaFilter := filter.NewRegionReplicatedFilter(cluster)
-	ranges := s.conf.GetRanges()
 	for _, source := range candidates.Stores {
 		var region *core.RegionInfo
 		if s.conf.IsRoleAllow(roleFollower) {
-			region = filter.SelectOneRegion(cluster.RandFollowerRegions(source.GetID(), ranges), nil,
+			region = filter.SelectOneRegion(cluster.RandFollowerRegions(source.GetID(), s.conf.Ranges), nil,
 				pendingFilter, downFilter, replicaFilter)
 		}
 		if region == nil && s.conf.IsRoleAllow(roleLeader) {
-			region = filter.SelectOneRegion(cluster.RandLeaderRegions(source.GetID(), ranges), nil,
+			region = filter.SelectOneRegion(cluster.RandLeaderRegions(source.GetID(), s.conf.Ranges), nil,
 				pendingFilter, downFilter, replicaFilter)
 		}
 		if region == nil && s.conf.IsRoleAllow(roleLearner) {
-			region = filter.SelectOneRegion(cluster.RandLearnerRegions(source.GetID(), ranges), nil,
+			region = filter.SelectOneRegion(cluster.RandLearnerRegions(source.GetID(), s.conf.Ranges), nil,
 				pendingFilter, downFilter, replicaFilter)
 		}
 		if region != nil {

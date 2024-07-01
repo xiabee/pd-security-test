@@ -83,7 +83,7 @@ func setupServer() (*httptest.Server, *config.Config) {
 		},
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		b, err := json.Marshal(serverConfig)
 		if err != nil {
 			res.WriteHeader(http.StatusInternalServerError)
@@ -98,8 +98,7 @@ func setupServer() (*httptest.Server, *config.Config) {
 	return server, serverConfig
 }
 
-func (s *backupTestSuite) BeforeTest(string, string) {
-	re := s.Require()
+func (s *backupTestSuite) BeforeTest(suiteName, testName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 
@@ -107,31 +106,30 @@ func (s *backupTestSuite) BeforeTest(string, string) {
 		ctx,
 		pdClusterIDPath,
 		string(typeutil.Uint64ToBytes(clusterID)))
-	re.NoError(err)
+	s.NoError(err)
 
 	var (
 		rootPath               = path.Join(pdRootPath, strconv.FormatUint(clusterID, 10))
 		allocTimestampMaxBytes = typeutil.Uint64ToBytes(allocTimestampMax)
 	)
 	_, err = s.etcdClient.Put(ctx, endpoint.TimestampPath(rootPath), string(allocTimestampMaxBytes))
-	re.NoError(err)
+	s.NoError(err)
 
 	var (
 		allocIDPath     = path.Join(rootPath, "alloc_id")
 		allocIDMaxBytes = typeutil.Uint64ToBytes(allocIDMax)
 	)
 	_, err = s.etcdClient.Put(ctx, allocIDPath, string(allocIDMaxBytes))
-	re.NoError(err)
+	s.NoError(err)
 }
 
-func (s *backupTestSuite) AfterTest(string, string) {
+func (s *backupTestSuite) AfterTest(suiteName, testName string) {
 	s.etcd.Close()
 }
 
 func (s *backupTestSuite) TestGetBackupInfo() {
-	re := s.Require()
 	actual, err := GetBackupInfo(s.etcdClient, s.server.URL)
-	re.NoError(err)
+	s.NoError(err)
 
 	expected := &BackupInfo{
 		ClusterID:         clusterID,
@@ -139,22 +137,22 @@ func (s *backupTestSuite) TestGetBackupInfo() {
 		AllocTimestampMax: allocTimestampMax,
 		Config:            s.serverConfig,
 	}
-	re.Equal(expected, actual)
+	s.Equal(expected, actual)
 
 	tmpFile, err := os.CreateTemp(os.TempDir(), "pd_backup_info_test.json")
-	re.NoError(err)
+	s.NoError(err)
 	defer os.RemoveAll(tmpFile.Name())
 
-	re.NoError(OutputToFile(actual, tmpFile))
+	s.NoError(OutputToFile(actual, tmpFile))
 	_, err = tmpFile.Seek(0, 0)
-	re.NoError(err)
+	s.NoError(err)
 
 	b, err := io.ReadAll(tmpFile)
-	re.NoError(err)
+	s.NoError(err)
 
 	var restored BackupInfo
 	err = json.Unmarshal(b, &restored)
-	re.NoError(err)
+	s.NoError(err)
 
-	re.Equal(expected, &restored)
+	s.Equal(expected, &restored)
 }

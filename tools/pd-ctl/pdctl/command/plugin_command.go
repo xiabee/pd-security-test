@@ -71,7 +71,7 @@ func sendPluginCommand(cmd *cobra.Command, action string, args []string) {
 		cmd.Println(cmd.Usage())
 		return
 	}
-	data := map[string]any{
+	data := map[string]interface{}{
 		"plugin-path": args[0],
 	}
 	reqData, err := json.Marshal(data)

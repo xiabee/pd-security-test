@@ -147,7 +147,7 @@ func (s *storeStatistics) Observe(store *core.StoreInfo) {
 	}
 }
 
-func ObserveHotStat(store *core.StoreInfo, stats *StoresStats) {
+func (s *storeStatistics) ObserveHotStat(store *core.StoreInfo, stats *StoresStats) {
 	// Store flows.
 	storeAddress := store.GetAddress()
 	id := strconv.FormatUint(store.GetID(), 10)
@@ -309,6 +309,10 @@ func (m *storeStatisticsMap) Observe(store *core.StoreInfo) {
 	m.stats.Observe(store)
 }
 
+func (m *storeStatisticsMap) ObserveHotStat(store *core.StoreInfo, stats *StoresStats) {
+	m.stats.ObserveHotStat(store, stats)
+}
+
 func (m *storeStatisticsMap) Collect() {
 	m.stats.Collect()
 }
@@ -318,7 +322,4 @@ func Reset() {
 	storeStatusGauge.Reset()
 	clusterStatusGauge.Reset()
 	placementStatusGauge.Reset()
-	ResetRegionStatsMetrics()
-	ResetLabelStatsMetrics()
-	ResetHotCacheStatusMetrics()
 }

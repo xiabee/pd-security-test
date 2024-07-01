@@ -28,30 +28,18 @@ type Cluster interface {
 	GetLabelStats() *statistics.LabelStatistics
 	GetCoordinator() *schedule.Coordinator
 	GetRuleManager() *placement.RuleManager
-	GetBasicCluster() *core.BasicCluster
 }
 
 // HandleStatsAsync handles the flow asynchronously.
 func HandleStatsAsync(c Cluster, region *core.RegionInfo) {
-	checkWritePeerTask := func(cache *statistics.HotPeerCache) {
-		reportInterval := region.GetInterval()
-		interval := reportInterval.GetEndTimestamp() - reportInterval.GetStartTimestamp()
-		stats := cache.CheckPeerFlow(region, region.GetPeers(), region.GetWriteLoads(), interval)
-		for _, stat := range stats {
-			cache.UpdateStat(stat)
-		}
+	c.GetHotStat().CheckWriteAsync(statistics.NewCheckExpiredItemTask(region))
+	c.GetHotStat().CheckReadAsync(statistics.NewCheckExpiredItemTask(region))
+	reportInterval := region.GetInterval()
+	interval := reportInterval.GetEndTimestamp() - reportInterval.GetStartTimestamp()
+	for _, peer := range region.GetPeers() {
+		peerInfo := core.NewPeerInfo(peer, region.GetWriteLoads(), interval)
+		c.GetHotStat().CheckWriteAsync(statistics.NewCheckPeerTask(peerInfo, region))
 	}
-
-	checkExpiredTask := func(cache *statistics.HotPeerCache) {
-		expiredStats := cache.CollectExpiredItems(region)
-		for _, stat := range expiredStats {
-			cache.UpdateStat(stat)
-		}
-	}
-
-	c.GetHotStat().CheckWriteAsync(checkExpiredTask)
-	c.GetHotStat().CheckReadAsync(checkExpiredTask)
-	c.GetHotStat().CheckWriteAsync(checkWritePeerTask)
 	c.GetCoordinator().GetSchedulersController().CheckTransferWitnessLeader(region)
 }
 
@@ -67,17 +55,8 @@ func HandleOverlaps(c Cluster, overlaps []*core.RegionInfo) {
 }
 
 // Collect collects the cluster information.
-func Collect(c Cluster, region *core.RegionInfo, hasRegionStats bool) {
+func Collect(c Cluster, region *core.RegionInfo, stores []*core.StoreInfo, hasRegionStats bool) {
 	if hasRegionStats {
-		// get region again from root tree. make sure the observed region is the latest.
-		bc := c.GetBasicCluster()
-		if bc == nil {
-			return
-		}
-		region = bc.GetRegion(region.GetID())
-		if region == nil {
-			return
-		}
-		c.GetRegionStats().Observe(region, c.GetBasicCluster().GetRegionStores(region))
+		c.GetRegionStats().Observe(region, stores)
 	}
 }

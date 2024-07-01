@@ -76,7 +76,7 @@ func NewReplicaChecker(cluster sche.CheckerCluster, conf config.CheckerConfigPro
 }
 
 // GetType return ReplicaChecker's type
-func (*ReplicaChecker) GetType() string {
+func (r *ReplicaChecker) GetType() string {
 	return replicaCheckerName
 }
 

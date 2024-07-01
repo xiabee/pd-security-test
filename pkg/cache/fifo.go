@@ -40,7 +40,7 @@ func NewFIFO(maxCount int) *FIFO {
 }
 
 // Put puts an item into cache.
-func (c *FIFO) Put(key uint64, value any) {
+func (c *FIFO) Put(key uint64, value interface{}) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -89,13 +89,13 @@ func (c *FIFO) FromElems(key uint64) []*Item {
 	return elems
 }
 
-// FromLastSameElems returns continuous items that have the same comparable attribute with the last one.
-func (c *FIFO) FromLastSameElems(checkFunc func(any) (bool, string)) []*Item {
+// FromLastSameElems returns continuous items that have the same comparable attribute with the the lastest one.
+func (c *FIFO) FromLastSameElems(checkFunc func(interface{}) (bool, string)) []*Item {
 	c.RLock()
 	defer c.RUnlock()
 
 	elems := make([]*Item, 0, c.ll.Len())
-	var lastItem any
+	var lastItem interface{}
 	for ele := c.ll.Front(); ele != nil; ele = ele.Next() {
 		kv := ele.Value.(*Item)
 		if lastItem == nil {

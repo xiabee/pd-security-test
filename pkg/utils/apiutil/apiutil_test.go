@@ -26,6 +26,7 @@ import (
 )
 
 func TestJsonRespondErrorOk(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	rd := render.New(render.Options{
 		IndentJSON: true,
@@ -44,6 +45,7 @@ func TestJsonRespondErrorOk(t *testing.T) {
 }
 
 func TestJsonRespondErrorBadInput(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	rd := render.New(render.Options{
 		IndentJSON: true,
@@ -69,6 +71,7 @@ func TestJsonRespondErrorBadInput(t *testing.T) {
 }
 
 func TestGetIPPortFromHTTPRequest(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 
 	testCases := []struct {
@@ -98,7 +101,7 @@ func TestGetIPPortFromHTTPRequest(t *testing.T) {
 			ip:   "127.0.0.1",
 			port: "5299",
 		},
-		// IPv4 "X-Real-Ip" with port
+		// IPv4 "X-Real-IP" with port
 		{
 			r: &http.Request{
 				Header: map[string][]string{
@@ -108,7 +111,7 @@ func TestGetIPPortFromHTTPRequest(t *testing.T) {
 			ip:   "127.0.0.1",
 			port: "5299",
 		},
-		// IPv4 "X-Real-Ip" without port
+		// IPv4 "X-Real-IP" without port
 		{
 			r: &http.Request{
 				Header: map[string][]string{
@@ -155,7 +158,7 @@ func TestGetIPPortFromHTTPRequest(t *testing.T) {
 			ip:   "::1",
 			port: "",
 		},
-		// IPv6 "X-Real-Ip" with port
+		// IPv6 "X-Real-IP" with port
 		{
 			r: &http.Request{
 				Header: map[string][]string{
@@ -165,7 +168,7 @@ func TestGetIPPortFromHTTPRequest(t *testing.T) {
 			ip:   "::1",
 			port: "5299",
 		},
-		// IPv6 "X-Real-Ip" without port
+		// IPv6 "X-Real-IP" without port
 		{
 			r: &http.Request{
 				Header: map[string][]string{
@@ -203,40 +206,4 @@ func TestGetIPPortFromHTTPRequest(t *testing.T) {
 		re.Equal(testCase.ip, ip, "case %d", idx)
 		re.Equal(testCase.port, port, "case %d", idx)
 	}
-}
-
-func TestParseHexKeys(t *testing.T) {
-	re := require.New(t)
-	// Test for hex format
-	hexBytes := [][]byte{[]byte(""), []byte("67"), []byte("0001020304050607"), []byte("08090a0b0c0d0e0f"), []byte("f0f1f2f3f4f5f6f7")}
-	parseKeys, err := ParseHexKeys("hex", hexBytes)
-	re.NoError(err)
-	expectedBytes := [][]byte{[]byte(""), []byte("g"), []byte("\x00\x01\x02\x03\x04\x05\x06\x07"), []byte("\x08\t\n\x0b\x0c\r\x0e\x0f"), []byte("\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7")}
-	re.Equal(expectedBytes, parseKeys)
-	// Test for other format NOT hex
-	hexBytes = [][]byte{[]byte("hello")}
-	parseKeys, err = ParseHexKeys("other", hexBytes)
-	re.NoError(err)
-	re.Len(parseKeys, 1)
-	re.Equal([]byte("hello"), parseKeys[0])
-	// Test for wrong key
-	hexBytes = [][]byte{[]byte("world")}
-	parseKeys, err = ParseHexKeys("hex", hexBytes)
-	re.Error(err)
-	re.Len(parseKeys, 1)
-	re.Equal([]byte("world"), parseKeys[0])
-	// Test for the first key is not valid, but the second key is valid
-	hexBytes = [][]byte{[]byte("world"), []byte("0001020304050607")}
-	parseKeys, err = ParseHexKeys("hex", hexBytes)
-	re.Error(err)
-	re.Len(parseKeys, 2)
-	re.Equal([]byte("world"), parseKeys[0])
-	re.NotEqual([]byte("\x00\x01\x02\x03\x04\x05\x06\x07"), parseKeys[1])
-	// Test for the first key is valid, but the second key is not valid
-	hexBytes = [][]byte{[]byte("0001020304050607"), []byte("world")}
-	parseKeys, err = ParseHexKeys("hex", hexBytes)
-	re.Error(err)
-	re.Len(parseKeys, 2)
-	re.NotEqual([]byte("\x00\x01\x02\x03\x04\x05\x06\x07"), parseKeys[0])
-	re.Equal([]byte("world"), parseKeys[1])
 }

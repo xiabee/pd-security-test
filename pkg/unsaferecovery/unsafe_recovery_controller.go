@@ -34,7 +34,6 @@ import (
 	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
 	"go.uber.org/zap"
 )
 
@@ -107,7 +106,7 @@ const (
 type cluster interface {
 	core.StoreSetInformer
 
-	ResetRegionCache()
+	DropCacheAllRegion()
 	AllocID() (uint64, error)
 	BuryStore(storeID uint64, forceBury bool) error
 	GetSchedulerConfig() sc.SchedulerConfigProvider
@@ -544,7 +543,7 @@ func (u *Controller) changeStage(stage stage) {
 	case Finished:
 		if u.step > 1 {
 			// == 1 means no operation has done, no need to invalid cache
-			u.cluster.ResetRegionCache()
+			u.cluster.DropCacheAllRegion()
 		}
 		output.Info = "Unsafe recovery Finished"
 		output.Details = u.getAffectedTableDigest()
@@ -779,12 +778,6 @@ func (r *regionItem) IsRaftStale(origin *regionItem, u *Controller) bool {
 	cmps := []func(a, b *regionItem) int{
 		func(a, b *regionItem) int {
 			return int(a.report.GetRaftState().GetHardState().GetTerm()) - int(b.report.GetRaftState().GetHardState().GetTerm())
-		},
-		// choose the peer has maximum applied index or last index.
-		func(a, b *regionItem) int {
-			maxIdxA := typeutil.MaxUint64(a.report.GetRaftState().GetLastIndex(), a.report.AppliedIndex)
-			maxIdxB := typeutil.MaxUint64(b.report.GetRaftState().GetLastIndex(), b.report.AppliedIndex)
-			return int(maxIdxA - maxIdxB)
 		},
 		func(a, b *regionItem) int {
 			return int(a.report.GetRaftState().GetLastIndex()) - int(b.report.GetRaftState().GetLastIndex())

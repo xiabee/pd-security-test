@@ -43,7 +43,6 @@ var (
 type shuffleLeaderSchedulerConfig struct {
 	Name   string          `json:"name"`
 	Ranges []core.KeyRange `json:"ranges"`
-	// TODO: When we prepare to use Ranges, we will need to implement the ReloadConfig function for this scheduler.
 }
 
 type shuffleLeaderScheduler struct {
@@ -71,7 +70,7 @@ func (s *shuffleLeaderScheduler) GetName() string {
 	return s.conf.Name
 }
 
-func (*shuffleLeaderScheduler) GetType() string {
+func (s *shuffleLeaderScheduler) GetType() string {
 	return ShuffleLeaderType
 }
 
@@ -87,7 +86,7 @@ func (s *shuffleLeaderScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster
 	return allowed
 }
 
-func (s *shuffleLeaderScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) ([]*operator.Operator, []plan.Plan) {
+func (s *shuffleLeaderScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	// We shuffle leaders between stores by:
 	// 1. random select a valid store.
 	// 2. transfer a leader to the store.
@@ -106,7 +105,7 @@ func (s *shuffleLeaderScheduler) Schedule(cluster sche.SchedulerCluster, _ bool)
 		shuffleLeaderNoFollowerCounter.Inc()
 		return nil, nil
 	}
-	op, err := operator.CreateTransferLeaderOperator(ShuffleLeaderType, cluster, region, targetStore.GetID(), []uint64{}, operator.OpAdmin)
+	op, err := operator.CreateTransferLeaderOperator(ShuffleLeaderType, cluster, region, region.GetLeader().GetId(), targetStore.GetID(), []uint64{}, operator.OpAdmin)
 	if err != nil {
 		log.Debug("fail to create shuffle leader operator", errs.ZapError(err))
 		return nil, nil

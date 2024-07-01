@@ -27,12 +27,9 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/gorilla/mux"
-	"github.com/joho/godotenv"
 	"github.com/pingcap/errcode"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -42,14 +39,15 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	// componentSignatureKey is used for http request header key to identify component signature.
-	// Deprecated: please use `XCallerIDHeader` below to obtain a more granular source identification.
-	// This is kept for backward compatibility.
+var (
+	// componentSignatureKey is used for http request header key
+	// to identify component signature
 	componentSignatureKey = "component"
-	// anonymousValue identifies anonymous request source
-	anonymousValue = "anonymous"
+	// componentAnonymousValue identifies anonymous request source
+	componentAnonymousValue = "anonymous"
+)
 
+const (
 	// PDRedirectorHeader is used to mark which PD redirected this request.
 	PDRedirectorHeader = "PD-Redirector"
 	// PDAllowFollowerHandleHeader is used to mark whether this request is allowed to be handled by the follower PD.
@@ -60,26 +58,16 @@ const (
 	XForwardedPortHeader = "X-Forwarded-Port"
 	// XRealIPHeader is used to mark the real client IP.
 	XRealIPHeader = "X-Real-Ip"
-	// XCallerIDHeader is used to mark the caller ID.
-	XCallerIDHeader = "X-Caller-ID"
-	// XForbiddenForwardToMicroServiceHeader is used to indicate that forwarding the request to a microservice is explicitly disallowed.
-	XForbiddenForwardToMicroServiceHeader = "X-Forbidden-Forward-To-MicroService"
-	// XForwardedToMicroServiceHeader is used to signal that the request has already been forwarded to a microservice.
-	XForwardedToMicroServiceHeader = "X-Forwarded-To-MicroService"
+	// ForwardToMicroServiceHeader is used to mark the request is forwarded to micro service.
+	ForwardToMicroServiceHeader = "Forward-To-Micro-Service"
+
+	// ErrRedirectFailed is the error message for redirect failed.
+	ErrRedirectFailed = "redirect failed"
+	// ErrRedirectToNotLeader is the error message for redirect to not leader.
+	ErrRedirectToNotLeader = "redirect to not leader"
 
 	chunkSize = 4096
 )
-
-var once sync.Once
-
-func init() {
-	once.Do(func() {
-		// See https://github.com/pingcap/tidb-dashboard/blob/f8ecb64e3d63f4ed91c3dca7a04362418ade01d8/pkg/apiserver/apiserver.go#L84
-		// These global modification will be effective only for the first invoke.
-		_ = godotenv.Load()
-		gin.SetMode(gin.ReleaseMode)
-	})
-}
 
 // DeferClose captures the error returned from closing (if an error occurs).
 // This is designed to be used in a defer statement.
@@ -116,20 +104,20 @@ func TagJSONError(err error) error {
 func ErrorResp(rd *render.Render, w http.ResponseWriter, err error) {
 	if err == nil {
 		log.Error("nil is given to errorResp")
-		_ = rd.JSON(w, http.StatusInternalServerError, "nil error")
+		rd.JSON(w, http.StatusInternalServerError, "nil error")
 		return
 	}
 	if errCode := errcode.CodeChain(err); errCode != nil {
 		w.Header().Set("TiDB-Error-Code", errCode.Code().CodeStr().String())
-		_ = rd.JSON(w, errCode.Code().HTTPCode(), errcode.NewJSONFormat(errCode))
+		rd.JSON(w, errCode.Code().HTTPCode(), errcode.NewJSONFormat(errCode))
 	} else {
-		_ = rd.JSON(w, http.StatusInternalServerError, err.Error())
+		rd.JSON(w, http.StatusInternalServerError, err.Error())
 	}
 }
 
 // GetIPPortFromHTTPRequest returns http client host IP and port from context.
 // Because `X-Forwarded-For ` header has been written into RFC 7239(Forwarded HTTP Extension),
-// so `X-Forwarded-For` has the higher priority than `X-Real-Ip`.
+// so `X-Forwarded-For` has the higher priority than `X-Real-IP`.
 // And both of them have the higher priority than `RemoteAddr`
 func GetIPPortFromHTTPRequest(r *http.Request) (ip, port string) {
 	forwardedIPs := strings.Split(r.Header.Get(XForwardedForHeader), ",")
@@ -153,42 +141,32 @@ func GetIPPortFromHTTPRequest(r *http.Request) (ip, port string) {
 	return splitIP, splitPort
 }
 
-// getComponentNameOnHTTP returns component name from the request header.
-func getComponentNameOnHTTP(r *http.Request) string {
+// GetComponentNameOnHTTP returns component name from Request Header
+func GetComponentNameOnHTTP(r *http.Request) string {
 	componentName := r.Header.Get(componentSignatureKey)
 	if len(componentName) == 0 {
-		componentName = anonymousValue
+		componentName = componentAnonymousValue
 	}
 	return componentName
 }
 
-// GetCallerIDOnHTTP returns caller ID from the request header.
-func GetCallerIDOnHTTP(r *http.Request) string {
-	callerID := r.Header.Get(XCallerIDHeader)
-	if len(callerID) == 0 {
-		// Fall back to get the component name to keep backward compatibility.
-		callerID = getComponentNameOnHTTP(r)
-	}
-	return callerID
+// ComponentSignatureRoundTripper is used to add component signature in HTTP header
+type ComponentSignatureRoundTripper struct {
+	proxied   http.RoundTripper
+	component string
 }
 
-// CallerIDRoundTripper is used to add caller ID in the HTTP header.
-type CallerIDRoundTripper struct {
-	proxied  http.RoundTripper
-	callerID string
-}
-
-// NewCallerIDRoundTripper returns a new `CallerIDRoundTripper`.
-func NewCallerIDRoundTripper(roundTripper http.RoundTripper, callerID string) *CallerIDRoundTripper {
-	return &CallerIDRoundTripper{
-		proxied:  roundTripper,
-		callerID: callerID,
+// NewComponentSignatureRoundTripper returns a new ComponentSignatureRoundTripper.
+func NewComponentSignatureRoundTripper(roundTripper http.RoundTripper, componentName string) *ComponentSignatureRoundTripper {
+	return &ComponentSignatureRoundTripper{
+		proxied:   roundTripper,
+		component: componentName,
 	}
 }
 
 // RoundTrip is used to implement RoundTripper
-func (rt *CallerIDRoundTripper) RoundTrip(req *http.Request) (resp *http.Response, err error) {
-	req.Header.Add(XCallerIDHeader, rt.callerID)
+func (rt *ComponentSignatureRoundTripper) RoundTrip(req *http.Request) (resp *http.Response, err error) {
+	req.Header.Add(componentSignatureKey, rt.component)
 	// Send the request, get the response and the error
 	resp, err = rt.proxied.RoundTrip(req)
 	return
@@ -250,7 +228,7 @@ func PostJSONIgnoreResp(client *http.Client, url string, data []byte) error {
 
 // DoDelete is used to send delete request and return http response code.
 func DoDelete(client *http.Client, url string) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodDelete, url, http.NoBody)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +272,7 @@ func ParseUint64VarsField(vars map[string]string, varName string) (uint64, *Fiel
 }
 
 // CollectEscapeStringOption is used to collect string using escaping from input map for given option
-func CollectEscapeStringOption(option string, input map[string]any, collectors ...func(v string)) error {
+func CollectEscapeStringOption(option string, input map[string]interface{}, collectors ...func(v string)) error {
 	if v, ok := input[option].(string); ok {
 		value, err := url.QueryUnescape(v)
 		if err != nil {
@@ -309,7 +287,7 @@ func CollectEscapeStringOption(option string, input map[string]any, collectors .
 }
 
 // CollectStringOption is used to collect string using from input map for given option
-func CollectStringOption(option string, input map[string]any, collectors ...func(v string)) error {
+func CollectStringOption(option string, input map[string]interface{}, collectors ...func(v string)) error {
 	if v, ok := input[option].(string); ok {
 		for _, c := range collectors {
 			c(v)
@@ -320,7 +298,7 @@ func CollectStringOption(option string, input map[string]any, collectors ...func
 }
 
 // ParseKey is used to parse interface into []byte and string
-func ParseKey(name string, input map[string]any) ([]byte, string, error) {
+func ParseKey(name string, input map[string]interface{}) ([]byte, string, error) {
 	k, ok := input[name]
 	if !ok {
 		return nil, "", fmt.Errorf("missing %s", name)
@@ -336,33 +314,9 @@ func ParseKey(name string, input map[string]any) ([]byte, string, error) {
 	return returned, rawKey, nil
 }
 
-// ParseHexKeys decodes hexadecimal src into DecodedLen(len(src)) bytes if the format is "hex".
-//
-// ParseHexKeys expects that each key contains only
-// hexadecimal characters and each key has even length.
-// If existing one key is malformed, ParseHexKeys returns
-// the original bytes.
-func ParseHexKeys(format string, keys [][]byte) (decodedBytes [][]byte, err error) {
-	if format != "hex" {
-		return keys, nil
-	}
-
-	for _, key := range keys {
-		// We can use the source slice itself as the destination
-		// because the decode loop increments by one and then the 'seen' byte is not used anymore.
-		// Reference to hex.DecodeString()
-		n, err := hex.Decode(key, key)
-		if err != nil {
-			return keys, err
-		}
-		decodedBytes = append(decodedBytes, key[:n])
-	}
-	return decodedBytes, nil
-}
-
 // ReadJSON reads a JSON data from r and then closes it.
 // An error due to invalid json will be returned as a JSONError
-func ReadJSON(r io.ReadCloser, data any) error {
+func ReadJSON(r io.ReadCloser, data interface{}) error {
 	var err error
 	defer DeferClose(r, &err)
 	b, err := io.ReadAll(r)
@@ -380,7 +334,7 @@ func ReadJSON(r io.ReadCloser, data any) error {
 
 // ReadJSONRespondError writes json into data.
 // On error respond with a 400 Bad Request
-func ReadJSONRespondError(rd *render.Render, w http.ResponseWriter, body io.ReadCloser, data any) error {
+func ReadJSONRespondError(rd *render.Render, w http.ResponseWriter, body io.ReadCloser, data interface{}) error {
 	err := ReadJSON(body, data)
 	if err == nil {
 		return nil
@@ -465,15 +419,16 @@ func (p *customReverseProxies) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			log.Error("request failed", errs.ZapError(errs.ErrSendRequest, err))
 			continue
 		}
+		defer resp.Body.Close()
 		var reader io.ReadCloser
 		switch resp.Header.Get("Content-Encoding") {
 		case "gzip":
 			reader, err = gzip.NewReader(resp.Body)
 			if err != nil {
 				log.Error("failed to parse response with gzip compress", zap.Error(err))
-				resp.Body.Close()
 				continue
 			}
+			defer reader.Close()
 		default:
 			reader = resp.Body
 		}
@@ -497,8 +452,6 @@ func (p *customReverseProxies) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				break
 			}
 		}
-		resp.Body.Close()
-		reader.Close()
 		if err != nil {
 			log.Error("write failed", errs.ZapError(errs.ErrWriteHTTPBody, err), zap.String("target-address", url.String()))
 			// try next url.
@@ -506,7 +459,7 @@ func (p *customReverseProxies) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	http.Error(w, errs.ErrRedirect.FastGenByArgs().Error(), http.StatusInternalServerError)
+	http.Error(w, ErrRedirectFailed, http.StatusInternalServerError)
 }
 
 // copyHeader duplicates the HTTP headers from the source `src` to the destination `dst`.

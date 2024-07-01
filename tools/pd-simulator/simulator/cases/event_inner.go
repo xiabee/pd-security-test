@@ -25,7 +25,7 @@ type WriteFlowOnSpotDescriptor struct {
 }
 
 // Type implements the EventDescriptor interface.
-func (*WriteFlowOnSpotDescriptor) Type() string {
+func (w *WriteFlowOnSpotDescriptor) Type() string {
 	return "write-flow-on-spot"
 }
 
@@ -35,7 +35,7 @@ type WriteFlowOnRegionDescriptor struct {
 }
 
 // Type implements the EventDescriptor interface.
-func (*WriteFlowOnRegionDescriptor) Type() string {
+func (w *WriteFlowOnRegionDescriptor) Type() string {
 	return "write-flow-on-region"
 }
 
@@ -45,7 +45,7 @@ type ReadFlowOnRegionDescriptor struct {
 }
 
 // Type implements the EventDescriptor interface.
-func (*ReadFlowOnRegionDescriptor) Type() string {
+func (w *ReadFlowOnRegionDescriptor) Type() string {
 	return "read-flow-on-region"
 }
 
@@ -55,7 +55,7 @@ type AddNodesDescriptor struct {
 }
 
 // Type implements the EventDescriptor interface.
-func (*AddNodesDescriptor) Type() string {
+func (w *AddNodesDescriptor) Type() string {
 	return "add-nodes"
 }
 
@@ -65,6 +65,6 @@ type DeleteNodesDescriptor struct {
 }
 
 // Type implements the EventDescriptor interface.
-func (*DeleteNodesDescriptor) Type() string {
+func (w *DeleteNodesDescriptor) Type() string {
 	return "delete-nodes"
 }
