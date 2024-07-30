@@ -16,6 +16,7 @@ package schedulers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -47,7 +48,7 @@ type Controller struct {
 	ctx     context.Context
 	cluster sche.SchedulerCluster
 	storage endpoint.ConfigStorage
-	// schedulers is used to manage all schedulers, which will only be initialized
+	// schedulers are used to manage all schedulers, which will only be initialized
 	// and used in the PD leader service mode now.
 	schedulers map[string]*ScheduleController
 	// schedulerHandlers is used to manage the HTTP handlers of schedulers,
@@ -152,7 +153,8 @@ func (c *Controller) AddSchedulerHandler(scheduler Scheduler, args ...string) er
 		return err
 	}
 	c.cluster.GetSchedulerConfig().AddSchedulerCfg(scheduler.GetType(), args)
-	return nil
+	err := scheduler.PrepareConfig(c.cluster)
+	return err
 }
 
 // RemoveSchedulerHandler removes the HTTP handler for a scheduler.
@@ -179,6 +181,7 @@ func (c *Controller) RemoveSchedulerHandler(name string) error {
 		return err
 	}
 
+	s.(Scheduler).CleanConfig(c.cluster)
 	delete(c.schedulerHandlers, name)
 
 	return nil
@@ -194,7 +197,7 @@ func (c *Controller) AddScheduler(scheduler Scheduler, args ...string) error {
 	}
 
 	s := NewScheduleController(c.ctx, c.cluster, c.opController, scheduler)
-	if err := s.Scheduler.Prepare(c.cluster); err != nil {
+	if err := s.Scheduler.PrepareConfig(c.cluster); err != nil {
 		return err
 	}
 
@@ -274,7 +277,7 @@ func (c *Controller) PauseOrResumeScheduler(name string, t int64) error {
 // ReloadSchedulerConfig reloads a scheduler's config if it exists.
 func (c *Controller) ReloadSchedulerConfig(name string) error {
 	if exist, _ := c.IsSchedulerExisted(name); !exist {
-		return nil
+		return fmt.Errorf("scheduler %s is not existed", name)
 	}
 	return c.GetScheduler(name).ReloadConfig()
 }
@@ -339,7 +342,7 @@ func (c *Controller) IsSchedulerExisted(name string) (bool, error) {
 func (c *Controller) runScheduler(s *ScheduleController) {
 	defer logutil.LogPanic()
 	defer c.wg.Done()
-	defer s.Scheduler.Cleanup(c.cluster)
+	defer s.Scheduler.CleanConfig(c.cluster)
 
 	ticker := time.NewTicker(s.GetInterval())
 	defer ticker.Stop()
@@ -407,6 +410,11 @@ func (c *Controller) CheckTransferWitnessLeader(region *core.RegionInfo) {
 			}
 		}
 	}
+}
+
+// GetAllSchedulerConfigs returns all scheduler configs.
+func (c *Controller) GetAllSchedulerConfigs() ([]string, []string, error) {
+	return c.storage.LoadAllSchedulerConfigs()
 }
 
 // ScheduleController is used to manage a scheduler.

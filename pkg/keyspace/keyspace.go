@@ -31,7 +31,7 @@ import (
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/storage/kv"
-	"github.com/tikv/pd/pkg/utils/logutil"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"go.uber.org/zap"
 )
@@ -52,10 +52,6 @@ const (
 	// Note: Config[TSOKeyspaceGroupIDKey] is only used to judge whether there is keyspace group id.
 	// It will not update the keyspace group id when merging or splitting.
 	TSOKeyspaceGroupIDKey = "tso_keyspace_group_id"
-	// MaxEtcdTxnOps is the max value of operations in an etcd txn. The default limit of etcd txn op is 128.
-	// We use 120 here to leave some space for other operations.
-	// See: https://github.com/etcd-io/etcd/blob/d3e43d4de6f6d9575b489dd7850a85e37e0f6b6c/server/embed/config.go#L61
-	MaxEtcdTxnOps = 120
 )
 
 // Config is the interface for keyspace config.
@@ -332,7 +328,7 @@ func (manager *Manager) splitKeyspaceRegion(id uint32, waitRegionSplit bool) (er
 	if waitRegionSplit {
 		ranges := keyspaceRule.Data.([]*labeler.KeyRangeRule)
 		if len(ranges) < 2 {
-			log.Warn("[keyspace] failed to split keyspace region with insufficient range", logutil.ZapRedactString("label-rule", keyspaceRule.String()))
+			log.Warn("[keyspace] failed to split keyspace region with insufficient range", zap.Any("label-rule", keyspaceRule))
 			return ErrRegionSplitFailed
 		}
 		rawLeftBound, rawRightBound := ranges[0].StartKey, ranges[0].EndKey
@@ -381,7 +377,7 @@ func (manager *Manager) splitKeyspaceRegion(id uint32, waitRegionSplit bool) (er
 
 	log.Info("[keyspace] added region label for keyspace",
 		zap.Uint32("keyspace-id", id),
-		logutil.ZapRedactString("label-rule", keyspaceRule.String()),
+		zap.Any("label-rule", keyspaceRule),
 		zap.Duration("takes", time.Since(start)),
 	)
 	return
@@ -711,7 +707,7 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 			zap.Duration("cost", time.Since(start)),
 			zap.Uint64("patrolled-keyspace-count", patrolledKeyspaceCount),
 			zap.Uint64("assigned-keyspace-count", assignedKeyspaceCount),
-			zap.Int("batch-size", MaxEtcdTxnOps),
+			zap.Int("batch-size", etcdutil.MaxEtcdTxnOps),
 			zap.Uint32("start-keyspace-id", startKeyspaceID),
 			zap.Uint32("end-keyspace-id", endKeyspaceID),
 			zap.Uint32("current-start-id", currentStartID),
@@ -735,7 +731,7 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 			if defaultKeyspaceGroup.IsMerging() {
 				return ErrKeyspaceGroupInMerging(utils.DefaultKeyspaceGroupID)
 			}
-			keyspaces, err := manager.store.LoadRangeKeyspace(txn, manager.nextPatrolStartID, MaxEtcdTxnOps)
+			keyspaces, err := manager.store.LoadRangeKeyspace(txn, manager.nextPatrolStartID, etcdutil.MaxEtcdTxnOps)
 			if err != nil {
 				return err
 			}
@@ -745,9 +741,9 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 				currentStartID = keyspaces[0].GetId()
 				nextStartID = keyspaces[keyspaceNum-1].GetId() + 1
 			}
-			// If there are less than `MaxEtcdTxnOps` keyspaces or the next start ID reaches the end,
+			// If there are less than ` etcdutil.MaxEtcdTxnOps` keyspaces or the next start ID reaches the end,
 			// there is no need to patrol again.
-			moreToPatrol = keyspaceNum == MaxEtcdTxnOps
+			moreToPatrol = keyspaceNum == etcdutil.MaxEtcdTxnOps
 			var (
 				assigned            = false
 				keyspaceIDsToUnlock = make([]uint32, 0, keyspaceNum)
@@ -786,7 +782,7 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 				err = manager.store.SaveKeyspaceMeta(txn, ks)
 				if err != nil {
 					log.Error("[keyspace] failed to save keyspace meta during patrol",
-						zap.Int("batch-size", MaxEtcdTxnOps),
+						zap.Int("batch-size", etcdutil.MaxEtcdTxnOps),
 						zap.Uint32("start-keyspace-id", startKeyspaceID),
 						zap.Uint32("end-keyspace-id", endKeyspaceID),
 						zap.Uint32("current-start-id", currentStartID),
@@ -800,7 +796,7 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 				err = manager.kgm.store.SaveKeyspaceGroup(txn, defaultKeyspaceGroup)
 				if err != nil {
 					log.Error("[keyspace] failed to save default keyspace group meta during patrol",
-						zap.Int("batch-size", MaxEtcdTxnOps),
+						zap.Int("batch-size", etcdutil.MaxEtcdTxnOps),
 						zap.Uint32("start-keyspace-id", startKeyspaceID),
 						zap.Uint32("end-keyspace-id", endKeyspaceID),
 						zap.Uint32("current-start-id", currentStartID),

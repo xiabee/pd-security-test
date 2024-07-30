@@ -134,7 +134,6 @@ func (rmc *ControllerConfig) Adjust(meta *configutil.ConfigMetaData) {
 
 // RequestUnitConfig is the configuration of the request units, which determines the coefficients of
 // the RRU and WRU cost. This configuration should be modified carefully.
-// TODO: use common config with client size.
 type RequestUnitConfig struct {
 	// ReadBaseCost is the base cost for a read request. No matter how many bytes read/written or
 	// the CPU times taken for a request, this cost is inevitable.
@@ -156,30 +155,30 @@ type RequestUnitConfig struct {
 }
 
 // Adjust adjusts the configuration and initializes it with the default value if necessary.
-func (ruc *RequestUnitConfig) Adjust(_ *configutil.ConfigMetaData) {
+func (ruc *RequestUnitConfig) Adjust(meta *configutil.ConfigMetaData) {
 	if ruc == nil {
 		return
 	}
-	if ruc.ReadBaseCost == 0 {
-		ruc.ReadBaseCost = defaultReadBaseCost
+	if !meta.IsDefined("read-base-cost") {
+		configutil.AdjustFloat64(&ruc.ReadBaseCost, defaultReadBaseCost)
 	}
-	if ruc.ReadPerBatchBaseCost == 0 {
-		ruc.ReadPerBatchBaseCost = defaultReadPerBatchBaseCost
+	if !meta.IsDefined("read-per-batch-base-cost") {
+		configutil.AdjustFloat64(&ruc.ReadPerBatchBaseCost, defaultReadPerBatchBaseCost)
 	}
-	if ruc.ReadCostPerByte == 0 {
-		ruc.ReadCostPerByte = defaultReadCostPerByte
+	if !meta.IsDefined("read-cost-per-byte") {
+		configutil.AdjustFloat64(&ruc.ReadCostPerByte, defaultReadCostPerByte)
 	}
-	if ruc.WriteBaseCost == 0 {
-		ruc.WriteBaseCost = defaultWriteBaseCost
+	if !meta.IsDefined("write-base-cost") {
+		configutil.AdjustFloat64(&ruc.WriteBaseCost, defaultWriteBaseCost)
 	}
-	if ruc.WritePerBatchBaseCost == 0 {
-		ruc.WritePerBatchBaseCost = defaultWritePerBatchBaseCost
+	if !meta.IsDefined("write-per-batch-base-cost") {
+		configutil.AdjustFloat64(&ruc.WritePerBatchBaseCost, defaultWritePerBatchBaseCost)
 	}
-	if ruc.WriteCostPerByte == 0 {
-		ruc.WriteCostPerByte = defaultWriteCostPerByte
+	if !meta.IsDefined("write-cost-per-byte") {
+		configutil.AdjustFloat64(&ruc.WriteCostPerByte, defaultWriteCostPerByte)
 	}
-	if ruc.CPUMsCost == 0 {
-		ruc.CPUMsCost = defaultCPUMsCost
+	if !meta.IsDefined("read-cpu-ms-cost") {
+		configutil.AdjustFloat64(&ruc.CPUMsCost, defaultCPUMsCost)
 	}
 }
 
@@ -260,6 +259,26 @@ func (c *Config) adjustLog(meta *configutil.ConfigMetaData) {
 	}
 	configutil.AdjustString(&c.Log.Format, utils.DefaultLogFormat)
 	configutil.AdjustString(&c.Log.Level, utils.DefaultLogLevel)
+}
+
+// GetName returns the Name
+func (c *Config) GetName() string {
+	return c.Name
+}
+
+// GeBackendEndpoints returns the BackendEndpoints
+func (c *Config) GeBackendEndpoints() string {
+	return c.BackendEndpoints
+}
+
+// GetListenAddr returns the ListenAddr
+func (c *Config) GetListenAddr() string {
+	return c.ListenAddr
+}
+
+// GetAdvertiseListenAddr returns the AdvertiseListenAddr
+func (c *Config) GetAdvertiseListenAddr() string {
+	return c.AdvertiseListenAddr
 }
 
 // GetTLSConfig returns the TLS config.

@@ -42,14 +42,14 @@ type Scheduler interface {
 	ReloadConfig() error
 	GetMinInterval() time.Duration
 	GetNextInterval(interval time.Duration) time.Duration
-	Prepare(cluster sche.SchedulerCluster) error
-	Cleanup(cluster sche.SchedulerCluster)
+	PrepareConfig(cluster sche.SchedulerCluster) error
+	CleanConfig(cluster sche.SchedulerCluster)
 	Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan)
 	IsScheduleAllowed(cluster sche.SchedulerCluster) bool
 }
 
 // EncodeConfig encode the custom config for each scheduler.
-func EncodeConfig(v interface{}) ([]byte, error) {
+func EncodeConfig(v any) ([]byte, error) {
 	marshaled, err := json.Marshal(v)
 	if err != nil {
 		return nil, errs.ErrJSONMarshal.Wrap(err)
@@ -58,7 +58,7 @@ func EncodeConfig(v interface{}) ([]byte, error) {
 }
 
 // DecodeConfig decode the custom config for each scheduler.
-func DecodeConfig(data []byte, v interface{}) error {
+func DecodeConfig(data []byte, v any) error {
 	err := json.Unmarshal(data, v)
 	if err != nil {
 		return errs.ErrJSONUnmarshal.Wrap(err)
@@ -66,15 +66,33 @@ func DecodeConfig(data []byte, v interface{}) error {
 	return nil
 }
 
+// ToPayload returns the payload of config.
+func ToPayload(sches, configs []string) map[string]any {
+	payload := make(map[string]any)
+	for i, sche := range sches {
+		var config any
+		err := DecodeConfig([]byte(configs[i]), &config)
+		if err != nil {
+			log.Error("failed to decode scheduler config",
+				zap.String("config", configs[i]),
+				zap.String("scheduler", sche),
+				errs.ZapError(err))
+			continue
+		}
+		payload[sche] = config
+	}
+	return payload
+}
+
 // ConfigDecoder used to decode the config.
-type ConfigDecoder func(v interface{}) error
+type ConfigDecoder func(v any) error
 
 // ConfigSliceDecoderBuilder used to build slice decoder of the config.
 type ConfigSliceDecoderBuilder func([]string) ConfigDecoder
 
 // ConfigJSONDecoder used to build a json decoder of the config.
 func ConfigJSONDecoder(data []byte) ConfigDecoder {
-	return func(v interface{}) error {
+	return func(v any) error {
 		return DecodeConfig(data, v)
 	}
 }
@@ -83,7 +101,7 @@ func ConfigJSONDecoder(data []byte) ConfigDecoder {
 func ConfigSliceDecoder(name string, args []string) ConfigDecoder {
 	builder, ok := schedulerArgsToDecoder[name]
 	if !ok {
-		return func(v interface{}) error {
+		return func(v any) error {
 			return errors.Errorf("the config decoder do not register for %s", name)
 		}
 	}

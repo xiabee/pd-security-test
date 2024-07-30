@@ -68,7 +68,7 @@ func TestGroupControlBurstable(t *testing.T) {
 		counter.limiter.Reconfigure(time.Now(), args)
 	}
 	gc.updateAvgRequestResourcePerSec()
-	re.Equal(gc.burstable.Load(), true)
+	re.True(gc.burstable.Load())
 }
 
 func TestRequestAndResponseConsumption(t *testing.T) {
@@ -142,13 +142,13 @@ type MockResourceGroupProvider struct {
 	mock.Mock
 }
 
-func (m *MockResourceGroupProvider) GetResourceGroup(ctx context.Context, resourceGroupName string) (*rmpb.ResourceGroup, error) {
-	args := m.Called(ctx, resourceGroupName)
+func (m *MockResourceGroupProvider) GetResourceGroup(ctx context.Context, resourceGroupName string, opts ...pd.GetResourceGroupOption) (*rmpb.ResourceGroup, error) {
+	args := m.Called(ctx, resourceGroupName, opts)
 	return args.Get(0).(*rmpb.ResourceGroup), args.Error(1)
 }
 
-func (m *MockResourceGroupProvider) ListResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, error) {
-	args := m.Called(ctx)
+func (m *MockResourceGroupProvider) ListResourceGroups(ctx context.Context, opts ...pd.GetResourceGroupOption) ([]*rmpb.ResourceGroup, error) {
+	args := m.Called(ctx, opts)
 	return args.Get(0).([]*rmpb.ResourceGroup), args.Error(1)
 }
 

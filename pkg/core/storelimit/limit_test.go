@@ -30,7 +30,7 @@ func TestStoreLimit(t *testing.T) {
 	re := require.New(t)
 	rate := int64(15)
 	limit := NewStoreRateLimit(float64(rate)).(*StoreRateLimit)
-	re.Equal(limit.Rate(AddPeer), float64(15))
+	re.Equal(float64(15), limit.Rate(AddPeer))
 	re.True(limit.Available(influence*rate, AddPeer, constant.Low))
 	re.True(limit.Take(influence*rate, AddPeer, constant.Low))
 	re.False(limit.Take(influence, AddPeer, constant.Low))
@@ -101,18 +101,18 @@ func TestWindow(t *testing.T) {
 	token := capacity + 10
 	re.True(s.take(token))
 	re.False(s.take(token))
-	re.EqualValues(s.ack(token), 0)
+	re.EqualValues(0, s.ack(token))
 	re.True(s.take(token))
-	re.EqualValues(s.ack(token), 0)
+	re.EqualValues(0, s.ack(token))
 	re.Equal(s.ack(token), token)
-	re.EqualValues(s.getUsed(), 0)
+	re.EqualValues(0, s.getUsed())
 
 	// case2: the capacity of the window must greater than the minSnapSize.
 	s.reset(minSnapSize - 1)
-	re.EqualValues(s.capacity, minSnapSize)
+	re.EqualValues(minSnapSize, s.capacity)
 	re.True(s.take(minSnapSize))
-	re.EqualValues(s.ack(minSnapSize*2), minSnapSize)
-	re.EqualValues(s.getUsed(), 0)
+	re.EqualValues(minSnapSize, s.ack(minSnapSize*2))
+	re.EqualValues(0, s.getUsed())
 }
 
 func TestFeedback(t *testing.T) {

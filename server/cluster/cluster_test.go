@@ -50,6 +50,7 @@ import (
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/placement"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
+	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/statistics"
 	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/storage"
@@ -68,7 +69,7 @@ func TestStoreHeartbeat(t *testing.T) {
 	_, opt, err := newTestScheduleConfig()
 	opt.GetScheduleConfig().StoreLimitVersion = "v2"
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 
 	n, np := uint64(3), uint64(3)
 	stores := newTestStores(n, "2.0.0")
@@ -179,10 +180,10 @@ func TestStoreHeartbeat(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	storeStats = cluster.hotStat.RegionStats(utils.Read, 0)
 	re.Empty(storeStats[1])
-	re.Nil(cluster.HandleStoreHeartbeat(hotReq, hotResp))
+	re.NoError(cluster.HandleStoreHeartbeat(hotReq, hotResp))
 	time.Sleep(20 * time.Millisecond)
 	storeStats = cluster.hotStat.RegionStats(utils.Read, 1)
-	re.Len(storeStats[1], 0)
+	re.Empty(storeStats[1])
 	storeStats = cluster.hotStat.RegionStats(utils.Read, 3)
 	re.Empty(storeStats[1])
 	// after 2 hot heartbeats, wo can find region 1 peer again
@@ -201,7 +202,7 @@ func TestFilterUnhealthyStore(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 
 	stores := newTestStores(3, "2.0.0")
 	req := &pdpb.StoreHeartbeatRequest{}
@@ -239,9 +240,9 @@ func TestSetOfflineStore(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
-	cluster.ruleManager = placement.NewRuleManager(storage.NewStorageWithMemoryBackend(), cluster, cluster.GetOpts())
+	cluster.ruleManager = placement.NewRuleManager(ctx, storage.NewStorageWithMemoryBackend(), cluster, cluster.GetOpts())
 	if opt.IsPlacementRulesEnabled() {
 		err := cluster.ruleManager.Initialize(opt.GetMaxReplicas(), opt.GetLocationLabels(), opt.GetIsolationLevel())
 		if err != nil {
@@ -305,7 +306,7 @@ func TestSetOfflineWithReplica(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 
 	// Put 4 stores.
@@ -344,7 +345,7 @@ func TestSetOfflineStoreWithEvictLeader(t *testing.T) {
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
 	opt.SetMaxReplicas(1)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 
 	// Put 3 stores.
@@ -371,7 +372,7 @@ func TestForceBuryStore(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	// Put 2 stores.
 	stores := newTestStores(2, "5.3.0")
 	stores[1] = stores[1].Clone(core.SetLastHeartbeatTS(time.Now()))
@@ -390,7 +391,7 @@ func TestReuseAddress(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 	// Put 4 stores.
 	for _, store := range newTestStores(4, "2.0.0") {
@@ -436,9 +437,9 @@ func TestUpStore(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
-	cluster.ruleManager = placement.NewRuleManager(storage.NewStorageWithMemoryBackend(), cluster, cluster.GetOpts())
+	cluster.ruleManager = placement.NewRuleManager(ctx, storage.NewStorageWithMemoryBackend(), cluster, cluster.GetOpts())
 	if opt.IsPlacementRulesEnabled() {
 		err := cluster.ruleManager.Initialize(opt.GetMaxReplicas(), opt.GetLocationLabels(), opt.GetIsolationLevel())
 		if err != nil {
@@ -481,7 +482,7 @@ func TestRemovingProcess(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 	cluster.SetPrepared()
 
@@ -539,9 +540,9 @@ func TestDeleteStoreUpdatesClusterVersion(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
-	cluster.ruleManager = placement.NewRuleManager(storage.NewStorageWithMemoryBackend(), cluster, cluster.GetOpts())
+	cluster.ruleManager = placement.NewRuleManager(ctx, storage.NewStorageWithMemoryBackend(), cluster, cluster.GetOpts())
 	if opt.IsPlacementRulesEnabled() {
 		err := cluster.ruleManager.Initialize(opt.GetMaxReplicas(), opt.GetLocationLabels(), opt.GetIsolationLevel())
 		if err != nil {
@@ -574,7 +575,7 @@ func TestStoreClusterVersion(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	stores := newTestStores(3, "5.0.0")
 	s1, s2, s3 := stores[0].GetMeta(), stores[1].GetMeta(), stores[2].GetMeta()
 	s1.Version = "5.0.1"
@@ -599,7 +600,7 @@ func TestRegionHeartbeatHotStat(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 	newTestStores(4, "2.0.0")
 	peers := []*metapb.Peer{
@@ -630,7 +631,7 @@ func TestRegionHeartbeatHotStat(t *testing.T) {
 	region := core.NewRegionInfo(regionMeta, leader, core.WithInterval(&pdpb.TimeInterval{StartTimestamp: 0, EndTimestamp: utils.RegionHeartBeatReportInterval}),
 		core.SetWrittenBytes(30000*10),
 		core.SetWrittenKeys(300000*10))
-	err = cluster.processRegionHeartbeat(region)
+	err = cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer())
 	re.NoError(err)
 	// wait HotStat to update items
 	time.Sleep(time.Second)
@@ -643,7 +644,7 @@ func TestRegionHeartbeatHotStat(t *testing.T) {
 		StoreId: 4,
 	}
 	region = region.Clone(core.WithRemoveStorePeer(2), core.WithAddPeer(newPeer))
-	err = cluster.processRegionHeartbeat(region)
+	err = cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer())
 	re.NoError(err)
 	// wait HotStat to update items
 	time.Sleep(time.Second)
@@ -661,7 +662,7 @@ func TestBucketHeartbeat(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 
 	// case1: region is not exist
@@ -680,8 +681,8 @@ func TestBucketHeartbeat(t *testing.T) {
 		re.NoError(cluster.putStoreLocked(store))
 	}
 
-	re.NoError(cluster.processRegionHeartbeat(regions[0]))
-	re.NoError(cluster.processRegionHeartbeat(regions[1]))
+	re.NoError(cluster.processRegionHeartbeat(regions[0], core.NewNoopHeartbeatProcessTracer()))
+	re.NoError(cluster.processRegionHeartbeat(regions[1], core.NewNoopHeartbeatProcessTracer()))
 	re.Nil(cluster.GetRegion(uint64(1)).GetBuckets())
 	re.NoError(cluster.processReportBuckets(buckets))
 	re.Equal(buckets, cluster.GetRegion(uint64(1)).GetBuckets())
@@ -700,13 +701,13 @@ func TestBucketHeartbeat(t *testing.T) {
 	// case5: region update should inherit buckets.
 	newRegion := regions[1].Clone(core.WithIncConfVer(), core.SetBuckets(nil))
 	opt.SetRegionBucketEnabled(true)
-	re.NoError(cluster.processRegionHeartbeat(newRegion))
+	re.NoError(cluster.processRegionHeartbeat(newRegion, core.NewNoopHeartbeatProcessTracer()))
 	re.Len(cluster.GetRegion(uint64(1)).GetBuckets().GetKeys(), 2)
 
 	// case6: disable region bucket in
 	opt.SetRegionBucketEnabled(false)
 	newRegion2 := regions[1].Clone(core.WithIncConfVer(), core.SetBuckets(nil))
-	re.NoError(cluster.processRegionHeartbeat(newRegion2))
+	re.NoError(cluster.processRegionHeartbeat(newRegion2, core.NewNoopHeartbeatProcessTracer()))
 	re.Nil(cluster.GetRegion(uint64(1)).GetBuckets())
 	re.Empty(cluster.GetRegion(uint64(1)).GetBuckets().GetKeys())
 }
@@ -718,7 +719,7 @@ func TestRegionHeartbeat(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 	n, np := uint64(3), uint64(3)
 	cluster.wg.Add(1)
@@ -732,25 +733,25 @@ func TestRegionHeartbeat(t *testing.T) {
 
 	for i, region := range regions {
 		// region does not exist.
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 		checkRegionsKV(re, cluster.storage, regions[:i+1])
 
 		// region is the same, not updated.
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 		checkRegionsKV(re, cluster.storage, regions[:i+1])
 		origin := region
 		// region is updated.
 		region = origin.Clone(core.WithIncVersion())
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 		checkRegionsKV(re, cluster.storage, regions[:i+1])
 
 		// region is stale (Version).
 		stale := origin.Clone(core.WithIncConfVer())
-		re.Error(cluster.processRegionHeartbeat(stale))
+		re.Error(cluster.processRegionHeartbeat(stale, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 		checkRegionsKV(re, cluster.storage, regions[:i+1])
 
@@ -760,13 +761,13 @@ func TestRegionHeartbeat(t *testing.T) {
 			core.WithIncConfVer(),
 		)
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 		checkRegionsKV(re, cluster.storage, regions[:i+1])
 
 		// region is stale (ConfVer).
 		stale = origin.Clone(core.WithIncConfVer())
-		re.Error(cluster.processRegionHeartbeat(stale))
+		re.Error(cluster.processRegionHeartbeat(stale, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 		checkRegionsKV(re, cluster.storage, regions[:i+1])
 
@@ -778,38 +779,38 @@ func TestRegionHeartbeat(t *testing.T) {
 			},
 		}))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Add a pending peer.
 		region = region.Clone(core.WithPendingPeers([]*metapb.Peer{region.GetPeers()[rand.Intn(len(region.GetPeers()))]}))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Clear down peers.
 		region = region.Clone(core.WithDownPeers(nil))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Clear pending peers.
 		region = region.Clone(core.WithPendingPeers(nil))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Remove peers.
 		origin = region
 		region = origin.Clone(core.SetPeers(region.GetPeers()[:1]))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 		checkRegionsKV(re, cluster.storage, regions[:i+1])
 		// Add peers.
 		region = origin
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 		checkRegionsKV(re, cluster.storage, regions[:i+1])
 
@@ -819,47 +820,47 @@ func TestRegionHeartbeat(t *testing.T) {
 			core.WithIncConfVer(),
 		)
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Change leader.
 		region = region.Clone(core.WithLeader(region.GetPeers()[1]))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Change ApproximateSize.
 		region = region.Clone(core.SetApproximateSize(144))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Change ApproximateKeys.
 		region = region.Clone(core.SetApproximateKeys(144000))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Change bytes written.
 		region = region.Clone(core.SetWrittenBytes(24000))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Change bytes read.
 		region = region.Clone(core.SetReadBytes(1080000))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 
 		// Flashback
 		region = region.Clone(core.WithFlashback(true, 1))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 		region = region.Clone(core.WithFlashback(false, 0))
 		regions[i] = region
-		re.NoError(cluster.processRegionHeartbeat(region))
+		re.NoError(cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer()))
 		checkRegions(re, cluster.core, regions[:i+1])
 	}
 
@@ -915,7 +916,8 @@ func TestRegionHeartbeat(t *testing.T) {
 			core.WithNewRegionID(10000),
 			core.WithDecVersion(),
 		)
-		re.Error(cluster.processRegionHeartbeat(overlapRegion))
+		tracer := core.NewHeartbeatProcessTracer()
+		re.Error(cluster.processRegionHeartbeat(overlapRegion, tracer))
 		region := &metapb.Region{}
 		ok, err := storage.LoadRegion(regions[n-1].GetID(), region)
 		re.True(ok)
@@ -939,7 +941,14 @@ func TestRegionHeartbeat(t *testing.T) {
 			core.WithStartKey(regions[n-2].GetStartKey()),
 			core.WithNewRegionID(regions[n-1].GetID()+1),
 		)
-		re.NoError(cluster.processRegionHeartbeat(overlapRegion))
+		tracer = core.NewHeartbeatProcessTracer()
+		tracer.Begin()
+		re.NoError(cluster.processRegionHeartbeat(overlapRegion, tracer))
+		tracer.OnAllStageFinished()
+		re.Condition(func() bool {
+			fileds := tracer.LogFields()
+			return slice.AllOf(fileds, func(i int) bool { return fileds[i].Integer > 0 })
+		}, "should have stats")
 		region = &metapb.Region{}
 		ok, err = storage.LoadRegion(regions[n-1].GetID(), region)
 		re.False(ok)
@@ -963,12 +972,12 @@ func TestRegionFlowChanged(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 	regions := []*core.RegionInfo{core.NewTestRegionInfo(1, 1, []byte{}, []byte{})}
 	processRegions := func(regions []*core.RegionInfo) {
 		for _, r := range regions {
-			cluster.processRegionHeartbeat(r)
+			cluster.processRegionHeartbeat(r, core.NewNoopHeartbeatProcessTracer())
 		}
 	}
 	regions = core.SplitRegions(regions)
@@ -988,7 +997,7 @@ func TestRegionSizeChanged(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 	cluster.regionStats = statistics.NewRegionStatistics(
 		cluster.GetBasicCluster(),
@@ -1004,7 +1013,7 @@ func TestRegionSizeChanged(t *testing.T) {
 		core.SetApproximateKeys(curMaxMergeKeys-1),
 		core.SetSource(core.Heartbeat),
 	)
-	cluster.processRegionHeartbeat(region)
+	cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer())
 	regionID := region.GetID()
 	re.True(cluster.regionStats.IsRegionStatsType(regionID, statistics.UndersizedRegion))
 	// Test ApproximateSize and ApproximateKeys change.
@@ -1014,16 +1023,16 @@ func TestRegionSizeChanged(t *testing.T) {
 		core.SetApproximateKeys(curMaxMergeKeys+1),
 		core.SetSource(core.Heartbeat),
 	)
-	cluster.processRegionHeartbeat(region)
+	cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer())
 	re.False(cluster.regionStats.IsRegionStatsType(regionID, statistics.UndersizedRegion))
 	// Test MaxMergeRegionSize and MaxMergeRegionKeys change.
 	cluster.opt.SetMaxMergeRegionSize(uint64(curMaxMergeSize + 2))
 	cluster.opt.SetMaxMergeRegionKeys(uint64(curMaxMergeKeys + 2))
-	cluster.processRegionHeartbeat(region)
+	cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer())
 	re.True(cluster.regionStats.IsRegionStatsType(regionID, statistics.UndersizedRegion))
 	cluster.opt.SetMaxMergeRegionSize(uint64(curMaxMergeSize))
 	cluster.opt.SetMaxMergeRegionKeys(uint64(curMaxMergeKeys))
-	cluster.processRegionHeartbeat(region)
+	cluster.processRegionHeartbeat(region, core.NewNoopHeartbeatProcessTracer())
 	re.False(cluster.regionStats.IsRegionStatsType(regionID, statistics.UndersizedRegion))
 }
 
@@ -1034,7 +1043,7 @@ func TestConcurrentReportBucket(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 
 	regions := []*core.RegionInfo{core.NewTestRegionInfo(1, 1, []byte{}, []byte{})}
@@ -1064,7 +1073,7 @@ func TestConcurrentRegionHeartbeat(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 
 	regions := []*core.RegionInfo{core.NewTestRegionInfo(1, 1, []byte{}, []byte{})}
@@ -1086,11 +1095,11 @@ func TestConcurrentRegionHeartbeat(t *testing.T) {
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/cluster/concurrentRegionHeartbeat", "return(true)"))
 	go func() {
 		defer wg.Done()
-		cluster.processRegionHeartbeat(source)
+		cluster.processRegionHeartbeat(source, core.NewNoopHeartbeatProcessTracer())
 	}()
 	time.Sleep(100 * time.Millisecond)
 	re.NoError(failpoint.Disable("github.com/tikv/pd/server/cluster/concurrentRegionHeartbeat"))
-	re.NoError(cluster.processRegionHeartbeat(target))
+	re.NoError(cluster.processRegionHeartbeat(target, core.NewNoopHeartbeatProcessTracer()))
 	wg.Wait()
 	checkRegion(re, cluster.GetRegionByKey([]byte{}), target)
 }
@@ -1105,7 +1114,7 @@ func TestRegionLabelIsolationLevel(t *testing.T) {
 	cfg.LocationLabels = []string{"zone"}
 	opt.SetReplicationConfig(cfg)
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 
 	for i := uint64(1); i <= 4; i++ {
 		var labels []*metapb.StoreLabel
@@ -1144,7 +1153,7 @@ func TestRegionLabelIsolationLevel(t *testing.T) {
 	re.NoError(cluster.putRegion(r))
 
 	cluster.UpdateRegionsLabelLevelStats([]*core.RegionInfo{r})
-	counter := cluster.labelLevelStats.GetLabelCounter()
+	counter := cluster.labelStats.GetLabelCounter()
 	re.Equal(0, counter["none"])
 	re.Equal(1, counter["zone"])
 }
@@ -1152,7 +1161,7 @@ func TestRegionLabelIsolationLevel(t *testing.T) {
 func heartbeatRegions(re *require.Assertions, cluster *RaftCluster, regions []*core.RegionInfo) {
 	// Heartbeat and check region one by one.
 	for _, r := range regions {
-		re.NoError(cluster.processRegionHeartbeat(r))
+		re.NoError(cluster.processRegionHeartbeat(r, core.NewNoopHeartbeatProcessTracer()))
 
 		checkRegion(re, cluster.GetRegion(r.GetID()), r)
 		checkRegion(re, cluster.GetRegionByKey(r.GetStartKey()), r)
@@ -1184,12 +1193,12 @@ func TestHeartbeatSplit(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 
 	// 1: [nil, nil)
 	region1 := core.NewRegionInfo(&metapb.Region{Id: 1, RegionEpoch: &metapb.RegionEpoch{Version: 1, ConfVer: 1}}, nil)
-	re.NoError(cluster.processRegionHeartbeat(region1))
+	re.NoError(cluster.processRegionHeartbeat(region1, core.NewNoopHeartbeatProcessTracer()))
 	checkRegion(re, cluster.GetRegionByKey([]byte("foo")), region1)
 
 	// split 1 to 2: [nil, m) 1: [m, nil), sync 2 first.
@@ -1198,12 +1207,12 @@ func TestHeartbeatSplit(t *testing.T) {
 		core.WithIncVersion(),
 	)
 	region2 := core.NewRegionInfo(&metapb.Region{Id: 2, EndKey: []byte("m"), RegionEpoch: &metapb.RegionEpoch{Version: 1, ConfVer: 1}}, nil)
-	re.NoError(cluster.processRegionHeartbeat(region2))
+	re.NoError(cluster.processRegionHeartbeat(region2, core.NewNoopHeartbeatProcessTracer()))
 	checkRegion(re, cluster.GetRegionByKey([]byte("a")), region2)
 	// [m, nil) is missing before r1's heartbeat.
 	re.Nil(cluster.GetRegionByKey([]byte("z")))
 
-	re.NoError(cluster.processRegionHeartbeat(region1))
+	re.NoError(cluster.processRegionHeartbeat(region1, core.NewNoopHeartbeatProcessTracer()))
 	checkRegion(re, cluster.GetRegionByKey([]byte("z")), region1)
 
 	// split 1 to 3: [m, q) 1: [q, nil), sync 1 first.
@@ -1212,12 +1221,12 @@ func TestHeartbeatSplit(t *testing.T) {
 		core.WithIncVersion(),
 	)
 	region3 := core.NewRegionInfo(&metapb.Region{Id: 3, StartKey: []byte("m"), EndKey: []byte("q"), RegionEpoch: &metapb.RegionEpoch{Version: 1, ConfVer: 1}}, nil)
-	re.NoError(cluster.processRegionHeartbeat(region1))
+	re.NoError(cluster.processRegionHeartbeat(region1, core.NewNoopHeartbeatProcessTracer()))
 	checkRegion(re, cluster.GetRegionByKey([]byte("z")), region1)
 	checkRegion(re, cluster.GetRegionByKey([]byte("a")), region2)
 	// [m, q) is missing before r3's heartbeat.
 	re.Nil(cluster.GetRegionByKey([]byte("n")))
-	re.NoError(cluster.processRegionHeartbeat(region3))
+	re.NoError(cluster.processRegionHeartbeat(region3, core.NewNoopHeartbeatProcessTracer()))
 	checkRegion(re, cluster.GetRegionByKey([]byte("n")), region3)
 }
 
@@ -1228,7 +1237,7 @@ func TestRegionSplitAndMerge(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 
 	regions := []*core.RegionInfo{core.NewTestRegionInfo(1, 1, []byte{}, []byte{})}
@@ -1266,9 +1275,9 @@ func TestOfflineAndMerge(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
-	cluster.ruleManager = placement.NewRuleManager(storage.NewStorageWithMemoryBackend(), cluster, cluster.GetOpts())
+	cluster.ruleManager = placement.NewRuleManager(ctx, storage.NewStorageWithMemoryBackend(), cluster, cluster.GetOpts())
 	if opt.IsPlacementRulesEnabled() {
 		err := cluster.ruleManager.Initialize(opt.GetMaxReplicas(), opt.GetLocationLabels(), opt.GetIsolationLevel())
 		if err != nil {
@@ -1513,11 +1522,11 @@ func TestUpdateStorePendingPeerCount(t *testing.T) {
 		},
 	}
 	origin := core.NewRegionInfo(&metapb.Region{Id: 1, Peers: peers[:3]}, peers[0], core.WithPendingPeers(peers[1:3]))
-	re.NoError(tc.processRegionHeartbeat(origin))
+	re.NoError(tc.processRegionHeartbeat(origin, core.NewNoopHeartbeatProcessTracer()))
 	time.Sleep(50 * time.Millisecond)
 	checkPendingPeerCount([]int{0, 1, 1, 0}, tc.RaftCluster, re)
 	newRegion := core.NewRegionInfo(&metapb.Region{Id: 1, Peers: peers[1:]}, peers[1], core.WithPendingPeers(peers[3:4]))
-	re.NoError(tc.processRegionHeartbeat(newRegion))
+	re.NoError(tc.processRegionHeartbeat(newRegion, core.NewNoopHeartbeatProcessTracer()))
 	time.Sleep(50 * time.Millisecond)
 	checkPendingPeerCount([]int{0, 0, 0, 1}, tc.RaftCluster, re)
 }
@@ -1634,7 +1643,7 @@ func TestCalculateStoreSize1(t *testing.T) {
 	cfg := opt.GetReplicationConfig()
 	cfg.EnablePlacementRules = true
 	opt.SetReplicationConfig(cfg)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 	cluster.regionStats = statistics.NewRegionStatistics(
 		cluster.GetBasicCluster(),
@@ -1669,7 +1678,7 @@ func TestCalculateStoreSize1(t *testing.T) {
 	}
 
 	cluster.ruleManager.SetRule(
-		&placement.Rule{GroupID: "pd", ID: "zone1", StartKey: []byte(""), EndKey: []byte(""), Role: "voter", Count: 2,
+		&placement.Rule{GroupID: placement.DefaultGroupID, ID: "zone1", StartKey: []byte(""), EndKey: []byte(""), Role: placement.Voter, Count: 2,
 			LabelConstraints: []placement.LabelConstraint{
 				{Key: "zone", Op: "in", Values: []string{"zone1"}},
 			},
@@ -1677,7 +1686,7 @@ func TestCalculateStoreSize1(t *testing.T) {
 	)
 
 	cluster.ruleManager.SetRule(
-		&placement.Rule{GroupID: "pd", ID: "zone2", StartKey: []byte(""), EndKey: []byte(""), Role: "voter", Count: 2,
+		&placement.Rule{GroupID: placement.DefaultGroupID, ID: "zone2", StartKey: []byte(""), EndKey: []byte(""), Role: placement.Voter, Count: 2,
 			LabelConstraints: []placement.LabelConstraint{
 				{Key: "zone", Op: "in", Values: []string{"zone2"}},
 			},
@@ -1685,13 +1694,13 @@ func TestCalculateStoreSize1(t *testing.T) {
 	)
 
 	cluster.ruleManager.SetRule(
-		&placement.Rule{GroupID: "pd", ID: "zone3", StartKey: []byte(""), EndKey: []byte(""), Role: "follower", Count: 1,
+		&placement.Rule{GroupID: placement.DefaultGroupID, ID: "zone3", StartKey: []byte(""), EndKey: []byte(""), Role: placement.Follower, Count: 1,
 			LabelConstraints: []placement.LabelConstraint{
 				{Key: "zone", Op: "in", Values: []string{"zone3"}},
 			},
 			LocationLabels: []string{"rack", "host"}},
 	)
-	cluster.ruleManager.DeleteRule("pd", "default")
+	cluster.ruleManager.DeleteRule(placement.DefaultGroupID, placement.DefaultRuleID)
 
 	regions := newTestRegions(100, 10, 5)
 	for _, region := range regions {
@@ -1720,7 +1729,7 @@ func TestCalculateStoreSize2(t *testing.T) {
 	cfg.EnablePlacementRules = true
 	opt.SetReplicationConfig(cfg)
 	opt.SetMaxReplicas(3)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	cluster.coordinator = schedule.NewCoordinator(ctx, cluster, nil)
 	cluster.regionStats = statistics.NewRegionStatistics(
 		cluster.GetBasicCluster(),
@@ -1753,7 +1762,7 @@ func TestCalculateStoreSize2(t *testing.T) {
 	}
 
 	cluster.ruleManager.SetRule(
-		&placement.Rule{GroupID: "pd", ID: "dc1", StartKey: []byte(""), EndKey: []byte(""), Role: "voter", Count: 2,
+		&placement.Rule{GroupID: placement.DefaultGroupID, ID: "dc1", StartKey: []byte(""), EndKey: []byte(""), Role: placement.Voter, Count: 2,
 			LabelConstraints: []placement.LabelConstraint{
 				{Key: "dc", Op: "in", Values: []string{"dc1"}},
 			},
@@ -1761,7 +1770,7 @@ func TestCalculateStoreSize2(t *testing.T) {
 	)
 
 	cluster.ruleManager.SetRule(
-		&placement.Rule{GroupID: "pd", ID: "logic3", StartKey: []byte(""), EndKey: []byte(""), Role: "voter", Count: 1,
+		&placement.Rule{GroupID: placement.DefaultGroupID, ID: "logic3", StartKey: []byte(""), EndKey: []byte(""), Role: placement.Voter, Count: 1,
 			LabelConstraints: []placement.LabelConstraint{
 				{Key: "logic", Op: "in", Values: []string{"logic3"}},
 			},
@@ -1769,13 +1778,13 @@ func TestCalculateStoreSize2(t *testing.T) {
 	)
 
 	cluster.ruleManager.SetRule(
-		&placement.Rule{GroupID: "pd", ID: "logic4", StartKey: []byte(""), EndKey: []byte(""), Role: "learner", Count: 1,
+		&placement.Rule{GroupID: placement.DefaultGroupID, ID: "logic4", StartKey: []byte(""), EndKey: []byte(""), Role: placement.Learner, Count: 1,
 			LabelConstraints: []placement.LabelConstraint{
 				{Key: "logic", Op: "in", Values: []string{"logic4"}},
 			},
 			LocationLabels: []string{"dc", "logic", "rack", "host"}},
 	)
-	cluster.ruleManager.DeleteRule("pd", "default")
+	cluster.ruleManager.DeleteRule(placement.DefaultGroupID, placement.DefaultRuleID)
 
 	regions := newTestRegions(100, 10, 5)
 	for _, region := range regions {
@@ -1829,7 +1838,7 @@ func Test(t *testing.T) {
 	regions := newTestRegions(n, n, np)
 	_, opts, err := newTestScheduleConfig()
 	re.NoError(err)
-	tc := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opts, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	tc := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opts, storage.NewStorageWithMemoryBackend())
 	cache := tc.core
 
 	for i := uint64(0); i < n; i++ {
@@ -1943,7 +1952,7 @@ func TestAwakenStore(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	n := uint64(3)
 	stores := newTestStores(n, "6.5.0")
 	re.True(stores[0].NeedAwakenStore())
@@ -1997,7 +2006,7 @@ func TestUpdateAndDeleteLabel(t *testing.T) {
 
 	_, opt, err := newTestScheduleConfig()
 	re.NoError(err)
-	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	cluster := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	stores := newTestStores(1, "6.5.1")
 	for _, store := range stores {
 		re.NoError(cluster.PutStore(store.GetMeta()))
@@ -2115,7 +2124,7 @@ func newTestScheduleConfig() (*sc.ScheduleConfig, *config.PersistOptions, error)
 }
 
 func newTestCluster(ctx context.Context, opt *config.PersistOptions) *testCluster {
-	rc := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend(), core.NewBasicCluster())
+	rc := newTestRaftCluster(ctx, mockid.NewIDAllocator(), opt, storage.NewStorageWithMemoryBackend())
 	storage := storage.NewStorageWithMemoryBackend()
 	rc.regionLabeler, _ = labeler.NewRegionLabeler(ctx, storage, time.Second*5)
 
@@ -2127,17 +2136,17 @@ func newTestRaftCluster(
 	id id.Allocator,
 	opt *config.PersistOptions,
 	s storage.Storage,
-	basicCluster *core.BasicCluster,
 ) *RaftCluster {
-	rc := &RaftCluster{serverCtx: ctx}
-	rc.InitCluster(id, opt, s, basicCluster, nil)
-	rc.ruleManager = placement.NewRuleManager(storage.NewStorageWithMemoryBackend(), rc, opt)
+	rc := &RaftCluster{serverCtx: ctx, core: core.NewBasicCluster(), storage: s}
+	rc.InitCluster(id, opt, nil, nil)
+	rc.ruleManager = placement.NewRuleManager(ctx, storage.NewStorageWithMemoryBackend(), rc, opt)
 	if opt.IsPlacementRulesEnabled() {
 		err := rc.ruleManager.Initialize(opt.GetMaxReplicas(), opt.GetLocationLabels(), opt.GetIsolationLevel())
 		if err != nil {
 			panic(err)
 		}
 	}
+	rc.schedulingController = newSchedulingController(rc.ctx, rc.core, rc.opt, rc.ruleManager)
 	return rc
 }
 
@@ -2239,7 +2248,7 @@ func checkRegions(re *require.Assertions, cache *core.BasicCluster, regions []*c
 		}
 	}
 
-	re.Equal(len(regions), cache.GetTotalRegionCount())
+	re.Len(regions, cache.GetTotalRegionCount())
 	for id, count := range regionCount {
 		re.Equal(count, cache.GetStoreRegionCount(id))
 	}
@@ -2485,7 +2494,10 @@ func TestCollectMetricsConcurrent(t *testing.T) {
 			nil)
 	}, func(co *schedule.Coordinator) { co.Run() }, re)
 	defer cleanup()
-
+	rc := co.GetCluster().(*RaftCluster)
+	rc.schedulingController = newSchedulingController(rc.serverCtx, rc.GetBasicCluster(), rc.GetOpts(), rc.GetRuleManager())
+	rc.schedulingController.coordinator = co
+	controller := co.GetSchedulersController()
 	// Make sure there are no problem when concurrent write and read
 	var wg sync.WaitGroup
 	count := 10
@@ -2498,15 +2510,14 @@ func TestCollectMetricsConcurrent(t *testing.T) {
 			}
 		}(i)
 	}
-	controller := co.GetSchedulersController()
 	for i := 0; i < 1000; i++ {
 		co.CollectHotSpotMetrics()
 		controller.CollectSchedulerMetrics()
-		co.GetCluster().(*RaftCluster).collectClusterMetrics()
+		rc.collectSchedulingMetrics()
 	}
 	schedule.ResetHotSpotMetrics()
 	schedulers.ResetSchedulerMetrics()
-	co.GetCluster().(*RaftCluster).resetClusterMetrics()
+	rc.resetSchedulingMetrics()
 	wg.Wait()
 }
 
@@ -2520,6 +2531,11 @@ func TestCollectMetrics(t *testing.T) {
 			nil)
 	}, func(co *schedule.Coordinator) { co.Run() }, re)
 	defer cleanup()
+
+	rc := co.GetCluster().(*RaftCluster)
+	rc.schedulingController = newSchedulingController(rc.serverCtx, rc.GetBasicCluster(), rc.GetOpts(), rc.GetRuleManager())
+	rc.schedulingController.coordinator = co
+	controller := co.GetSchedulersController()
 	count := 10
 	for i := 0; i <= count; i++ {
 		for k := 0; k < 200; k++ {
@@ -2533,11 +2549,11 @@ func TestCollectMetrics(t *testing.T) {
 			tc.hotStat.HotCache.Update(item, utils.Write)
 		}
 	}
-	controller := co.GetSchedulersController()
+
 	for i := 0; i < 1000; i++ {
 		co.CollectHotSpotMetrics()
 		controller.CollectSchedulerMetrics()
-		co.GetCluster().(*RaftCluster).collectClusterMetrics()
+		rc.collectSchedulingMetrics()
 	}
 	stores := co.GetCluster().GetStores()
 	regionStats := co.GetCluster().RegionWriteStats()
@@ -2552,7 +2568,7 @@ func TestCollectMetrics(t *testing.T) {
 	re.Equal(status1, status2)
 	schedule.ResetHotSpotMetrics()
 	schedulers.ResetSchedulerMetrics()
-	co.GetCluster().(*RaftCluster).resetClusterMetrics()
+	rc.resetSchedulingMetrics()
 }
 
 func prepare(setCfg func(*sc.ScheduleConfig), setTc func(*testCluster), run func(*schedule.Coordinator), re *require.Assertions) (*testCluster, *schedule.Coordinator, func()) {
@@ -2653,7 +2669,7 @@ func TestCheckRegionWithScheduleDeny(t *testing.T) {
 		ID:       "schedulelabel",
 		Labels:   []labeler.RegionLabel{{Key: "schedule", Value: "deny"}},
 		RuleType: labeler.KeyRange,
-		Data:     []interface{}{map[string]interface{}{"start_key": "", "end_key": ""}},
+		Data:     []any{map[string]any{"start_key": "", "end_key": ""}},
 	})
 
 	// should allow to do rule checker
@@ -2737,7 +2753,7 @@ func TestMergeRegionCancelOneOperator(t *testing.T) {
 	re.Len(ops, co.GetOperatorController().AddWaitingOperator(ops...))
 	// Cancel source operator.
 	co.GetOperatorController().RemoveOperator(co.GetOperatorController().GetOperator(source.GetID()))
-	re.Len(co.GetOperatorController().GetOperators(), 0)
+	re.Empty(co.GetOperatorController().GetOperators())
 
 	// Cancel target region.
 	ops, err = operator.CreateMergeRegionOperator("merge-region", tc, source, target, operator.OpMerge)
@@ -2745,7 +2761,7 @@ func TestMergeRegionCancelOneOperator(t *testing.T) {
 	re.Len(ops, co.GetOperatorController().AddWaitingOperator(ops...))
 	// Cancel target operator.
 	co.GetOperatorController().RemoveOperator(co.GetOperatorController().GetOperator(target.GetID()))
-	re.Len(co.GetOperatorController().GetOperators(), 0)
+	re.Empty(co.GetOperatorController().GetOperators())
 }
 
 func TestReplica(t *testing.T) {
@@ -2792,7 +2808,7 @@ func TestReplica(t *testing.T) {
 	re.NoError(dispatchHeartbeat(co, region, stream))
 	waitNoResponse(re, stream)
 
-	// Remove peer from store 4.
+	// Remove peer from store 3.
 	re.NoError(tc.addLeaderRegion(2, 1, 2, 3, 4))
 	region = tc.GetRegion(2)
 	re.NoError(dispatchHeartbeat(co, region, stream))
@@ -2943,12 +2959,12 @@ func TestShouldRun(t *testing.T) {
 	for _, testCase := range testCases {
 		r := tc.GetRegion(testCase.regionID)
 		nr := r.Clone(core.WithLeader(r.GetPeers()[0]), core.SetSource(core.Heartbeat))
-		re.NoError(tc.processRegionHeartbeat(nr))
+		re.NoError(tc.processRegionHeartbeat(nr, core.NewNoopHeartbeatProcessTracer()))
 		re.Equal(testCase.ShouldRun, co.ShouldRun())
 	}
 	nr := &metapb.Region{Id: 6, Peers: []*metapb.Peer{}}
 	newRegion := core.NewRegionInfo(nr, nil, core.SetSource(core.Heartbeat))
-	re.Error(tc.processRegionHeartbeat(newRegion))
+	re.Error(tc.processRegionHeartbeat(newRegion, core.NewNoopHeartbeatProcessTracer()))
 	re.Equal(7, tc.core.GetClusterNotFromStorageRegionsCnt())
 }
 
@@ -2986,12 +3002,12 @@ func TestShouldRunWithNonLeaderRegions(t *testing.T) {
 	for _, testCase := range testCases {
 		r := tc.GetRegion(testCase.regionID)
 		nr := r.Clone(core.WithLeader(r.GetPeers()[0]), core.SetSource(core.Heartbeat))
-		re.NoError(tc.processRegionHeartbeat(nr))
+		re.NoError(tc.processRegionHeartbeat(nr, core.NewNoopHeartbeatProcessTracer()))
 		re.Equal(testCase.ShouldRun, co.ShouldRun())
 	}
 	nr := &metapb.Region{Id: 9, Peers: []*metapb.Peer{}}
 	newRegion := core.NewRegionInfo(nr, nil, core.SetSource(core.Heartbeat))
-	re.Error(tc.processRegionHeartbeat(newRegion))
+	re.Error(tc.processRegionHeartbeat(newRegion, core.NewNoopHeartbeatProcessTracer()))
 	re.Equal(9, tc.core.GetClusterNotFromStorageRegionsCnt())
 
 	// Now, after server is prepared, there exist some regions with no leader.
@@ -3008,8 +3024,7 @@ func TestAddScheduler(t *testing.T) {
 	re.NoError(controller.RemoveScheduler(schedulers.BalanceLeaderName))
 	re.NoError(controller.RemoveScheduler(schedulers.BalanceRegionName))
 	re.NoError(controller.RemoveScheduler(schedulers.HotRegionName))
-	re.NoError(controller.RemoveScheduler(schedulers.BalanceWitnessName))
-	re.NoError(controller.RemoveScheduler(schedulers.TransferWitnessLeaderName))
+	re.NoError(controller.RemoveScheduler(schedulers.EvictSlowStoreName))
 	re.Empty(controller.GetSchedulerNames())
 
 	stream := mockhbstream.NewHeartbeatStream()
@@ -3032,15 +3047,15 @@ func TestAddScheduler(t *testing.T) {
 	re.NoError(err)
 	conf, err := bl.EncodeConfig()
 	re.NoError(err)
-	data := make(map[string]interface{})
+	data := make(map[string]any)
 	err = json.Unmarshal(conf, &data)
 	re.NoError(err)
 	batch := data["batch"].(float64)
 	re.Equal(4, int(batch))
 	gls, err := schedulers.CreateScheduler(schedulers.GrantLeaderType, oc, storage.NewStorageWithMemoryBackend(), schedulers.ConfigSliceDecoder(schedulers.GrantLeaderType, []string{"0"}), controller.RemoveScheduler)
 	re.NoError(err)
-	re.NotNil(controller.AddScheduler(gls))
-	re.NotNil(controller.RemoveScheduler(gls.GetName()))
+	re.Error(controller.AddScheduler(gls))
+	re.Error(controller.RemoveScheduler(gls.GetName()))
 
 	gls, err = schedulers.CreateScheduler(schedulers.GrantLeaderType, oc, storage.NewStorageWithMemoryBackend(), schedulers.ConfigSliceDecoder(schedulers.GrantLeaderType, []string{"1"}), controller.RemoveScheduler)
 	re.NoError(err)
@@ -3050,7 +3065,7 @@ func TestAddScheduler(t *testing.T) {
 	re.NoError(err)
 	conf, err = hb.EncodeConfig()
 	re.NoError(err)
-	data = make(map[string]interface{})
+	data = make(map[string]any)
 	re.NoError(json.Unmarshal(conf, &data))
 	re.Contains(data, "enable-for-tiflash")
 	re.Equal("true", data["enable-for-tiflash"].(string))
@@ -3100,13 +3115,13 @@ func TestPersistScheduler(t *testing.T) {
 	re.NoError(err)
 	re.Len(sches, defaultCount+2)
 
-	// remove 5 schedulers
+	// remove all default schedulers
 	re.NoError(controller.RemoveScheduler(schedulers.BalanceLeaderName))
 	re.NoError(controller.RemoveScheduler(schedulers.BalanceRegionName))
 	re.NoError(controller.RemoveScheduler(schedulers.HotRegionName))
-	re.NoError(controller.RemoveScheduler(schedulers.BalanceWitnessName))
-	re.NoError(controller.RemoveScheduler(schedulers.TransferWitnessLeaderName))
-	re.Len(controller.GetSchedulerNames(), defaultCount-3)
+	re.NoError(controller.RemoveScheduler(schedulers.EvictSlowStoreName))
+	// only remains 2 items with independent config.
+	re.Len(controller.GetSchedulerNames(), 2)
 	re.NoError(co.GetCluster().GetSchedulerConfig().Persist(storage))
 	co.Stop()
 	co.GetSchedulersController().Wait()
@@ -3130,10 +3145,10 @@ func TestPersistScheduler(t *testing.T) {
 	re.NoError(err)
 	re.Len(sches, 3)
 
-	// option have 6 items because the default scheduler do not remove.
+	// option have 9 items because the default scheduler do not remove.
 	re.Len(newOpt.GetSchedulers(), defaultCount+3)
 	re.NoError(newOpt.Persist(storage))
-	tc.RaftCluster.opt = newOpt
+	tc.RaftCluster.SetScheduleConfig(newOpt.GetScheduleConfig())
 
 	co = schedule.NewCoordinator(ctx, tc.RaftCluster, hbStreams)
 	co.Run()
@@ -3146,7 +3161,7 @@ func TestPersistScheduler(t *testing.T) {
 	_, newOpt, err = newTestScheduleConfig()
 	re.NoError(err)
 	re.NoError(newOpt.Reload(storage))
-	tc.RaftCluster.opt = newOpt
+	tc.RaftCluster.SetScheduleConfig(newOpt.GetScheduleConfig())
 	co = schedule.NewCoordinator(ctx, tc.RaftCluster, hbStreams)
 	co.Run()
 	controller = co.GetSchedulersController()
@@ -3157,9 +3172,9 @@ func TestPersistScheduler(t *testing.T) {
 	brs, err := schedulers.CreateScheduler(schedulers.BalanceRegionType, oc, storage, schedulers.ConfigSliceDecoder(schedulers.BalanceRegionType, []string{"", ""}))
 	re.NoError(err)
 	re.NoError(controller.AddScheduler(brs))
-	re.Len(controller.GetSchedulerNames(), defaultCount)
+	re.Len(controller.GetSchedulerNames(), 5)
 
-	// the scheduler option should contain 6 items
+	// the scheduler option should contain 9 items
 	// the `hot scheduler` are disabled
 	re.Len(co.GetCluster().GetSchedulerConfig().(*config.PersistOptions).GetSchedulers(), defaultCount+3)
 	re.NoError(controller.RemoveScheduler(schedulers.GrantLeaderName))
@@ -3173,14 +3188,14 @@ func TestPersistScheduler(t *testing.T) {
 	_, newOpt, err = newTestScheduleConfig()
 	re.NoError(err)
 	re.NoError(newOpt.Reload(co.GetCluster().GetStorage()))
-	tc.RaftCluster.opt = newOpt
+	tc.RaftCluster.SetScheduleConfig(newOpt.GetScheduleConfig())
 	co = schedule.NewCoordinator(ctx, tc.RaftCluster, hbStreams)
 
 	co.Run()
 	controller = co.GetSchedulersController()
-	re.Len(controller.GetSchedulerNames(), defaultCount-1)
+	re.Len(controller.GetSchedulerNames(), 4)
 	re.NoError(controller.RemoveScheduler(schedulers.EvictLeaderName))
-	re.Len(controller.GetSchedulerNames(), defaultCount-2)
+	re.Len(controller.GetSchedulerNames(), 3)
 }
 
 func TestRemoveScheduler(t *testing.T) {
@@ -3216,8 +3231,7 @@ func TestRemoveScheduler(t *testing.T) {
 	re.NoError(controller.RemoveScheduler(schedulers.BalanceRegionName))
 	re.NoError(controller.RemoveScheduler(schedulers.HotRegionName))
 	re.NoError(controller.RemoveScheduler(schedulers.GrantLeaderName))
-	re.NoError(controller.RemoveScheduler(schedulers.BalanceWitnessName))
-	re.NoError(controller.RemoveScheduler(schedulers.TransferWitnessLeaderName))
+	re.NoError(controller.RemoveScheduler(schedulers.EvictSlowStoreName))
 	// all removed
 	sches, _, err = storage.LoadAllSchedulerConfigs()
 	re.NoError(err)
@@ -3232,7 +3246,7 @@ func TestRemoveScheduler(t *testing.T) {
 	_, newOpt, err := newTestScheduleConfig()
 	re.NoError(err)
 	re.NoError(newOpt.Reload(tc.storage))
-	tc.RaftCluster.opt = newOpt
+	tc.RaftCluster.SetScheduleConfig(newOpt.GetScheduleConfig())
 	co = schedule.NewCoordinator(ctx, tc.RaftCluster, hbStreams)
 	co.Run()
 	re.Empty(controller.GetSchedulerNames())
@@ -3434,7 +3448,7 @@ func TestStoreOverloaded(t *testing.T) {
 	time.Sleep(time.Second)
 	for i := 0; i < 100; i++ {
 		ops, _ := lb.Schedule(tc, false /* dryRun */)
-		re.Greater(len(ops), 0)
+		re.NotEmpty(ops)
 	}
 }
 
@@ -3469,7 +3483,7 @@ func TestStoreOverloadedWithReplace(t *testing.T) {
 	// sleep 2 seconds to make sure that token is filled up
 	time.Sleep(2 * time.Second)
 	ops, _ = lb.Schedule(tc, false /* dryRun */)
-	re.Greater(len(ops), 0)
+	re.NotEmpty(ops)
 }
 
 func TestDownStoreLimit(t *testing.T) {
