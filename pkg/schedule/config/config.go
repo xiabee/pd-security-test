@@ -27,10 +27,13 @@ import (
 
 const (
 	// DefaultMaxReplicas is the default number of replicas for each region.
-	DefaultMaxReplicas            = 3
-	defaultMaxSnapshotCount       = 64
-	defaultMaxPendingPeerCount    = 64
-	defaultMaxMergeRegionSize     = 20
+	DefaultMaxReplicas         = 3
+	defaultMaxSnapshotCount    = 64
+	defaultMaxPendingPeerCount = 64
+	// defaultMaxMergeRegionSize is the default maximum size of region when regions can be merged.
+	// After https://github.com/tikv/tikv/issues/17309, the default value is enlarged from 20 to 54,
+	// to make it compatible with the default value of region size of tikv.
+	defaultMaxMergeRegionSize     = 54
 	defaultLeaderScheduleLimit    = 4
 	defaultRegionScheduleLimit    = 2048
 	defaultWitnessScheduleLimit   = 4
@@ -52,6 +55,7 @@ const (
 	defaultEnableJointConsensus            = true
 	defaultEnableTiKVSplitRegion           = true
 	defaultEnableHeartbeatBreakdownMetrics = true
+	defaultEnableHeartbeatConcurrentRunner = true
 	defaultEnableCrossTableMerge           = true
 	defaultEnableDiagnostic                = true
 	defaultStrictlyMatchLabel              = false
@@ -267,6 +271,9 @@ type ScheduleConfig struct {
 	// EnableHeartbeatBreakdownMetrics is the option to enable heartbeat stats metrics.
 	EnableHeartbeatBreakdownMetrics bool `toml:"enable-heartbeat-breakdown-metrics" json:"enable-heartbeat-breakdown-metrics,string"`
 
+	// EnableHeartbeatConcurrentRunner is the option to enable heartbeat concurrent runner.
+	EnableHeartbeatConcurrentRunner bool `toml:"enable-heartbeat-concurrent-runner" json:"enable-heartbeat-concurrent-runner,string"`
+
 	// Schedulers support for loading customized schedulers
 	Schedulers SchedulerConfigs `toml:"schedulers" json:"schedulers-v2"` // json v2 is for the sake of compatible upgrade
 
@@ -382,6 +389,10 @@ func (c *ScheduleConfig) Adjust(meta *configutil.ConfigMetaData, reloading bool)
 		c.EnableHeartbeatBreakdownMetrics = defaultEnableHeartbeatBreakdownMetrics
 	}
 
+	if !meta.IsDefined("enable-heartbeat-concurrent-runner") {
+		c.EnableHeartbeatConcurrentRunner = defaultEnableHeartbeatConcurrentRunner
+	}
+
 	if !meta.IsDefined("enable-cross-table-merge") {
 		c.EnableCrossTableMerge = defaultEnableCrossTableMerge
 	}
@@ -407,7 +418,7 @@ func (c *ScheduleConfig) Adjust(meta *configutil.ConfigMetaData, reloading bool)
 	adjustSchedulers(&c.Schedulers, DefaultSchedulers)
 
 	for k, b := range c.migrateConfigurationMap() {
-		v, err := c.parseDeprecatedFlag(meta, k, *b[0], *b[1])
+		v, err := parseDeprecatedFlag(meta, k, *b[0], *b[1])
 		if err != nil {
 			return err
 		}
@@ -456,7 +467,7 @@ func (c *ScheduleConfig) GetMaxMergeRegionKeys() uint64 {
 	return c.MaxMergeRegionSize * 10000
 }
 
-func (c *ScheduleConfig) parseDeprecatedFlag(meta *configutil.ConfigMetaData, name string, old, new bool) (bool, error) {
+func parseDeprecatedFlag(meta *configutil.ConfigMetaData, name string, old, new bool) (bool, error) {
 	oldName, newName := "disable-"+name, "enable-"+name
 	defineOld, defineNew := meta.IsDefined(oldName), meta.IsDefined(newName)
 	switch {

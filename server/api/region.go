@@ -16,7 +16,6 @@ package api
 
 import (
 	"container/heap"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -86,24 +85,20 @@ func (h *regionHandler) GetRegionByID(w http.ResponseWriter, r *http.Request) {
 func (h *regionHandler) GetRegion(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
 	vars := mux.Vars(r)
-	key := vars["key"]
-	key, err := url.QueryUnescape(key)
+	key, err := url.QueryUnescape(vars["key"])
 	if err != nil {
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// decode hex if query has params with hex format
-	formatStr := r.URL.Query().Get("format")
-	if formatStr == "hex" {
-		keyBytes, err := hex.DecodeString(key)
-		if err != nil {
-			h.rd.JSON(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		key = string(keyBytes)
+	paramsByte := [][]byte{[]byte(key)}
+	paramsByte, err = apiutil.ParseHexKeys(r.URL.Query().Get("format"), paramsByte)
+	if err != nil {
+		h.rd.JSON(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
-	regionInfo := rc.GetRegionByKey([]byte(key))
+	regionInfo := rc.GetRegionByKey(paramsByte[0])
 	b, err := response.MarshalRegionInfoJSON(r.Context(), regionInfo)
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
@@ -174,15 +169,21 @@ func (h *regionsHandler) GetRegions(w http.ResponseWriter, r *http.Request) {
 // @Router   /regions/key [get]
 func (h *regionsHandler) ScanRegions(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
-	startKey := r.URL.Query().Get("key")
-	endKey := r.URL.Query().Get("end_key")
-	limit, err := h.AdjustLimit(r.URL.Query().Get("limit"))
+	query := r.URL.Query()
+	paramsByte := [][]byte{[]byte(query.Get("key")), []byte(query.Get("end_key"))}
+	paramsByte, err := apiutil.ParseHexKeys(query.Get("format"), paramsByte)
 	if err != nil {
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	regions := rc.ScanRegions([]byte(startKey), []byte(endKey), limit)
+	limit, err := h.AdjustLimit(query.Get("limit"))
+	if err != nil {
+		h.rd.JSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	regions := rc.ScanRegions(paramsByte[0], paramsByte[1], limit)
 	b, err := response.MarshalRegionsInfoJSON(r.Context(), regions)
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
@@ -218,7 +219,17 @@ func (h *regionsHandler) GetStoreRegions(w http.ResponseWriter, r *http.Request)
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	regions := rc.GetStoreRegions(uint64(id))
+	// get type from query
+	typ := r.URL.Query().Get("type")
+	if len(typ) == 0 {
+		typ = string(core.AllInSubTree)
+	}
+
+	regions, err := rc.GetStoreRegionsByTypeInSubTree(uint64(id), core.SubTreeRegionType(typ))
+	if err != nil {
+		h.rd.JSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	b, err := response.MarshalRegionsInfoJSON(r.Context(), regions)
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
@@ -546,6 +557,19 @@ func (h *regionsHandler) GetTopWriteFlowRegions(w http.ResponseWriter, r *http.R
 }
 
 // @Tags     region
+// @Summary  List regions with the highest write flow.
+// @Param    limit  query  integer  false  "Limit count"  default(16)
+// @Produce  json
+// @Success  200  {object}  response.RegionsInfo
+// @Failure  400  {string}  string  "The input is invalid."
+// @Router   /regions/writequery [get]
+func (h *regionsHandler) GetTopWriteQueryRegions(w http.ResponseWriter, r *http.Request) {
+	h.GetTopNRegions(w, r, func(a, b *core.RegionInfo) bool {
+		return a.GetWriteQueryNum() < b.GetWriteQueryNum()
+	})
+}
+
+// @Tags     region
 // @Summary  List regions with the highest read flow.
 // @Param    limit  query  integer  false  "Limit count"  default(16)
 // @Produce  json
@@ -554,6 +578,19 @@ func (h *regionsHandler) GetTopWriteFlowRegions(w http.ResponseWriter, r *http.R
 // @Router   /regions/readflow [get]
 func (h *regionsHandler) GetTopReadFlowRegions(w http.ResponseWriter, r *http.Request) {
 	h.GetTopNRegions(w, r, func(a, b *core.RegionInfo) bool { return a.GetBytesRead() < b.GetBytesRead() })
+}
+
+// @Tags     region
+// @Summary  List regions with the highest write flow.
+// @Param    limit  query  integer  false  "Limit count"  default(16)
+// @Produce  json
+// @Success  200  {object}  response.RegionsInfo
+// @Failure  400  {string}  string  "The input is invalid."
+// @Router   /regions/readquery [get]
+func (h *regionsHandler) GetTopReadQueryRegions(w http.ResponseWriter, r *http.Request) {
+	h.GetTopNRegions(w, r, func(a, b *core.RegionInfo) bool {
+		return a.GetReadQueryNum() < b.GetReadQueryNum()
+	})
 }
 
 // @Tags     region
@@ -748,7 +785,7 @@ func (h *regionsHandler) ScatterRegions(w http.ResponseWriter, r *http.Request) 
 		if !ok {
 			return 0, nil, errors.New("regions_id is invalid")
 		}
-		return h.ScatterRegionsByID(ids, group, retryLimit, false)
+		return h.ScatterRegionsByID(ids, group, retryLimit)
 	}()
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())

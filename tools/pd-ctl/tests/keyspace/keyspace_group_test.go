@@ -100,7 +100,7 @@ func TestSplitKeyspaceGroup(t *testing.T) {
 	for i := 0; i < 129; i++ {
 		keyspaces = append(keyspaces, fmt.Sprintf("keyspace_%d", i))
 	}
-	tc, err := pdTests.NewTestAPICluster(ctx, 3, func(conf *config.Config, serverName string) {
+	tc, err := pdTests.NewTestAPICluster(ctx, 3, func(conf *config.Config, _ string) {
 		conf.Keyspace.PreAlloc = keyspaces
 	})
 	re.NoError(err)
@@ -155,7 +155,7 @@ func TestExternalAllocNodeWhenStart(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		keyspaces = append(keyspaces, fmt.Sprintf("keyspace_%d", i))
 	}
-	tc, err := pdTests.NewTestAPICluster(ctx, 1, func(conf *config.Config, serverName string) {
+	tc, err := pdTests.NewTestAPICluster(ctx, 1, func(conf *config.Config, _ string) {
 		conf.Keyspace.PreAlloc = keyspaces
 	})
 	re.NoError(err)
@@ -195,7 +195,7 @@ func TestSetNodeAndPriorityKeyspaceGroup(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		keyspaces = append(keyspaces, fmt.Sprintf("keyspace_%d", i))
 	}
-	tc, err := pdTests.NewTestAPICluster(ctx, 3, func(conf *config.Config, serverName string) {
+	tc, err := pdTests.NewTestAPICluster(ctx, 3, func(conf *config.Config, _ string) {
 		conf.Keyspace.PreAlloc = keyspaces
 	})
 	re.NoError(err)
@@ -263,7 +263,7 @@ func TestSetNodeAndPriorityKeyspaceGroup(t *testing.T) {
 	args := []string{"-u", pdAddr, "keyspace-group", "set-node", defaultKeyspaceGroupID, tsoAddrs[0]}
 	output, err := tests.ExecuteCommand(cmd, args...)
 	re.NoError(err)
-	re.Contains(string(output), "invalid num of nodes")
+	re.Contains(string(output), "Success!")
 	args = []string{"-u", pdAddr, "keyspace-group", "set-node", defaultKeyspaceGroupID, "", ""}
 	output, err = tests.ExecuteCommand(cmd, args...)
 	re.NoError(err)
@@ -299,7 +299,7 @@ func TestMergeKeyspaceGroup(t *testing.T) {
 	for i := 0; i < 129; i++ {
 		keyspaces = append(keyspaces, fmt.Sprintf("keyspace_%d", i))
 	}
-	tc, err := pdTests.NewTestAPICluster(ctx, 1, func(conf *config.Config, serverName string) {
+	tc, err := pdTests.NewTestAPICluster(ctx, 1, func(conf *config.Config, _ string) {
 		conf.Keyspace.PreAlloc = keyspaces
 	})
 	re.NoError(err)
@@ -418,7 +418,7 @@ func TestKeyspaceGroupState(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		keyspaces = append(keyspaces, fmt.Sprintf("keyspace_%d", i))
 	}
-	tc, err := pdTests.NewTestAPICluster(ctx, 1, func(conf *config.Config, serverName string) {
+	tc, err := pdTests.NewTestAPICluster(ctx, 1, func(conf *config.Config, _ string) {
 		conf.Keyspace.PreAlloc = keyspaces
 	})
 	re.NoError(err)
@@ -509,7 +509,7 @@ func TestShowKeyspaceGroupPrimary(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		keyspaces = append(keyspaces, fmt.Sprintf("keyspace_%d", i))
 	}
-	tc, err := pdTests.NewTestAPICluster(ctx, 1, func(conf *config.Config, serverName string) {
+	tc, err := pdTests.NewTestAPICluster(ctx, 1, func(conf *config.Config, _ string) {
 		conf.Keyspace.PreAlloc = keyspaces
 	})
 	re.NoError(err)

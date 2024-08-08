@@ -127,7 +127,6 @@ var (
 )
 
 // Server is the pd server. It implements bs.Server
-// nolint
 type Server struct {
 	diagnosticspb.DiagnosticsServer
 
@@ -443,9 +442,15 @@ func (s *Server) startServer(ctx context.Context) error {
 
 	s.rootPath = endpoint.PDRootPath(clusterID)
 	s.member.InitMemberInfo(s.cfg.AdvertiseClientUrls, s.cfg.AdvertisePeerUrls, s.Name(), s.rootPath)
-	s.member.SetMemberDeployPath(s.member.ID())
-	s.member.SetMemberBinaryVersion(s.member.ID(), versioninfo.PDReleaseVersion)
-	s.member.SetMemberGitHash(s.member.ID(), versioninfo.PDGitHash)
+	if err := s.member.SetMemberDeployPath(s.member.ID()); err != nil {
+		return err
+	}
+	if err := s.member.SetMemberBinaryVersion(s.member.ID(), versioninfo.PDReleaseVersion); err != nil {
+		return err
+	}
+	if err := s.member.SetMemberGitHash(s.member.ID(), versioninfo.PDGitHash); err != nil {
+		return err
+	}
 	s.idAllocator = id.NewAllocator(&id.AllocatorParams{
 		Client:    s.client,
 		RootPath:  s.rootPath,
@@ -471,18 +476,16 @@ func (s *Server) startServer(ctx context.Context) error {
 	s.tsoDispatcher = tsoutil.NewTSODispatcher(tsoProxyHandleDuration, tsoProxyBatchSize)
 	s.tsoProtoFactory = &tsoutil.TSOProtoFactory{}
 	s.pdProtoFactory = &tsoutil.PDProtoFactory{}
-	if !s.IsAPIServiceMode() {
-		s.tsoAllocatorManager = tso.NewAllocatorManager(s.ctx, mcs.DefaultKeyspaceGroupID, s.member, s.rootPath, s.storage, s, false)
-		// When disabled the Local TSO, we should clean up the Local TSO Allocator's meta info written in etcd if it exists.
-		if !s.cfg.EnableLocalTSO {
-			if err = s.tsoAllocatorManager.CleanUpDCLocation(); err != nil {
-				return err
-			}
+	s.tsoAllocatorManager = tso.NewAllocatorManager(s.ctx, mcs.DefaultKeyspaceGroupID, s.member, s.rootPath, s.storage, s, false)
+	// When disabled the Local TSO, we should clean up the Local TSO Allocator's meta info written in etcd if it exists.
+	if !s.cfg.EnableLocalTSO {
+		if err = s.tsoAllocatorManager.CleanUpDCLocation(); err != nil {
+			return err
 		}
-		if zone, exist := s.cfg.Labels[config.ZoneLabel]; exist && zone != "" && s.cfg.EnableLocalTSO {
-			if err = s.tsoAllocatorManager.SetLocalTSOConfig(zone); err != nil {
-				return err
-			}
+	}
+	if zone, exist := s.cfg.Labels[config.ZoneLabel]; exist && zone != "" && s.cfg.EnableLocalTSO {
+		if err = s.tsoAllocatorManager.SetLocalTSOConfig(zone); err != nil {
+			return err
 		}
 	}
 
@@ -592,7 +595,7 @@ func (s *Server) Close() {
 		cb()
 	}
 
-	s.clientConns.Range(func(key, value any) bool {
+	s.clientConns.Range(func(_, value any) bool {
 		conn := value.(*grpc.ClientConn)
 		if err := conn.Close(); err != nil {
 			log.Error("close grpc client meet error", errs.ZapError(err))
@@ -1555,8 +1558,6 @@ func (s *Server) UpdateGRPCServiceRateLimiter(serviceLabel string, opts ...ratel
 
 // GetClusterStatus gets cluster status.
 func (s *Server) GetClusterStatus() (*cluster.Status, error) {
-	s.cluster.Lock()
-	defer s.cluster.Unlock()
 	return s.cluster.LoadClusterStatus()
 }
 
@@ -1688,7 +1689,9 @@ func (s *Server) leaderLoop() {
 						zap.String("current-leader-member-id", types.ID(etcdLeader).String()),
 						zap.String("transferee-member-id", types.ID(s.member.ID()).String()),
 					)
-					s.member.MoveEtcdLeader(s.ctx, etcdLeader, s.member.ID())
+					if err := s.member.MoveEtcdLeader(s.ctx, etcdLeader, s.member.ID()); err != nil {
+						log.Error("failed to move etcd leader", errs.ZapError(err))
+					}
 				}
 			}
 			log.Info("skip campaigning of pd leader and check later",
@@ -2062,7 +2065,7 @@ func (s *Server) initServicePrimaryWatcher(serviceName string, primaryKey string
 		}
 		return nil
 	}
-	deleteFn := func(kv *mvccpb.KeyValue) error {
+	deleteFn := func(*mvccpb.KeyValue) error {
 		var oldPrimary string
 		v, ok := s.servicePrimaryMap.Load(serviceName)
 		if ok {
@@ -2088,7 +2091,7 @@ func (s *Server) initServicePrimaryWatcher(serviceName string, primaryKey string
 }
 
 // RecoverAllocID recover alloc id. set current base id to input id
-func (s *Server) RecoverAllocID(ctx context.Context, id uint64) error {
+func (s *Server) RecoverAllocID(_ context.Context, id uint64) error {
 	return s.idAllocator.SetBase(id)
 }
 

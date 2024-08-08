@@ -51,7 +51,7 @@ func TestHotTestSuite(t *testing.T) {
 
 func (suite *hotTestSuite) SetupSuite() {
 	suite.env = pdTests.NewSchedulingTestEnvironment(suite.T(),
-		func(conf *config.Config, serverName string) {
+		func(conf *config.Config, _ string) {
 			conf.Schedule.MaxStoreDownTime.Duration = time.Hour
 			conf.Schedule.HotRegionCacheHitsThreshold = 0
 		},
@@ -75,7 +75,7 @@ func (suite *hotTestSuite) TearDownTest() {
 }
 
 func (suite *hotTestSuite) TestHot() {
-	suite.env.RunTestInTwoModes(suite.checkHot)
+	suite.env.RunTestBasedOnMode(suite.checkHot)
 }
 
 func (suite *hotTestSuite) checkHot(cluster *pdTests.TestCluster) {
@@ -188,11 +188,16 @@ func (suite *hotTestSuite) checkHot(cluster *pdTests.TestCluster) {
 					Id:      100 + regionIDCounter,
 					StoreId: hotStoreID,
 				}
-				peerInfo := core.NewPeerInfo(leader, loads, reportInterval)
 				region := core.NewRegionInfo(&metapb.Region{
 					Id: hotRegionID,
 				}, leader)
-				hotStat.CheckReadAsync(statistics.NewCheckPeerTask(peerInfo, region))
+				checkReadPeerTask := func(cache *statistics.HotPeerCache) {
+					stats := cache.CheckPeerFlow(region, []*metapb.Peer{leader}, loads, reportInterval)
+					for _, stat := range stats {
+						cache.UpdateStat(stat)
+					}
+				}
+				hotStat.CheckReadAsync(checkReadPeerTask)
 				testutil.Eventually(re, func() bool {
 					hotPeerStat := getHotPeerStat(utils.Read, hotRegionID, hotStoreID)
 					return hotPeerStat != nil
@@ -240,7 +245,7 @@ func (suite *hotTestSuite) checkHot(cluster *pdTests.TestCluster) {
 }
 
 func (suite *hotTestSuite) TestHotWithStoreID() {
-	suite.env.RunTestInTwoModes(suite.checkHotWithStoreID)
+	suite.env.RunTestBasedOnMode(suite.checkHotWithStoreID)
 }
 
 func (suite *hotTestSuite) checkHotWithStoreID(cluster *pdTests.TestCluster) {
@@ -307,7 +312,7 @@ func (suite *hotTestSuite) checkHotWithStoreID(cluster *pdTests.TestCluster) {
 }
 
 func (suite *hotTestSuite) TestHotWithoutHotPeer() {
-	suite.env.RunTestInTwoModes(suite.checkHotWithoutHotPeer)
+	suite.env.RunTestBasedOnMode(suite.checkHotWithoutHotPeer)
 }
 
 func (suite *hotTestSuite) checkHotWithoutHotPeer(cluster *pdTests.TestCluster) {
@@ -398,7 +403,7 @@ func TestHistoryHotRegions(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cluster, err := pdTests.NewTestCluster(ctx, 1,
-		func(cfg *config.Config, serverName string) {
+		func(cfg *config.Config, _ string) {
 			cfg.Schedule.HotRegionCacheHitsThreshold = 0
 			cfg.Schedule.HotRegionsWriteInterval.Duration = 1000 * time.Millisecond
 			cfg.Schedule.HotRegionsReservedDays = 1
@@ -408,7 +413,7 @@ func TestHistoryHotRegions(t *testing.T) {
 	defer cluster.Destroy()
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	pdAddr := cluster.GetConfig().GetClientURL()
 	cmd := ctl.GetRootCmd()
 
@@ -520,12 +525,12 @@ func TestBuckets(t *testing.T) {
 	statistics.Denoising = false
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cluster, err := pdTests.NewTestCluster(ctx, 1, func(cfg *config.Config, serverName string) { cfg.Schedule.HotRegionCacheHitsThreshold = 0 })
+	cluster, err := pdTests.NewTestCluster(ctx, 1, func(cfg *config.Config, _ string) { cfg.Schedule.HotRegionCacheHitsThreshold = 0 })
 	re.NoError(err)
 	defer cluster.Destroy()
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	pdAddr := cluster.GetConfig().GetClientURL()
 	cmd := ctl.GetRootCmd()
 

@@ -23,6 +23,7 @@ import (
 	"github.com/tikv/pd/pkg/errs"
 	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/operator"
+	types "github.com/tikv/pd/pkg/schedule/type"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 )
 
@@ -61,39 +62,55 @@ func intervalGrow(x time.Duration, maxInterval time.Duration, typ intervalGrowth
 // BaseScheduler is a basic scheduler for all other complex scheduler
 type BaseScheduler struct {
 	OpController *operator.Controller
+
+	name string
+	tp   types.CheckerSchedulerType
 }
 
 // NewBaseScheduler returns a basic scheduler
-func NewBaseScheduler(opController *operator.Controller) *BaseScheduler {
-	return &BaseScheduler{OpController: opController}
+func NewBaseScheduler(opController *operator.Controller, tp types.CheckerSchedulerType) *BaseScheduler {
+	return &BaseScheduler{OpController: opController, tp: tp}
 }
 
-func (s *BaseScheduler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (*BaseScheduler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "not implements")
 }
 
 // GetMinInterval returns the minimal interval for the scheduler
-func (s *BaseScheduler) GetMinInterval() time.Duration {
+func (*BaseScheduler) GetMinInterval() time.Duration {
 	return MinScheduleInterval
 }
 
 // EncodeConfig encode config for the scheduler
-func (s *BaseScheduler) EncodeConfig() ([]byte, error) {
+func (*BaseScheduler) EncodeConfig() ([]byte, error) {
 	return EncodeConfig(nil)
 }
 
 // ReloadConfig reloads the config from the storage.
 // By default, the scheduler does not need to reload the config
 // if it doesn't support the dynamic configuration.
-func (s *BaseScheduler) ReloadConfig() error { return nil }
+func (*BaseScheduler) ReloadConfig() error { return nil }
 
 // GetNextInterval return the next interval for the scheduler
-func (s *BaseScheduler) GetNextInterval(interval time.Duration) time.Duration {
+func (*BaseScheduler) GetNextInterval(interval time.Duration) time.Duration {
 	return intervalGrow(interval, MaxScheduleInterval, exponentialGrowth)
 }
 
 // PrepareConfig does some prepare work about config.
-func (s *BaseScheduler) PrepareConfig(cluster sche.SchedulerCluster) error { return nil }
+func (*BaseScheduler) PrepareConfig(sche.SchedulerCluster) error { return nil }
 
 // CleanConfig does some cleanup work about config.
-func (s *BaseScheduler) CleanConfig(cluster sche.SchedulerCluster) {}
+func (*BaseScheduler) CleanConfig(sche.SchedulerCluster) {}
+
+// GetName returns the name of the scheduler
+func (s *BaseScheduler) GetName() string {
+	if len(s.name) == 0 {
+		return s.tp.String()
+	}
+	return s.name
+}
+
+// GetType returns the type of the scheduler
+func (s *BaseScheduler) GetType() types.CheckerSchedulerType {
+	return s.tp
+}

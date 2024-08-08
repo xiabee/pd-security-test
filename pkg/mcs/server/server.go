@@ -95,8 +95,8 @@ func (bs *BaseServer) GetHTTPClient() *http.Client {
 	return bs.httpClient
 }
 
-// SetETCDClient sets the etcd client.
-func (bs *BaseServer) SetETCDClient(etcdClient *clientv3.Client) {
+// SetEtcdClient sets the etcd client.
+func (bs *BaseServer) SetEtcdClient(etcdClient *clientv3.Client) {
 	bs.etcdClient = etcdClient
 }
 
@@ -171,7 +171,7 @@ func (bs *BaseServer) StartTimestamp() int64 {
 
 // CloseClientConns closes all client connections.
 func (bs *BaseServer) CloseClientConns() {
-	bs.clientConns.Range(func(key, value any) bool {
+	bs.clientConns.Range(func(_, value any) bool {
 		conn := value.(*grpc.ClientConn)
 		if err := conn.Close(); err != nil {
 			log.Error("close client connection meet error")

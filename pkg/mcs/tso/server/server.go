@@ -174,7 +174,9 @@ func (s *Server) Close() {
 	log.Info("closing tso server ...")
 	// close tso service loops in the keyspace group manager
 	s.keyspaceGroupManager.Close()
-	s.serviceRegister.Deregister()
+	if err := s.serviceRegister.Deregister(); err != nil {
+		log.Error("failed to deregister the service", errs.ZapError(err))
+	}
 	utils.StopHTTPServer(s)
 	utils.StopGRPCServer(s)
 	s.GetListener().Close()
@@ -250,7 +252,7 @@ func (s *Server) ResignPrimary(keyspaceID, keyspaceGroupID uint32) error {
 
 // AddServiceReadyCallback implements basicserver.
 // It adds callbacks when it's ready for providing tso service.
-func (s *Server) AddServiceReadyCallback(callbacks ...func(context.Context) error) {
+func (*Server) AddServiceReadyCallback(...func(context.Context) error) {
 	// Do nothing here. The primary of each keyspace group assigned to this host
 	// will respond to the requests accordingly.
 }
@@ -278,7 +280,7 @@ func (s *Server) GetTSOAllocatorManager(keyspaceGroupID uint32) (*tso.AllocatorM
 }
 
 // IsLocalRequest checks if the forwarded host is the current host
-func (s *Server) IsLocalRequest(forwardedHost string) bool {
+func (*Server) IsLocalRequest(forwardedHost string) bool {
 	// TODO: Check if the forwarded host is the current host.
 	// The logic is depending on etcd service mode -- if the TSO service
 	// uses the embedded etcd, check against ClientUrls; otherwise check
@@ -310,13 +312,13 @@ func (s *Server) ValidateRequest(header *tsopb.RequestHeader) error {
 
 // GetExternalTS returns external timestamp from the cache or the persistent storage.
 // TODO: Implement GetExternalTS
-func (s *Server) GetExternalTS() uint64 {
+func (*Server) GetExternalTS() uint64 {
 	return 0
 }
 
 // SetExternalTS saves external timestamp to cache and the persistent storage.
 // TODO: Implement SetExternalTS
-func (s *Server) SetExternalTS(externalTS uint64) error {
+func (*Server) SetExternalTS(uint64) error {
 	return nil
 }
 
@@ -380,6 +382,7 @@ func (s *Server) startServer() (err error) {
 		GitHash:        versioninfo.PDGitHash,
 		DeployPath:     deployPath,
 		StartTimestamp: s.StartTimestamp(),
+		Name:           s.Name(),
 	}
 	s.keyspaceGroupManager = tso.NewKeyspaceGroupManager(
 		s.serverLoopCtx, s.serviceID, s.GetClient(), s.GetHTTPClient(), s.cfg.AdvertiseListenAddr,
@@ -435,10 +438,14 @@ func CreateServer(ctx context.Context, cfg *Config) *Server {
 
 // CreateServerWrapper encapsulates the configuration/log/metrics initialization and create the server
 func CreateServerWrapper(cmd *cobra.Command, args []string) {
-	cmd.Flags().Parse(args)
+	err := cmd.Flags().Parse(args)
+	if err != nil {
+		cmd.Println(err)
+		return
+	}
 	cfg := NewConfig()
 	flagSet := cmd.Flags()
-	err := cfg.Parse(flagSet)
+	err = cfg.Parse(flagSet)
 	defer logutil.LogPanic()
 
 	if err != nil {
@@ -462,7 +469,7 @@ func CreateServerWrapper(cmd *cobra.Command, args []string) {
 		log.Fatal("initialize logger error", errs.ZapError(err))
 	}
 	// Flushing any buffered log entries
-	defer log.Sync()
+	log.Sync()
 
 	versioninfo.Log(serviceName)
 	log.Info("TSO service config", zap.Reflect("config", cfg))

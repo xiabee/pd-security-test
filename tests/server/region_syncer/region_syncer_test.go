@@ -40,7 +40,7 @@ func TestRegionSyncer(t *testing.T) {
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/syncer/noFastExitSync", `return(true)`))
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/syncer/disableClientStreaming", `return(true)`))
 
-	cluster, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, serverName string) { conf.PDServerCfg.UseRegionStorage = true })
+	cluster, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, _ string) { conf.PDServerCfg.UseRegionStorage = true })
 	defer func() {
 		cluster.Destroy()
 		cancel()
@@ -48,7 +48,7 @@ func TestRegionSyncer(t *testing.T) {
 	re.NoError(err)
 
 	re.NoError(cluster.RunInitialServers())
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	leaderServer := cluster.GetLeaderServer()
 
 	re.NoError(leaderServer.BootstrapCluster())
@@ -140,7 +140,7 @@ func TestRegionSyncer(t *testing.T) {
 
 	err = leaderServer.Stop()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	leaderServer = cluster.GetLeaderServer()
 	testutil.Eventually(re, func() bool {
 		return !leaderServer.GetServer().GetRaftCluster().GetRegionSyncer().IsRunning()
@@ -163,13 +163,13 @@ func TestFullSyncWithAddMember(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cluster, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, serverName string) { conf.PDServerCfg.UseRegionStorage = true })
+	cluster, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, _ string) { conf.PDServerCfg.UseRegionStorage = true })
 	defer cluster.Destroy()
 	re.NoError(err)
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	leaderServer := cluster.GetLeaderServer()
 	re.NoError(leaderServer.BootstrapCluster())
 	rc := leaderServer.GetServer().GetRaftCluster()
@@ -207,13 +207,13 @@ func TestPrepareChecker(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/changeCoordinatorTicker", `return(true)`))
-	cluster, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, serverName string) { conf.PDServerCfg.UseRegionStorage = true })
+	cluster, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, _ string) { conf.PDServerCfg.UseRegionStorage = true })
 	defer cluster.Destroy()
 	re.NoError(err)
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	leaderServer := cluster.GetLeaderServer()
 	re.NoError(leaderServer.BootstrapCluster())
 	rc := leaderServer.GetServer().GetRaftCluster()
@@ -234,11 +234,13 @@ func TestPrepareChecker(t *testing.T) {
 	re.NoError(err)
 	err = pd2.Run()
 	re.NoError(err)
+	re.NotEmpty(cluster.WaitLeader())
 	// waiting for synchronization to complete
 	time.Sleep(3 * time.Second)
+	leaderServer = cluster.GetLeaderServer()
 	err = cluster.ResignLeader()
 	re.NoError(err)
-	re.Equal("pd2", cluster.WaitLeader())
+	re.NotEqual(leaderServer.GetServer().Name(), cluster.WaitLeader())
 	leaderServer = cluster.GetLeaderServer()
 	rc = leaderServer.GetServer().GetRaftCluster()
 	for _, region := range regions {
@@ -253,16 +255,20 @@ func TestPrepareChecker(t *testing.T) {
 // ref: https://github.com/tikv/pd/issues/6988
 func TestPrepareCheckerWithTransferLeader(t *testing.T) {
 	re := require.New(t)
+	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/member/changeFrequencyTimes", "return(10)"))
+	defer func() {
+		re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/member/changeFrequencyTimes"))
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/changeCoordinatorTicker", `return(true)`))
-	cluster, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, serverName string) { conf.PDServerCfg.UseRegionStorage = true })
+	cluster, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, _ string) { conf.PDServerCfg.UseRegionStorage = true })
 	defer cluster.Destroy()
 	re.NoError(err)
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	leaderServer := cluster.GetLeaderServer()
 	re.NoError(leaderServer.BootstrapCluster())
 	rc := leaderServer.GetServer().GetRaftCluster()
@@ -282,16 +288,22 @@ func TestPrepareCheckerWithTransferLeader(t *testing.T) {
 	re.NoError(err)
 	err = pd2.Run()
 	re.NoError(err)
+	re.NotEmpty(cluster.WaitLeader())
 	// waiting for synchronization to complete
 	time.Sleep(3 * time.Second)
+	leaderServer = cluster.GetLeaderServer()
 	err = cluster.ResignLeader()
 	re.NoError(err)
-	re.Equal("pd2", cluster.WaitLeader())
+	re.NotEqual(leaderServer.GetServer().Name(), cluster.WaitLeader())
+	rc = cluster.GetLeaderServer().GetRaftCluster()
+	re.True(rc.IsPrepared())
 
-	// transfer leader to pd1, can start coordinator immediately.
+	// transfer leader, can start coordinator immediately.
+	leaderServer = cluster.GetLeaderServer()
 	err = cluster.ResignLeader()
 	re.NoError(err)
-	re.Equal("pd1", cluster.WaitLeader())
+	re.NotEqual(leaderServer.GetServer().Name(), cluster.WaitLeader())
+	rc = cluster.GetLeaderServer().GetServer().GetRaftCluster()
 	re.True(rc.IsPrepared())
 	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/schedule/changeCoordinatorTicker"))
 }

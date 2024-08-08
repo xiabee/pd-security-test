@@ -167,6 +167,7 @@ func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 	}
 
 	// Ignore the error check here
+	configutil.AdjustCommandLineString(flagSet, &c.Name, "name")
 	configutil.AdjustCommandLineString(flagSet, &c.Log.Level, "log-level")
 	configutil.AdjustCommandLineString(flagSet, &c.Log.File.Filename, "log-file")
 	configutil.AdjustCommandLineString(flagSet, &c.Metric.PushAddress, "metrics-addr")
@@ -177,11 +178,11 @@ func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 	configutil.AdjustCommandLineString(flagSet, &c.ListenAddr, "listen-addr")
 	configutil.AdjustCommandLineString(flagSet, &c.AdvertiseListenAddr, "advertise-listen-addr")
 
-	return c.Adjust(meta, false)
+	return c.Adjust(meta)
 }
 
 // Adjust is used to adjust the TSO configurations.
-func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
+func (c *Config) Adjust(meta *toml.MetaData) error {
 	configMetaData := configutil.NewConfigMetadata(meta)
 	if err := configMetaData.CheckUndecoded(); err != nil {
 		c.WarningMsgs = append(c.WarningMsgs, err.Error())
@@ -224,9 +225,7 @@ func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
 	}
 
 	c.adjustLog(configMetaData.Child("log"))
-	c.Security.Encryption.Adjust()
-
-	return nil
+	return c.Security.Encryption.Adjust()
 }
 
 func (c *Config) adjustLog(meta *configutil.ConfigMetaData) {

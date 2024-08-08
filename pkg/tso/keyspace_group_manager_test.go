@@ -891,7 +891,7 @@ func collectAssignedKeyspaceGroupIDs(re *require.Assertions, kgm *KeyspaceGroupM
 				re.Equal(i, int(am.kgID))
 				re.Equal(i, int(kg.ID))
 				for _, m := range kg.Members {
-					if m.Address == kgm.tsoServiceID.ServiceAddr {
+					if m.IsAddressEquivalent(kgm.tsoServiceID.ServiceAddr) {
 						ids = append(ids, uint32(i))
 						break
 					}
@@ -1212,5 +1212,5 @@ func waitForPrimariesServing(
 			}
 		}
 		return true
-	}, testutil.WithWaitFor(5*time.Second), testutil.WithTickInterval(50*time.Millisecond))
+	}, testutil.WithWaitFor(10*time.Second), testutil.WithTickInterval(50*time.Millisecond))
 }

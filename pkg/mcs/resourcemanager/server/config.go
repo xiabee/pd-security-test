@@ -202,6 +202,7 @@ func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 	}
 
 	// Ignore the error check here
+	configutil.AdjustCommandLineString(flagSet, &c.Name, "name")
 	configutil.AdjustCommandLineString(flagSet, &c.Log.Level, "log-level")
 	configutil.AdjustCommandLineString(flagSet, &c.Log.File.Filename, "log-file")
 	configutil.AdjustCommandLineString(flagSet, &c.Metric.PushAddress, "metrics-addr")
@@ -245,7 +246,9 @@ func (c *Config) Adjust(meta *toml.MetaData) error {
 	}
 
 	c.adjustLog(configMetaData.Child("log"))
-	c.Security.Encryption.Adjust()
+	if err := c.Security.Encryption.Adjust(); err != nil {
+		return err
+	}
 
 	c.Controller.Adjust(configMetaData.Child("controller"))
 	configutil.AdjustInt64(&c.LeaderLease, utils.DefaultLeaderLease)

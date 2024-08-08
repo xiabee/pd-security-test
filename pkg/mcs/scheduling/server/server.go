@@ -316,7 +316,9 @@ func (s *Server) Close() {
 	}
 
 	log.Info("closing scheduling server ...")
-	s.serviceRegister.Deregister()
+	if err := s.serviceRegister.Deregister(); err != nil {
+		log.Error("failed to deregister the service", errs.ZapError(err))
+	}
 	utils.StopHTTPServer(s)
 	utils.StopGRPCServer(s)
 	s.GetListener().Close()
@@ -425,6 +427,7 @@ func (s *Server) startServer() (err error) {
 		GitHash:        versioninfo.PDGitHash,
 		DeployPath:     deployPath,
 		StartTimestamp: s.StartTimestamp(),
+		Name:           s.Name(),
 	}
 	uniqueName := s.cfg.GetAdvertiseListenAddr()
 	uniqueID := memberutil.GenerateUniqueID(uniqueName)
@@ -563,10 +566,14 @@ func CreateServer(ctx context.Context, cfg *config.Config) *Server {
 // CreateServerWrapper encapsulates the configuration/log/metrics initialization and create the server
 func CreateServerWrapper(cmd *cobra.Command, args []string) {
 	schedulers.Register()
-	cmd.Flags().Parse(args)
+	err := cmd.Flags().Parse(args)
+	if err != nil {
+		cmd.Println(err)
+		return
+	}
 	cfg := config.NewConfig()
 	flagSet := cmd.Flags()
-	err := cfg.Parse(flagSet)
+	err = cfg.Parse(flagSet)
 	defer logutil.LogPanic()
 
 	if err != nil {
@@ -590,7 +597,7 @@ func CreateServerWrapper(cmd *cobra.Command, args []string) {
 		log.Fatal("initialize logger error", errs.ZapError(err))
 	}
 	// Flushing any buffered log entries
-	defer log.Sync()
+	log.Sync()
 
 	versioninfo.Log(serviceName)
 	log.Info("scheduling service config", zap.Reflect("config", cfg))

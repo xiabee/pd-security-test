@@ -25,7 +25,6 @@ import (
 )
 
 func TestExpireRegionCache(t *testing.T) {
-	t.Parallel()
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -121,7 +120,6 @@ func sortIDs(ids []uint64) []uint64 {
 }
 
 func TestLRUCache(t *testing.T) {
-	t.Parallel()
 	re := require.New(t)
 	cache := newLRU(3)
 
@@ -199,7 +197,6 @@ func TestLRUCache(t *testing.T) {
 }
 
 func TestFifoCache(t *testing.T) {
-	t.Parallel()
 	re := require.New(t)
 	cache := NewFIFO(3)
 	cache.Put(1, "1")
@@ -227,7 +224,6 @@ func TestFifoCache(t *testing.T) {
 }
 
 func TestFifoFromLastSameElems(t *testing.T) {
-	t.Parallel()
 	re := require.New(t)
 	type testStruct struct {
 		value string
@@ -260,7 +256,6 @@ func TestFifoFromLastSameElems(t *testing.T) {
 }
 
 func TestTwoQueueCache(t *testing.T) {
-	t.Parallel()
 	re := require.New(t)
 	cache := newTwoQueue(3)
 	cache.Put(1, "1")
@@ -345,7 +340,6 @@ func (pq PriorityQueueItemTest) ID() uint64 {
 }
 
 func TestPriorityQueue(t *testing.T) {
-	t.Parallel()
 	re := require.New(t)
 	testData := []PriorityQueueItemTest{0, 1, 2, 3, 4, 5}
 	pq := NewPriorityQueue(0)
@@ -377,23 +371,23 @@ func TestPriorityQueue(t *testing.T) {
 	pq.Remove(uint64(1))
 	re.Nil(pq.Get(1))
 	re.Equal(2, pq.Len())
-	entry := pq.Peek()
+	entry := pq.peek()
 	re.Equal(2, entry.Priority)
 	re.Equal(testData[2], entry.Value)
 
 	// case3 update 3's priority to highest
 	pq.Put(-1, testData[3])
-	entry = pq.Peek()
+	entry = pq.peek()
 	re.Equal(-1, entry.Priority)
 	re.Equal(testData[3], entry.Value)
 	pq.Remove(entry.Value.ID())
-	re.Equal(testData[2], pq.Peek().Value)
+	re.Equal(testData[2], pq.peek().Value)
 	re.Equal(1, pq.Len())
 
 	// case4 remove all element
 	pq.Remove(uint64(2))
 	re.Equal(0, pq.Len())
 	re.Empty(pq.items)
-	re.Nil(pq.Peek())
-	re.Nil(pq.Tail())
+	re.Nil(pq.peek())
+	re.Nil(pq.tail())
 }

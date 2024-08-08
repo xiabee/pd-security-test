@@ -27,6 +27,7 @@ import (
 	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
+	types "github.com/tikv/pd/pkg/schedule/type"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"go.uber.org/zap"
 )
@@ -36,7 +37,7 @@ type Scheduler interface {
 	http.Handler
 	GetName() string
 	// GetType should in accordance with the name passing to RegisterScheduler()
-	GetType() string
+	GetType() types.CheckerSchedulerType
 	EncodeConfig() ([]byte, error)
 	// ReloadConfig reloads the config from the storage.
 	ReloadConfig() error
@@ -101,7 +102,7 @@ func ConfigJSONDecoder(data []byte) ConfigDecoder {
 func ConfigSliceDecoder(name string, args []string) ConfigDecoder {
 	builder, ok := schedulerArgsToDecoder[name]
 	if !ok {
-		return func(v any) error {
+		return func(any) error {
 			return errors.Errorf("the config decoder do not register for %s", name)
 		}
 	}

@@ -19,7 +19,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -42,13 +41,13 @@ var (
 var _ tsopb.TSOServer = (*Service)(nil)
 
 // SetUpRestHandler is a hook to sets up the REST service.
-var SetUpRestHandler = func(srv *Service) (http.Handler, apiutil.APIServiceGroup) {
+var SetUpRestHandler = func(*Service) (http.Handler, apiutil.APIServiceGroup) {
 	return dummyRestService{}, apiutil.APIServiceGroup{}
 }
 
 type dummyRestService struct{}
 
-func (d dummyRestService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (dummyRestService) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 	w.Write([]byte("not implemented"))
 }
@@ -79,9 +78,9 @@ func (s *Service) RegisterGRPCService(g *grpc.Server) {
 }
 
 // RegisterRESTHandler registers the service to REST server.
-func (s *Service) RegisterRESTHandler(userDefineHandlers map[string]http.Handler) {
+func (s *Service) RegisterRESTHandler(userDefineHandlers map[string]http.Handler) error {
 	handler, group := SetUpRestHandler(s)
-	apiutil.RegisterUserDefinedHandlers(userDefineHandlers, &group, handler)
+	return apiutil.RegisterUserDefinedHandlers(userDefineHandlers, &group, handler)
 }
 
 // Tso returns a stream of timestamps
@@ -135,7 +134,7 @@ func (s *Service) Tso(stream tsopb.TSO_TsoServer) error {
 
 // FindGroupByKeyspaceID returns the keyspace group that the keyspace belongs to.
 func (s *Service) FindGroupByKeyspaceID(
-	ctx context.Context, request *tsopb.FindGroupByKeyspaceIDRequest,
+	_ context.Context, request *tsopb.FindGroupByKeyspaceIDRequest,
 ) (*tsopb.FindGroupByKeyspaceIDResponse, error) {
 	respKeyspaceGroup := request.GetHeader().GetKeyspaceGroupId()
 	if errorType, err := s.validRequest(request.GetHeader()); err != nil {
@@ -164,7 +163,7 @@ func (s *Service) FindGroupByKeyspaceID(
 			Address: member.Address,
 			// TODO: watch the keyspace groups' primary serving address changes
 			// to get the latest primary serving addresses of all keyspace groups.
-			IsPrimary: strings.EqualFold(member.Address, am.GetLeaderAddr()),
+			IsPrimary: member.IsAddressEquivalent(am.GetLeaderAddr()),
 		})
 	}
 
@@ -189,7 +188,7 @@ func (s *Service) FindGroupByKeyspaceID(
 // GetMinTS gets the minimum timestamp across all keyspace groups served by the TSO server
 // who receives and handles the request.
 func (s *Service) GetMinTS(
-	ctx context.Context, request *tsopb.GetMinTSRequest,
+	_ context.Context, request *tsopb.GetMinTSRequest,
 ) (*tsopb.GetMinTSResponse, error) {
 	respKeyspaceGroup := request.GetHeader().GetKeyspaceGroupId()
 	if errorType, err := s.validRequest(request.GetHeader()); err != nil {

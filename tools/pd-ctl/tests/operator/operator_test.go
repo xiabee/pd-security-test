@@ -43,7 +43,7 @@ func TestOperatorTestSuite(t *testing.T) {
 
 func (suite *operatorTestSuite) SetupSuite() {
 	suite.env = pdTests.NewSchedulingTestEnvironment(suite.T(),
-		func(conf *config.Config, serverName string) {
+		func(conf *config.Config, _ string) {
 			// TODO: enable placement rules
 			conf.Replication.MaxReplicas = 2
 			conf.Replication.EnablePlacementRules = false
@@ -57,7 +57,7 @@ func (suite *operatorTestSuite) TearDownSuite() {
 }
 
 func (suite *operatorTestSuite) TestOperator() {
-	suite.env.RunTestInTwoModes(suite.checkOperator)
+	suite.env.RunTestBasedOnMode(suite.checkOperator)
 }
 
 func (suite *operatorTestSuite) checkOperator(cluster *pdTests.TestCluster) {

@@ -222,7 +222,7 @@ func (oc *Controller) checkStaleOperator(op *Operator, step OpStep, region *core
 	return false
 }
 
-func (oc *Controller) getNextPushOperatorTime(step OpStep, now time.Time) time.Time {
+func getNextPushOperatorTime(step OpStep, now time.Time) time.Time {
 	nextTime := slowNotifyInterval
 	switch step.(type) {
 	case TransferLeader, PromoteLearner, ChangePeerV2Enter, ChangePeerV2Leave:
@@ -235,10 +235,10 @@ func (oc *Controller) getNextPushOperatorTime(step OpStep, now time.Time) time.T
 // "next" is true to indicate that it may exist in next attempt,
 // and false is the end for the poll.
 func (oc *Controller) pollNeedDispatchRegion() (r *core.RegionInfo, next bool) {
-	if oc.opNotifierQueue.Len() == 0 {
+	if oc.opNotifierQueue.len() == 0 {
 		return nil, false
 	}
-	item, _ := oc.opNotifierQueue.Pop()
+	item, _ := oc.opNotifierQueue.pop()
 	regionID := item.op.RegionID()
 	opi, ok := oc.operators.Load(regionID)
 	if !ok || opi.(*Operator) == nil {
@@ -265,13 +265,13 @@ func (oc *Controller) pollNeedDispatchRegion() (r *core.RegionInfo, next bool) {
 	}
 	now := time.Now()
 	if now.Before(item.time) {
-		oc.opNotifierQueue.Push(item)
+		oc.opNotifierQueue.push(item)
 		return nil, false
 	}
 
 	// pushes with new notify time.
-	item.time = oc.getNextPushOperatorTime(step, now)
-	oc.opNotifierQueue.Push(item)
+	item.time = getNextPushOperatorTime(step, now)
+	oc.opNotifierQueue.push(item)
 	return r, true
 }
 
@@ -461,7 +461,7 @@ func (oc *Controller) checkAddOperator(isPromoting bool, ops ...*Operator) (bool
 			return false, NotInCreateStatus
 		}
 		if !isPromoting && oc.wopStatus.getCount(op.Desc()) >= oc.config.GetSchedulerMaxWaitingOperator() {
-			log.Debug("exceed max return false", zap.Uint64("waiting", oc.wopStatus.ops[op.Desc()]), zap.String("desc", op.Desc()), zap.Uint64("max", oc.config.GetSchedulerMaxWaitingOperator()))
+			log.Debug("exceed max return false", zap.Uint64("waiting", oc.wopStatus.getCount(op.Desc())), zap.String("desc", op.Desc()), zap.Uint64("max", oc.config.GetSchedulerMaxWaitingOperator()))
 			operatorCounter.WithLabelValues(op.Desc(), "exceed-max-waiting").Inc()
 			return false, ExceedWaitLimit
 		}
@@ -561,7 +561,7 @@ func (oc *Controller) addOperatorInner(op *Operator) bool {
 		}
 	}
 
-	oc.opNotifierQueue.Push(&operatorWithTime{op: op, time: oc.getNextPushOperatorTime(step, time.Now())})
+	oc.opNotifierQueue.push(&operatorWithTime{op: op, time: getNextPushOperatorTime(step, time.Now())})
 	operatorCounter.WithLabelValues(op.Desc(), "create").Inc()
 	for _, counter := range op.Counters {
 		counter.Inc()
@@ -753,7 +753,7 @@ func (oc *Controller) GetOperator(regionID uint64) *Operator {
 
 // GetOperators gets operators from the running operators.
 func (oc *Controller) GetOperators() []*Operator {
-	operators := make([]*Operator, 0, oc.opNotifierQueue.Len())
+	operators := make([]*Operator, 0, oc.opNotifierQueue.len())
 	oc.operators.Range(
 		func(_, value any) bool {
 			operators = append(operators, value.(*Operator))
@@ -769,7 +769,7 @@ func (oc *Controller) GetWaitingOperators() []*Operator {
 
 // GetOperatorsOfKind returns the running operators of the kind.
 func (oc *Controller) GetOperatorsOfKind(mask OpKind) []*Operator {
-	operators := make([]*Operator, 0, oc.opNotifierQueue.Len())
+	operators := make([]*Operator, 0, oc.opNotifierQueue.len())
 	oc.operators.Range(
 		func(_, value any) bool {
 			op := value.(*Operator)

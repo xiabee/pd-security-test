@@ -37,7 +37,7 @@ func newMockSplitRegionsHandler() *mockSplitRegionsHandler {
 }
 
 // SplitRegionByKeys mock SplitRegionsHandler
-func (m *mockSplitRegionsHandler) SplitRegionByKeys(region *core.RegionInfo, splitKeys [][]byte) error {
+func (m *mockSplitRegionsHandler) SplitRegionByKeys(region *core.RegionInfo, _ [][]byte) error {
 	m.regions[region.GetID()] = [2][]byte{
 		region.GetStartKey(),
 		region.GetEndKey(),
@@ -76,7 +76,7 @@ func (suite *regionSplitterTestSuite) SetupSuite() {
 	suite.ctx, suite.cancel = context.WithCancel(context.Background())
 }
 
-func (suite *regionSplitterTestSuite) TearDownTest() {
+func (suite *regionSplitterTestSuite) TearDownSuite() {
 	suite.cancel()
 }
 
@@ -87,7 +87,7 @@ func (suite *regionSplitterTestSuite) TestRegionSplitter() {
 	tc := mockcluster.NewCluster(suite.ctx, opt)
 	handler := newMockSplitRegionsHandler()
 	tc.AddLeaderRegionWithRange(1, "eee", "hhh", 2, 3, 4)
-	splitter := NewRegionSplitter(tc, handler, tc.AddSuspectRegions)
+	splitter := NewRegionSplitter(tc, handler, tc.AddPendingProcessedRegions)
 	newRegions := map[uint64]struct{}{}
 	// assert success
 	failureKeys := splitter.splitRegionsByKeys(suite.ctx, [][]byte{[]byte("fff"), []byte("ggg")}, newRegions)
@@ -117,7 +117,7 @@ func (suite *regionSplitterTestSuite) TestGroupKeysByRegion() {
 	tc.AddLeaderRegionWithRange(1, "aaa", "ccc", 2, 3, 4)
 	tc.AddLeaderRegionWithRange(2, "ccc", "eee", 2, 3, 4)
 	tc.AddLeaderRegionWithRange(3, "fff", "ggg", 2, 3, 4)
-	splitter := NewRegionSplitter(tc, handler, tc.AddSuspectRegions)
+	splitter := NewRegionSplitter(tc, handler, tc.AddPendingProcessedRegions)
 	groupKeys := splitter.groupKeysByRegion([][]byte{
 		[]byte("bbb"),
 		[]byte("ddd"),

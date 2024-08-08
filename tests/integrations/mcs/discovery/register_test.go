@@ -60,6 +60,7 @@ func (suite *serverRegisterTestSuite) SetupSuite() {
 	re.NoError(err)
 
 	leaderName := suite.cluster.WaitLeader()
+	re.NotEmpty(leaderName)
 	suite.pdLeader = suite.cluster.GetServer(leaderName)
 	suite.clusterID = strconv.FormatUint(suite.pdLeader.GetClusterID(), 10)
 	suite.backendEndpoints = suite.pdLeader.GetAddr()
@@ -124,9 +125,15 @@ func (suite *serverRegisterTestSuite) checkServerPrimaryChange(serviceName strin
 	re.Empty(primary)
 
 	serverMap := make(map[string]bs.Server)
+	var cleanups []func()
+	defer func() {
+		for _, cleanup := range cleanups {
+			cleanup()
+		}
+	}()
 	for i := 0; i < serverNum; i++ {
 		s, cleanup := suite.addServer(serviceName)
-		defer cleanup()
+		cleanups = append(cleanups, cleanup)
 		serverMap[s.GetAddr()] = s
 	}
 

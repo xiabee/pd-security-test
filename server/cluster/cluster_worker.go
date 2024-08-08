@@ -24,6 +24,7 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
 	mcsutils "github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/ratelimit"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/statistics/buckets"
 	"github.com/tikv/pd/pkg/utils/logutil"
@@ -38,8 +39,24 @@ func (c *RaftCluster) HandleRegionHeartbeat(region *core.RegionInfo) error {
 	if c.GetScheduleConfig().EnableHeartbeatBreakdownMetrics {
 		tracer = core.NewHeartbeatProcessTracer()
 	}
+	defer tracer.Release()
+	var taskRunner, miscRunner, logRunner ratelimit.Runner
+	taskRunner, miscRunner, logRunner = syncRunner, syncRunner, syncRunner
+	if c.GetScheduleConfig().EnableHeartbeatConcurrentRunner {
+		taskRunner = c.heartbeatRunner
+		miscRunner = c.miscRunner
+		logRunner = c.logRunner
+	}
+
+	ctx := &core.MetaProcessContext{
+		Context:    c.ctx,
+		Tracer:     tracer,
+		TaskRunner: taskRunner,
+		MiscRunner: miscRunner,
+		LogRunner:  logRunner,
+	}
 	tracer.Begin()
-	if err := c.processRegionHeartbeat(region, tracer); err != nil {
+	if err := c.processRegionHeartbeat(ctx, region); err != nil {
 		tracer.OnAllStageFinished()
 		return err
 	}
@@ -148,14 +165,14 @@ func (c *RaftCluster) HandleAskBatchSplit(request *pdpb.AskBatchSplitRequest) (*
 	// If region splits during the scheduling process, regions with abnormal
 	// status may be left, and these regions need to be checked with higher
 	// priority.
-	c.AddSuspectRegions(recordRegions...)
+	c.AddPendingProcessedRegions(recordRegions...)
 
 	resp := &pdpb.AskBatchSplitResponse{Ids: splitIDs}
 
 	return resp, nil
 }
 
-func (c *RaftCluster) checkSplitRegion(left *metapb.Region, right *metapb.Region) error {
+func checkSplitRegion(left *metapb.Region, right *metapb.Region) error {
 	if left == nil || right == nil {
 		return errors.New("invalid split region")
 	}
@@ -171,7 +188,7 @@ func (c *RaftCluster) checkSplitRegion(left *metapb.Region, right *metapb.Region
 	return errors.New("invalid split region")
 }
 
-func (c *RaftCluster) checkSplitRegions(regions []*metapb.Region) error {
+func checkSplitRegions(regions []*metapb.Region) error {
 	if len(regions) <= 1 {
 		return errors.New("invalid split region")
 	}
@@ -190,11 +207,11 @@ func (c *RaftCluster) checkSplitRegions(regions []*metapb.Region) error {
 }
 
 // HandleReportSplit handles the report split request.
-func (c *RaftCluster) HandleReportSplit(request *pdpb.ReportSplitRequest) (*pdpb.ReportSplitResponse, error) {
+func (*RaftCluster) HandleReportSplit(request *pdpb.ReportSplitRequest) (*pdpb.ReportSplitResponse, error) {
 	left := request.GetLeft()
 	right := request.GetRight()
 
-	err := c.checkSplitRegion(left, right)
+	err := checkSplitRegion(left, right)
 	if err != nil {
 		log.Warn("report split region is invalid",
 			logutil.ZapRedactStringer("left-region", core.RegionToHexMeta(left)),
@@ -214,14 +231,14 @@ func (c *RaftCluster) HandleReportSplit(request *pdpb.ReportSplitRequest) (*pdpb
 }
 
 // HandleBatchReportSplit handles the batch report split request.
-func (c *RaftCluster) HandleBatchReportSplit(request *pdpb.ReportBatchSplitRequest) (*pdpb.ReportBatchSplitResponse, error) {
+func (*RaftCluster) HandleBatchReportSplit(request *pdpb.ReportBatchSplitRequest) (*pdpb.ReportBatchSplitResponse, error) {
 	regions := request.GetRegions()
 
 	hrm := core.RegionsToHexMeta(regions)
-	err := c.checkSplitRegions(regions)
+	err := checkSplitRegions(regions)
 	if err != nil {
 		log.Warn("report batch split region is invalid",
-			zap.Stringer("region-meta", hrm),
+			logutil.ZapRedactStringer("region-meta", hrm),
 			errs.ZapError(err))
 		return nil, err
 	}
@@ -230,7 +247,7 @@ func (c *RaftCluster) HandleBatchReportSplit(request *pdpb.ReportBatchSplitReque
 	hrm = core.RegionsToHexMeta(regions[:last])
 	log.Info("region batch split, generate new regions",
 		zap.Uint64("region-id", originRegion.GetId()),
-		zap.Stringer("origin", hrm),
+		logutil.ZapRedactStringer("origin", hrm),
 		zap.Int("total", last))
 	return &pdpb.ReportBatchSplitResponse{}, nil
 }
