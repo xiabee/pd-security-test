@@ -23,6 +23,7 @@ import (
 )
 
 func TestPulse(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	aot := NewAvgOverTime(5 * time.Second)
 	// warm up
@@ -41,20 +42,8 @@ func TestPulse(t *testing.T) {
 	}
 }
 
-func TestPulse2(t *testing.T) {
-	re := require.New(t)
-	dur := 5 * time.Second
-	aot := NewAvgOverTime(dur)
-	re.Equal(float64(0), aot.GetInstantaneous())
-	aot.Add(1000, dur)
-	re.Equal(float64(1000)/dur.Seconds(), aot.GetInstantaneous())
-	re.True(aot.IsFull())
-	aot.Clear()
-	aot.Add(1000, dur)
-	re.Equal(float64(1000)/dur.Seconds(), aot.GetInstantaneous())
-}
-
 func TestChange(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	aot := NewAvgOverTime(5 * time.Second)
 
@@ -88,13 +77,14 @@ func TestChange(t *testing.T) {
 }
 
 func TestMinFilled(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	interval := 10 * time.Second
 	rate := 1.0
 	for aotSize := 2; aotSize < 10; aotSize++ {
 		for mfSize := 2; mfSize < 10; mfSize++ {
 			tm := NewTimeMedian(aotSize, mfSize, interval)
-			for i := 0; i < aotSize; i++ {
+			for i := 0; i < tm.GetFilledPeriod(); i++ {
 				re.Equal(0.0, tm.Get())
 				tm.Add(rate*interval.Seconds(), interval)
 			}
@@ -104,6 +94,7 @@ func TestMinFilled(t *testing.T) {
 }
 
 func TestUnstableInterval(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	aot := NewAvgOverTime(5 * time.Second)
 	re.Equal(0., aot.Get())

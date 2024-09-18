@@ -17,36 +17,31 @@ package cases
 import (
 	"github.com/docker/go-units"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/tikv/pd/pkg/core"
-	sc "github.com/tikv/pd/tools/pd-simulator/simulator/config"
+	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
+	"go.uber.org/zap"
 )
 
-func newMakeupDownReplicas(config *sc.SimConfig) *Case {
+func newMakeupDownReplicas() *Case {
 	var simCase Case
-	totalStore := config.TotalStore
-	totalRegion := config.TotalRegion
-	replica := int(config.ServerConfig.Replication.MaxReplicas)
-
-	noEmptyStoreNum := totalStore - 1
-	for i := 0; i < totalStore; i++ {
+	storeNum, regionNum := getStoreNum(), getRegionNum()
+	noEmptyStoreNum := storeNum - 1
+	for i := 1; i <= storeNum; i++ {
 		simCase.Stores = append(simCase.Stores, &Store{
-			ID:     simutil.IDAllocator.NextID(),
+			ID:     IDAllocator.nextID(),
 			Status: metapb.StoreState_Up,
 		})
 	}
 
-	for i := 0; i < totalRegion; i++ {
-		peers := make([]*metapb.Peer, 0, replica)
-		for j := 0; j < replica; j++ {
-			peers = append(peers, &metapb.Peer{
-				Id:      simutil.IDAllocator.NextID(),
-				StoreId: uint64((i+j)%totalStore + 1),
-			})
+	for i := 0; i < storeNum*regionNum/3; i++ {
+		peers := []*metapb.Peer{
+			{Id: IDAllocator.nextID(), StoreId: uint64((i)%storeNum) + 1},
+			{Id: IDAllocator.nextID(), StoreId: uint64((i+1)%storeNum) + 1},
+			{Id: IDAllocator.nextID(), StoreId: uint64((i+2)%storeNum) + 1},
 		}
 		simCase.Regions = append(simCase.Regions, Region{
-			ID:     simutil.IDAllocator.NextID(),
+			ID:     IDAllocator.nextID(),
 			Peers:  peers,
 			Leader: peers[0],
 			Size:   96 * units.MiB,
@@ -54,7 +49,7 @@ func newMakeupDownReplicas(config *sc.SimConfig) *Case {
 		})
 	}
 
-	numNodes := totalStore
+	numNodes := storeNum
 	down := false
 	e := &DeleteNodesDescriptor{}
 	e.Step = func(tick int64) uint64 {
@@ -69,17 +64,32 @@ func newMakeupDownReplicas(config *sc.SimConfig) *Case {
 	}
 	simCase.Events = []EventDescriptor{e}
 
-	simCase.Checker = func(_ []*metapb.Store, regions *core.RegionsInfo, _ []info.StoreStats) bool {
-		if !down {
+	simCase.Checker = func(regions *core.RegionsInfo, stats []info.StoreStats) bool {
+		sum := 0
+		regionCounts := make([]int, 0, storeNum)
+		for i := 1; i <= storeNum; i++ {
+			regionCount := regions.GetStoreRegionCount(uint64(i))
+			regionCounts = append(regionCounts, regionCount)
+			sum += regionCount
+		}
+		simutil.Logger.Info("current region counts", zap.Ints("region", regionCounts))
+
+		if down && sum < storeNum*regionNum {
+			// only need to print once
+			down = false
+			simutil.Logger.Error("making up replicas don't start immediately")
 			return false
 		}
-		for i := 1; i <= totalStore; i++ {
-			peerCount := regions.GetStoreRegionCount(uint64(i))
-			if isUniform(peerCount, replica*totalRegion/noEmptyStoreNum) {
-				return false
+
+		res := true
+		threshold := 0.05
+		for index, regionCount := range regionCounts {
+			if index == 0 { // storeId == 1
+				continue
 			}
+			res = res && isUniform(regionCount, storeNum*regionNum/noEmptyStoreNum, threshold)
 		}
-		return true
+		return res
 	}
 	return &simCase
 }

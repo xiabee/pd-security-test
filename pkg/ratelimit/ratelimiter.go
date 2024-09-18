@@ -18,7 +18,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/tikv/pd/pkg/utils/syncutil"
+	"github.com/tikv/pd/pkg/syncutil"
 	"golang.org/x/time/rate"
 )
 

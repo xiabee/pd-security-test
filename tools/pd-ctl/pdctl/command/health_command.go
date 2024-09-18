@@ -15,25 +15,30 @@
 package command
 
 import (
+	"net/http"
+
 	"github.com/spf13/cobra"
+)
+
+var (
+	healthPrefix = "pd/api/v1/health"
 )
 
 // NewHealthCommand return a health subcommand of rootCmd
 func NewHealthCommand() *cobra.Command {
 	m := &cobra.Command{
-		Use:               "health",
-		Short:             "show all node's health information of the PD cluster",
-		PersistentPreRunE: requirePDClient,
-		Run:               showHealthCommandFunc,
+		Use:   "health",
+		Short: "show all node's health information of the pd cluster",
+		Run:   showHealthCommandFunc,
 	}
 	return m
 }
 
-func showHealthCommandFunc(cmd *cobra.Command, _ []string) {
-	health, err := PDCli.GetHealthStatus(cmd.Context())
+func showHealthCommandFunc(cmd *cobra.Command, args []string) {
+	r, err := doRequest(cmd, healthPrefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Println(err)
 		return
 	}
-	jsonPrint(cmd, health)
+	cmd.Println(r)
 }

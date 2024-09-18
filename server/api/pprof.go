@@ -27,8 +27,8 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/versioninfo"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/versioninfo"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
 )
@@ -148,71 +148,69 @@ func (h *pprofHandler) PProfZip(w http.ResponseWriter, r *http.Request) {
 // @Tags     debug
 // @Summary  debug profile of PD servers.
 // @Router   /debug/pprof/profile [get]
-func (*pprofHandler) PProfProfile(w http.ResponseWriter, r *http.Request) {
+func (h *pprofHandler) PProfProfile(w http.ResponseWriter, r *http.Request) {
 	pp.Profile(w, r)
 }
 
 // @Tags     debug
 // @Summary  debug trace of PD servers.
 // @Router   /debug/pprof/trace [get]
-func (*pprofHandler) PProfTrace(w http.ResponseWriter, r *http.Request) {
+func (h *pprofHandler) PProfTrace(w http.ResponseWriter, r *http.Request) {
 	pp.Trace(w, r)
 }
 
 // @Tags     debug
 // @Summary  debug symbol of PD servers.
 // @Router   /debug/pprof/symbol [get]
-func (*pprofHandler) PProfSymbol(w http.ResponseWriter, r *http.Request) {
+func (h *pprofHandler) PProfSymbol(w http.ResponseWriter, r *http.Request) {
 	pp.Symbol(w, r)
 }
 
 // @Tags     debug
 // @Summary  debug heap of PD servers.
 // @Router   /debug/pprof/heap [get]
-func (*pprofHandler) PProfHeap(w http.ResponseWriter, r *http.Request) {
+func (h *pprofHandler) PProfHeap(w http.ResponseWriter, r *http.Request) {
 	pp.Handler("heap").ServeHTTP(w, r)
 }
 
 // @Tags     debug
 // @Summary  debug mutex of PD servers.
 // @Router   /debug/pprof/mutex [get]
-func (*pprofHandler) PProfMutex(w http.ResponseWriter, r *http.Request) {
+func (h *pprofHandler) PProfMutex(w http.ResponseWriter, r *http.Request) {
 	pp.Handler("mutex").ServeHTTP(w, r)
 }
 
 // @Tags     debug
 // @Summary  debug allocs of PD servers.
 // @Router   /debug/pprof/allocs [get]
-func (*pprofHandler) PProfAllocs(w http.ResponseWriter, r *http.Request) {
+func (h *pprofHandler) PProfAllocs(w http.ResponseWriter, r *http.Request) {
 	pp.Handler("allocs").ServeHTTP(w, r)
 }
 
 // @Tags     debug
 // @Summary  debug block of PD servers.
 // @Router   /debug/pprof/block [get]
-func (*pprofHandler) PProfBlock(w http.ResponseWriter, r *http.Request) {
+func (h *pprofHandler) PProfBlock(w http.ResponseWriter, r *http.Request) {
 	pp.Handler("block").ServeHTTP(w, r)
 }
 
 // @Tags     debug
 // @Summary  debug goroutine of PD servers.
 // @Router   /debug/pprof/goroutine [get]
-func (*pprofHandler) PProfGoroutine(w http.ResponseWriter, r *http.Request) {
+func (h *pprofHandler) PProfGoroutine(w http.ResponseWriter, r *http.Request) {
 	pp.Handler("goroutine").ServeHTTP(w, r)
 }
 
 // @Tags     debug
 // @Summary  debug threadcreate of PD servers.
 // @Router   /debug/pprof/threadcreate [get]
-func (*pprofHandler) PProfThreadcreate(w http.ResponseWriter, r *http.Request) {
+func (h *pprofHandler) PProfThreadcreate(w http.ResponseWriter, r *http.Request) {
 	pp.Handler("threadcreate").ServeHTTP(w, r)
 }
 
 func sleepWithCtx(ctx context.Context, d time.Duration) {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
 	select {
-	case <-timer.C:
+	case <-time.After(d):
 	case <-ctx.Done():
 	}
 }

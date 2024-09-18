@@ -16,45 +16,112 @@ package server
 
 import (
 	"context"
-	"net/http"
-	"net/http/pprof"
+	"fmt"
+	"math/rand"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/coreos/go-semver/semver"
-	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/versioninfo"
+	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/typeutil"
 	"github.com/tikv/pd/server/config"
-	"github.com/urfave/negroni"
+	"github.com/tikv/pd/server/versioninfo"
+	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
 
-// CheckAndGetPDVersion checks and returns the PD version.
-func CheckAndGetPDVersion() *semver.Version {
+const (
+	requestTimeout = etcdutil.DefaultRequestTimeout
+)
+
+// LogPDInfo prints the PD version information.
+func LogPDInfo() {
+	log.Info("Welcome to Placement Driver (PD)")
+	log.Info("PD", zap.String("release-version", versioninfo.PDReleaseVersion))
+	log.Info("PD", zap.String("edition", versioninfo.PDEdition))
+	log.Info("PD", zap.String("git-hash", versioninfo.PDGitHash))
+	log.Info("PD", zap.String("git-branch", versioninfo.PDGitBranch))
+	log.Info("PD", zap.String("utc-build-time", versioninfo.PDBuildTS))
+}
+
+// PrintPDInfo prints the PD version information without log info.
+func PrintPDInfo() {
+	fmt.Println("Release Version:", versioninfo.PDReleaseVersion)
+	fmt.Println("Edition:", versioninfo.PDEdition)
+	fmt.Println("Git Commit Hash:", versioninfo.PDGitHash)
+	fmt.Println("Git Branch:", versioninfo.PDGitBranch)
+	fmt.Println("UTC Build Time: ", versioninfo.PDBuildTS)
+}
+
+// PrintConfigCheckMsg prints the message about configuration checks.
+func PrintConfigCheckMsg(cfg *config.Config) {
+	if len(cfg.WarningMsgs) == 0 {
+		fmt.Println("config check successful")
+		return
+	}
+
+	for _, msg := range cfg.WarningMsgs {
+		fmt.Println(msg)
+	}
+}
+
+// CheckPDVersion checks if PD needs to be upgraded.
+func CheckPDVersion(opt *config.PersistOptions) {
 	pdVersion := versioninfo.MinSupportedVersion(versioninfo.Base)
 	if versioninfo.PDReleaseVersion != "None" {
 		pdVersion = versioninfo.MustParseVersion(versioninfo.PDReleaseVersion)
 	}
-	return pdVersion
-}
-
-// CheckPDVersionWithClusterVersion checks if PD needs to be upgraded by comparing the PD version with the cluster version.
-func CheckPDVersionWithClusterVersion(opt *config.PersistOptions) {
-	pdVersion := CheckAndGetPDVersion()
 	clusterVersion := *opt.GetClusterVersion()
-	log.Info("load pd and cluster version",
-		zap.Stringer("pd-version", pdVersion), zap.Stringer("cluster-version", clusterVersion))
+	log.Info("load cluster version", zap.Stringer("cluster-version", clusterVersion))
 	if pdVersion.LessThan(clusterVersion) {
 		log.Warn(
 			"PD version less than cluster version, please upgrade PD",
 			zap.String("PD-version", pdVersion.String()),
 			zap.String("cluster-version", clusterVersion.String()))
 	}
+}
+
+func initOrGetClusterID(c *clientv3.Client, key string) (uint64, error) {
+	ctx, cancel := context.WithTimeout(c.Ctx(), requestTimeout)
+	defer cancel()
+
+	// Generate a random cluster ID.
+	ts := uint64(time.Now().Unix())
+	clusterID := (ts << 32) + uint64(rand.Uint32())
+	value := typeutil.Uint64ToBytes(clusterID)
+
+	// Multiple PDs may try to init the cluster ID at the same time.
+	// Only one PD can commit this transaction, then other PDs can get
+	// the committed cluster ID.
+	resp, err := c.Txn(ctx).
+		If(clientv3.Compare(clientv3.CreateRevision(key), "=", 0)).
+		Then(clientv3.OpPut(key, string(value))).
+		Else(clientv3.OpGet(key)).
+		Commit()
+	if err != nil {
+		return 0, errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
+	}
+
+	// Txn commits ok, return the generated cluster ID.
+	if resp.Succeeded {
+		return clusterID, nil
+	}
+
+	// Otherwise, parse the committed cluster ID.
+	if len(resp.Responses) == 0 {
+		return 0, errs.ErrEtcdTxnConflict.FastGenByArgs()
+	}
+
+	response := resp.Responses[0].GetResponseRange()
+	if response == nil || len(response.Kvs) != 1 {
+		return 0, errs.ErrEtcdTxnConflict.FastGenByArgs()
+	}
+
+	return typeutil.BytesToUint64(response.Kvs[0].Value)
 }
 
 func checkBootstrapRequest(clusterID uint64, req *pdpb.BootstrapRequest) error {
@@ -91,53 +158,6 @@ func checkBootstrapRequest(clusterID uint64, req *pdpb.BootstrapRequest) error {
 	}
 
 	return nil
-}
-
-func combineBuilderServerHTTPService(ctx context.Context, svr *Server, serviceBuilders ...HandlerBuilder) (map[string]http.Handler, error) {
-	userHandlers := make(map[string]http.Handler)
-	registerMap := make(map[string]http.Handler)
-
-	apiService := negroni.New()
-	recovery := negroni.NewRecovery()
-	apiService.Use(recovery)
-	router := mux.NewRouter()
-
-	for _, build := range serviceBuilders {
-		handler, info, err := build(ctx, svr)
-		if err != nil {
-			return nil, err
-		}
-		if !info.IsCore && len(info.PathPrefix) == 0 && (len(info.Name) == 0 || len(info.Version) == 0) {
-			return nil, errs.ErrAPIInformationInvalid.FastGenByArgs(info.Name, info.Version)
-		}
-
-		if err := apiutil.RegisterUserDefinedHandlers(registerMap, &info, handler); err != nil {
-			return nil, err
-		}
-	}
-
-	// Combine the pd service to the router. the extension service will be added to the userHandlers.
-	for pathPrefix, handler := range registerMap {
-		if strings.Contains(pathPrefix, apiutil.CorePath) || strings.Contains(pathPrefix, apiutil.ExtensionsPath) {
-			router.PathPrefix(pathPrefix).Handler(handler)
-			if pathPrefix == apiutil.CorePath {
-				// Deprecated
-				router.Path("/pd/health").Handler(handler)
-				// Deprecated
-				router.Path("/pd/ping").Handler(handler)
-			}
-		} else {
-			userHandlers[pathPrefix] = handler
-		}
-	}
-
-	apiService.UseHandler(router)
-	userHandlers[pdAPIPrefix] = apiService
-
-	// fix issue https://github.com/tikv/pd/issues/7253
-	// FIXME: remove me after upgrade
-	userHandlers["/debug/pprof/trace"] = http.HandlerFunc(pprof.Trace)
-	return userHandlers, nil
 }
 
 func isPathInDirectory(path, directory string) bool {

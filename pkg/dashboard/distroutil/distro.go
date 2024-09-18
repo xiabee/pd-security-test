@@ -16,7 +16,7 @@ package distroutil
 
 import (
 	"os"
-	"path/filepath"
+	"path"
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb-dashboard/util/distro"
@@ -33,10 +33,10 @@ const (
 func MustGetResPath() string {
 	exePath, err := os.Executable()
 	if err != nil {
-		log.Fatal("failed to read the execution path", zap.Error(err))
+		log.Fatal("Failed to read the execution path", zap.Error(err))
 		return ""
 	}
-	return filepath.Join(filepath.Dir(exePath), resFolderName)
+	return path.Join(path.Dir(exePath), resFolderName)
 }
 
 // MustLoadAndReplaceStrings loads the distro strings from ${BinaryPath}/distro-res/strings.json
@@ -44,10 +44,10 @@ func MustGetResPath() string {
 // distro string will be used.
 func MustLoadAndReplaceStrings() {
 	resPath := MustGetResPath()
-	strings, err := distro.ReadResourceStringsFromFile(filepath.Join(resPath, stringsFileName))
+	strings, err := distro.ReadResourceStringsFromFile(path.Join(resPath, stringsFileName))
 	if err != nil {
-		log.Fatal("failed to load distro strings", zap.Error(err))
+		log.Fatal("Failed to load distro strings", zap.Error(err))
 	}
-	log.Info("using distribution strings", zap.Any("strings", strings))
+	log.Info("Using distribution strings", zap.Any("strings", strings))
 	distro.ReplaceGlobal(strings)
 }

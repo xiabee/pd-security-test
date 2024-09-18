@@ -37,8 +37,6 @@ var (
 	regionsCheckPrefix      = "pd/api/v1/regions/check"
 	regionsWriteFlowPrefix  = "pd/api/v1/regions/writeflow"
 	regionsReadFlowPrefix   = "pd/api/v1/regions/readflow"
-	regionsWriteQueryPrefix = "pd/api/v1/regions/writequery"
-	regionsReadQueryPrefix  = "pd/api/v1/regions/readquery"
 	regionsConfVerPrefix    = "pd/api/v1/regions/confver"
 	regionsVersionPrefix    = "pd/api/v1/regions/version"
 	regionsSizePrefix       = "pd/api/v1/regions/size"
@@ -47,7 +45,6 @@ var (
 	regionsKeyPrefix        = "pd/api/v1/regions/key"
 	regionsSiblingPrefix    = "pd/api/v1/regions/sibling"
 	regionsRangeHolesPrefix = "pd/api/v1/regions/range-holes"
-	regionsKeyspacePrefix   = "pd/api/v1/regions/keyspace"
 	regionIDPrefix          = "pd/api/v1/region/id"
 	regionKeyPrefix         = "pd/api/v1/region/key"
 )
@@ -63,22 +60,21 @@ func NewRegionCommand() *cobra.Command {
 	r.AddCommand(NewRegionWithCheckCommand())
 	r.AddCommand(NewRegionWithSiblingCommand())
 	r.AddCommand(NewRegionWithStoreCommand())
-	r.AddCommand(NewRegionWithKeyspaceCommand())
 	r.AddCommand(NewRegionsByKeysCommand())
 	r.AddCommand(NewRangesWithRangeHolesCommand())
 
 	topRead := &cobra.Command{
-		Use:   `topread [byte|query] <limit> [--jq="<query string>"]`,
-		Short: "show regions with top read flow or query",
-		Run:   showTopReadRegions,
+		Use:   `topread <limit> [--jq="<query string>"]`,
+		Short: "show regions with top read flow",
+		Run:   showRegionsTopCommand(regionsReadFlowPrefix),
 	}
 	topRead.Flags().String("jq", "", "jq query")
 	r.AddCommand(topRead)
 
 	topWrite := &cobra.Command{
-		Use:   `topwrite [byte|query] <limit> [--jq="<query string>"]`,
-		Short: "show regions with top write flow or query",
-		Run:   showTopWriteRegions,
+		Use:   `topwrite <limit> [--jq="<query string>"]`,
+		Short: "show regions with top write flow",
+		Run:   showRegionsTopCommand(regionsWriteFlowPrefix),
 	}
 	topWrite.Flags().String("jq", "", "jq query")
 	r.AddCommand(topWrite)
@@ -158,7 +154,7 @@ func showRegionCommandFunc(cmd *cobra.Command, args []string) {
 	cmd.Println(r)
 }
 
-func scanRegionCommandFunc(cmd *cobra.Command, _ []string) {
+func scanRegionCommandFunc(cmd *cobra.Command, args []string) {
 	const limit = 1024
 	var key []byte
 	for {
@@ -214,9 +210,6 @@ func showRegionsTopCommand(prefix string) run {
 				return
 			}
 			prefix += "?limit=" + args[0]
-		} else if len(args) > 1 {
-			cmd.Println(cmd.UsageString())
-			return
 		}
 		r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
 		if err != nil {
@@ -228,40 +221,6 @@ func showRegionsTopCommand(prefix string) run {
 			return
 		}
 		cmd.Println(r)
-	}
-}
-
-func showTopReadRegions(cmd *cobra.Command, args []string) {
-	// default to show top read flow
-	if len(args) == 0 {
-		showRegionsTopCommand(regionsReadFlowPrefix)(cmd, args)
-		return
-	}
-	// default to show top read flow with limit
-	switch args[0] {
-	case "query":
-		showRegionsTopCommand(regionsReadQueryPrefix)(cmd, args[1:])
-	case "byte":
-		showRegionsTopCommand(regionsReadFlowPrefix)(cmd, args[1:])
-	default:
-		showRegionsTopCommand(regionsReadFlowPrefix)(cmd, args)
-	}
-}
-
-func showTopWriteRegions(cmd *cobra.Command, args []string) {
-	// default to show top write flow
-	if len(args) == 0 {
-		showRegionsTopCommand(regionsWriteFlowPrefix)(cmd, args)
-		return
-	}
-	// default to show top write flow with limit
-	switch args[0] {
-	case "query":
-		showRegionsTopCommand(regionsWriteQueryPrefix)(cmd, args[1:])
-	case "byte":
-		showRegionsTopCommand(regionsWriteFlowPrefix)(cmd, args[1:])
-	default:
-		showRegionsTopCommand(regionsWriteFlowPrefix)(cmd, args)
 	}
 }
 
@@ -486,7 +445,6 @@ func NewRegionWithStoreCommand() *cobra.Command {
 		Short: "show the regions of a specific store",
 		Run:   showRegionWithStoreCommandFunc,
 	}
-	r.Flags().String("type", "all", "the type of the regions, could be 'all', 'leader', 'learner' or 'pending'")
 	return r
 }
 
@@ -497,48 +455,9 @@ func showRegionWithStoreCommandFunc(cmd *cobra.Command, args []string) {
 	}
 	storeID := args[0]
 	prefix := regionsStorePrefix + "/" + storeID
-	flagType := cmd.Flag("type")
-	prefix += "?type=" + flagType.Value.String()
 	r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get regions with the given storeID: %s\n", err)
-		return
-	}
-	cmd.Println(r)
-}
-
-// NewRegionWithKeyspaceCommand returns regions with keyspace subcommand of regionCmd
-func NewRegionWithKeyspaceCommand() *cobra.Command {
-	r := &cobra.Command{
-		Use:   "keyspace <subcommand>",
-		Short: "show region information of the given keyspace",
-	}
-	r.AddCommand(&cobra.Command{
-		Use:   "id <keyspace_id> <limit>",
-		Short: "show region information for the given keyspace id",
-		Run:   showRegionWithKeyspaceCommandFunc,
-	})
-	return r
-}
-
-func showRegionWithKeyspaceCommandFunc(cmd *cobra.Command, args []string) {
-	if len(args) < 1 || len(args) > 2 {
-		cmd.Println(cmd.UsageString())
-		return
-	}
-
-	keyspaceID := args[0]
-	prefix := regionsKeyspacePrefix + "/id/" + keyspaceID
-	if len(args) == 2 {
-		if _, err := strconv.Atoi(args[1]); err != nil {
-			cmd.Println("limit should be a number")
-			return
-		}
-		prefix += "?limit=" + args[1]
-	}
-	r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
-	if err != nil {
-		cmd.Printf("Failed to get regions with the given keyspace: %s\n", err)
 		return
 	}
 	cmd.Println(r)
@@ -575,7 +494,7 @@ func NewRangesWithRangeHolesCommand() *cobra.Command {
 	return r
 }
 
-func showRangesWithRangeHolesCommandFunc(cmd *cobra.Command, _ []string) {
+func showRangesWithRangeHolesCommandFunc(cmd *cobra.Command, args []string) {
 	r, err := doRequest(cmd, regionsRangeHolesPrefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get range holes: %s\n", err)

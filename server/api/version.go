@@ -17,7 +17,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/tikv/pd/pkg/versioninfo"
+	"github.com/tikv/pd/server/versioninfo"
 	"github.com/unrolled/render"
 )
 
@@ -43,7 +43,7 @@ func newVersionHandler(rd *render.Render) *versionHandler {
 // @Produce  json
 // @Success  200  {object}  version
 // @Router   /version [get]
-func (h *versionHandler) GetVersion(w http.ResponseWriter, _ *http.Request) {
+func (h *versionHandler) GetVersion(w http.ResponseWriter, r *http.Request) {
 	version := &version{
 		Version: versioninfo.PDReleaseVersion,
 	}

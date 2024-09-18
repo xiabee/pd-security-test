@@ -20,20 +20,18 @@ import (
 
 	"github.com/docker/go-units"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/tikv/pd/pkg/core"
-	sc "github.com/tikv/pd/tools/pd-simulator/simulator/config"
+	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
 	"go.uber.org/zap"
 )
 
-func newLabelNotMatch1(_ *sc.SimConfig) *Case {
+func newLabelNotMatch1() *Case {
 	var simCase Case
 	simCase.Labels = []string{"host"}
 
 	num1, num2 := 3, 1
 	storeNum, regionNum := num1+num2, 200
-	allStores := make(map[uint64]struct{}, storeNum+1)
 	for i := 0; i < num1; i++ {
 		id := IDAllocator.nextID()
 		simCase.Stores = append(simCase.Stores, &Store{
@@ -41,14 +39,11 @@ func newLabelNotMatch1(_ *sc.SimConfig) *Case {
 			Status: metapb.StoreState_Up,
 			Labels: []*metapb.StoreLabel{{Key: "host", Value: fmt.Sprintf("host%d", id)}},
 		})
-		allStores[id] = struct{}{}
 	}
-	id := IDAllocator.nextID()
 	simCase.Stores = append(simCase.Stores, &Store{
-		ID:     id,
+		ID:     IDAllocator.nextID(),
 		Status: metapb.StoreState_Up,
 	})
-	allStores[id] = struct{}{}
 
 	for i := 0; i < regionNum; i++ {
 		peers := []*metapb.Peer{
@@ -65,30 +60,24 @@ func newLabelNotMatch1(_ *sc.SimConfig) *Case {
 		})
 	}
 
-	storesLastUpdateTime := make(map[uint64]int64, storeNum+1)
-	storeLastAvailable := make(map[uint64]uint64, storeNum+1)
-	simCase.Checker = func(stores []*metapb.Store, _ *core.RegionsInfo, stats []info.StoreStats) bool {
-		for _, store := range stores {
-			if store.NodeState == metapb.NodeState_Removed {
-				delete(allStores, store.GetId())
-			}
-		}
-
+	storesLastUpdateTime := make([]int64, storeNum+1)
+	storeLastAvailable := make([]uint64, storeNum+1)
+	simCase.Checker = func(regions *core.RegionsInfo, stats []info.StoreStats) bool {
 		res := true
 		curTime := time.Now().Unix()
 		storesAvailable := make([]uint64, 0, storeNum+1)
-		for storeID := range allStores {
-			available := stats[storeID].GetAvailable()
+		for i := 1; i <= storeNum; i++ {
+			available := stats[i].GetAvailable()
 			storesAvailable = append(storesAvailable, available)
-			if curTime-storesLastUpdateTime[storeID] > 360 {
-				if storeLastAvailable[storeID] != available {
+			if curTime-storesLastUpdateTime[i] > 360 {
+				if storeLastAvailable[i] != available {
 					res = false
 				}
-				if stats[storeID].ToCompactionSize != 0 {
+				if stats[i].ToCompactionSize != 0 {
 					res = false
 				}
-				storesLastUpdateTime[storeID] = curTime
-				storeLastAvailable[storeID] = available
+				storesLastUpdateTime[i] = curTime
+				storeLastAvailable[i] = available
 			} else {
 				res = false
 			}
@@ -99,13 +88,12 @@ func newLabelNotMatch1(_ *sc.SimConfig) *Case {
 	return &simCase
 }
 
-func newLabelIsolation1(_ *sc.SimConfig) *Case {
+func newLabelIsolation1() *Case {
 	var simCase Case
 	simCase.Labels = []string{"host"}
 
 	num1, num2 := 2, 2
 	storeNum, regionNum := num1+num2, 300
-	allStores := make(map[uint64]struct{}, storeNum+1)
 	for i := 0; i < num1; i++ {
 		id := IDAllocator.nextID()
 		simCase.Stores = append(simCase.Stores, &Store{
@@ -113,16 +101,14 @@ func newLabelIsolation1(_ *sc.SimConfig) *Case {
 			Status: metapb.StoreState_Up,
 			Labels: []*metapb.StoreLabel{{Key: "host", Value: fmt.Sprintf("host%d", id)}},
 		})
-		allStores[id] = struct{}{}
 	}
+	id := IDAllocator.GetID() + 1
 	for i := 0; i < num2; i++ {
-		id := IDAllocator.nextID()
 		simCase.Stores = append(simCase.Stores, &Store{
-			ID:     id,
+			ID:     IDAllocator.nextID(),
 			Status: metapb.StoreState_Up,
 			Labels: []*metapb.StoreLabel{{Key: "host", Value: fmt.Sprintf("host%d", id)}},
 		})
-		allStores[id] = struct{}{}
 	}
 
 	for i := 0; i < regionNum; i++ {
@@ -140,30 +126,24 @@ func newLabelIsolation1(_ *sc.SimConfig) *Case {
 		})
 	}
 
-	storesLastUpdateTime := make(map[uint64]int64, storeNum)
-	storeLastAvailable := make(map[uint64]uint64, storeNum)
-	simCase.Checker = func(stores []*metapb.Store, _ *core.RegionsInfo, stats []info.StoreStats) bool {
-		for _, store := range stores {
-			if store.NodeState == metapb.NodeState_Removed {
-				delete(allStores, store.GetId())
-			}
-		}
-
+	storesLastUpdateTime := make([]int64, storeNum+1)
+	storeLastAvailable := make([]uint64, storeNum+1)
+	simCase.Checker = func(regions *core.RegionsInfo, stats []info.StoreStats) bool {
 		res := true
 		curTime := time.Now().Unix()
 		storesAvailable := make([]uint64, 0, storeNum+1)
-		for storeID := range allStores {
-			available := stats[storeID].GetAvailable()
+		for i := 1; i <= storeNum; i++ {
+			available := stats[i].GetAvailable()
 			storesAvailable = append(storesAvailable, available)
-			if curTime-storesLastUpdateTime[storeID] > 360 {
-				if storeLastAvailable[storeID] != available {
+			if curTime-storesLastUpdateTime[i] > 360 {
+				if storeLastAvailable[i] != available {
 					res = false
 				}
-				if stats[storeID].ToCompactionSize != 0 {
+				if stats[i].ToCompactionSize != 0 {
 					res = false
 				}
-				storesLastUpdateTime[storeID] = curTime
-				storeLastAvailable[storeID] = available
+				storesLastUpdateTime[i] = curTime
+				storeLastAvailable[i] = available
 			} else {
 				res = false
 			}
@@ -174,19 +154,17 @@ func newLabelIsolation1(_ *sc.SimConfig) *Case {
 	return &simCase
 }
 
-func newLabelIsolation2(_ *sc.SimConfig) *Case {
+func newLabelIsolation2() *Case {
 	var simCase Case
 	simCase.Labels = []string{"dc", "zone", "host"}
 
 	storeNum, regionNum := 5, 200
-	allStores := make(map[uint64]struct{}, storeNum)
 	for i := 0; i < storeNum; i++ {
 		id := IDAllocator.nextID()
 		simCase.Stores = append(simCase.Stores, &Store{
 			ID:     id,
 			Status: metapb.StoreState_Up,
 		})
-		allStores[id] = struct{}{}
 	}
 	simCase.Stores[0].Labels = []*metapb.StoreLabel{{Key: "dc", Value: "dc1"}, {Key: "zone", Value: "zone1"}, {Key: "host", Value: "host1"}}
 	simCase.Stores[1].Labels = []*metapb.StoreLabel{{Key: "dc", Value: "dc1"}, {Key: "zone", Value: "zone1"}, {Key: "host", Value: "host2"}}
@@ -209,30 +187,24 @@ func newLabelIsolation2(_ *sc.SimConfig) *Case {
 		})
 	}
 
-	storesLastUpdateTime := make(map[uint64]int64, storeNum)
-	storeLastAvailable := make(map[uint64]uint64, storeNum)
-	simCase.Checker = func(stores []*metapb.Store, _ *core.RegionsInfo, stats []info.StoreStats) bool {
-		for _, store := range stores {
-			if store.NodeState == metapb.NodeState_Removed {
-				delete(allStores, store.GetId())
-			}
-		}
-
+	storesLastUpdateTime := make([]int64, storeNum+1)
+	storeLastAvailable := make([]uint64, storeNum+1)
+	simCase.Checker = func(regions *core.RegionsInfo, stats []info.StoreStats) bool {
 		res := true
 		curTime := time.Now().Unix()
 		storesAvailable := make([]uint64, 0, storeNum+1)
-		for storeID := range allStores {
-			available := stats[storeID].GetAvailable()
+		for i := 1; i <= storeNum; i++ {
+			available := stats[i].GetAvailable()
 			storesAvailable = append(storesAvailable, available)
-			if curTime-storesLastUpdateTime[storeID] > 360 {
-				if storeLastAvailable[storeID] != available {
+			if curTime-storesLastUpdateTime[i] > 360 {
+				if storeLastAvailable[i] != available {
 					res = false
 				}
-				if stats[storeID].ToCompactionSize != 0 {
+				if stats[i].ToCompactionSize != 0 {
 					res = false
 				}
-				storesLastUpdateTime[storeID] = curTime
-				storeLastAvailable[storeID] = available
+				storesLastUpdateTime[i] = curTime
+				storeLastAvailable[i] = available
 			} else {
 				res = false
 			}
