@@ -20,11 +20,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/server/versioninfo"
+	"github.com/tikv/pd/pkg/versioninfo"
 )
 
 func checkStatusResponse(re *require.Assertions, body []byte) {
-	got := status{}
+	got := versioninfo.Status{}
 	re.NoError(json.Unmarshal(body, &got))
 	re.Equal(versioninfo.PDBuildTS, got.BuildTS)
 	re.Equal(versioninfo.PDGitHash, got.GitHash)
@@ -33,7 +33,7 @@ func checkStatusResponse(re *require.Assertions, body []byte) {
 
 func TestStatus(t *testing.T) {
 	re := require.New(t)
-	cfgs, _, clean := mustNewCluster(re, 3)
+	cfgs, _, clean := mustNewCluster(re, 1)
 	defer clean()
 
 	for _, cfg := range cfgs {

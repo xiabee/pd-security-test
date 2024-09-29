@@ -23,12 +23,12 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	promClient "github.com/prometheus/client_golang/api"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/typeutil"
+	"github.com/tikv/pd/pkg/schedule/filter"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule/filter"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
@@ -409,7 +409,7 @@ func buildPlans(planMap map[string]map[string]struct{}, resourceTypeMap map[stri
 }
 
 // TODO: implement heterogeneous logic and take cluster information into consideration.
-func findBestGroupToScaleIn(strategy *Strategy, scaleInQuota float64, groups []*Plan) Plan {
+func findBestGroupToScaleIn(_ *Strategy, _ float64, groups []*Plan) Plan {
 	return *groups[0]
 }
 

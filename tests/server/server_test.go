@@ -19,14 +19,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/tempurl"
-	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/utils/tempurl"
+	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/tests"
 	"go.uber.org/goleak"
-
-	// Register schedulers.
-	_ "github.com/tikv/pd/server/schedulers"
 )
 
 func TestMain(m *testing.M) {
@@ -101,7 +98,7 @@ func TestClusterID(t *testing.T) {
 		re.Equal(clusterID, s.GetClusterID())
 	}
 
-	cluster2, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, serverName string) { conf.InitialClusterToken = "foobar" })
+	cluster2, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, _ string) { conf.InitialClusterToken = "foobar" })
 	defer cluster2.Destroy()
 	re.NoError(err)
 	err = cluster2.RunInitialServers()

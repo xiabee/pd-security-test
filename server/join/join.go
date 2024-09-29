@@ -25,7 +25,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/etcdutil"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/server/config"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
@@ -45,7 +45,7 @@ var listMemberRetryTimes = 20
 // PrepareJoinCluster sends MemberAdd command to PD cluster,
 // and returns the initial configuration of the PD cluster.
 //
-// TL;TR: The join functionality is safe. With data, join does nothing, w/o data
+// TL;DR: The join functionality is safe. With data, join does nothing, w/o data
 //
 //	and it is not a member of cluster, join does MemberAdd, it returns an
 //	error if PD tries to join itself, missing data or join a duplicated PD.
@@ -128,7 +128,7 @@ func PrepareJoinCluster(cfg *config.Config) error {
 	}
 	defer client.Close()
 
-	listResp, err := etcdutil.ListEtcdMembers(client)
+	listResp, err := etcdutil.ListEtcdMembers(client.Ctx(), client)
 	if err != nil {
 		return err
 	}
@@ -136,7 +136,11 @@ func PrepareJoinCluster(cfg *config.Config) error {
 	existed := false
 	for _, m := range listResp.Members {
 		if len(m.Name) == 0 {
-			return errors.New("there is a member that has not joined successfully")
+			log.Error("there is an abnormal joined member in the current member list",
+				zap.Uint64("id", m.ID),
+				zap.Strings("peer-urls", m.PeerURLs),
+				zap.Strings("client-urls", m.ClientURLs))
+			return errors.Errorf("there is a member %d that has not joined successfully", m.ID)
 		}
 		if m.Name == cfg.Name {
 			existed = true
@@ -171,7 +175,7 @@ func PrepareJoinCluster(cfg *config.Config) error {
 	)
 
 	for i := 0; i < listMemberRetryTimes; i++ {
-		listResp, err = etcdutil.ListEtcdMembers(client)
+		listResp, err = etcdutil.ListEtcdMembers(client.Ctx(), client)
 		if err != nil {
 			return err
 		}
@@ -184,7 +188,11 @@ func PrepareJoinCluster(cfg *config.Config) error {
 				listSucc = true
 			}
 			if len(n) == 0 {
-				return errors.New("there is a member that has not joined successfully")
+				log.Error("there is an abnormal joined member in the current member list",
+					zap.Uint64("id", memb.ID),
+					zap.Strings("peer-urls", memb.PeerURLs),
+					zap.Strings("client-urls", memb.ClientURLs))
+				return errors.Errorf("there is a member %d that has not joined successfully", memb.ID)
 			}
 			for _, m := range memb.PeerURLs {
 				pds = append(pds, fmt.Sprintf("%s=%s", n, m))

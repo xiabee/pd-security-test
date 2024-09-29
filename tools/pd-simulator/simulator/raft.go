@@ -19,9 +19,10 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/tikv/pd/pkg/syncutil"
-	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/cases"
+	"github.com/tikv/pd/tools/pd-simulator/simulator/config"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
 	"go.uber.org/zap"
 )
@@ -34,12 +35,12 @@ type RaftEngine struct {
 	regionChange      map[uint64][]uint64
 	regionSplitSize   int64
 	regionSplitKeys   int64
-	storeConfig       *SimConfig
+	storeConfig       *config.SimConfig
 	useTiDBEncodedKey bool
 }
 
 // NewRaftEngine creates the initialized raft with the configuration.
-func NewRaftEngine(conf *cases.Case, conn *Connection, storeConfig *SimConfig) *RaftEngine {
+func NewRaftEngine(conf *cases.Case, conn *Connection, storeConfig *config.SimConfig) *RaftEngine {
 	r := &RaftEngine{
 		regionsInfo:     core.NewRegionsInfo(),
 		conn:            conn,
@@ -90,11 +91,10 @@ func NewRaftEngine(conf *cases.Case, conn *Connection, storeConfig *SimConfig) *
 }
 
 func (r *RaftEngine) stepRegions() {
-	regions := r.GetRegions()
-	for _, region := range regions {
+	r.TraverseRegions(func(region *core.RegionInfo) {
 		r.stepLeader(region)
 		r.stepSplit(region)
-	}
+	})
 }
 
 func (r *RaftEngine) stepLeader(region *core.RegionInfo) {
@@ -264,18 +264,18 @@ func (r *RaftEngine) ResetRegionChange(storeID uint64, regionID uint64) {
 	}
 }
 
-// GetRegions gets all RegionInfo from regionMap
-func (r *RaftEngine) GetRegions() []*core.RegionInfo {
-	r.RLock()
-	defer r.RUnlock()
-	return r.regionsInfo.GetRegions()
+// TraverseRegions executes a function on all regions, and function need to be self-locked.
+func (r *RaftEngine) TraverseRegions(lockedFunc func(*core.RegionInfo)) {
+	r.regionsInfo.TraverseRegions(lockedFunc)
 }
 
 // SetRegion sets the RegionInfo with regionID
 func (r *RaftEngine) SetRegion(region *core.RegionInfo) []*core.RegionInfo {
 	r.Lock()
 	defer r.Unlock()
-	return r.regionsInfo.SetRegion(region)
+	origin, overlaps, rangeChanged := r.regionsInfo.SetRegion(region)
+	r.regionsInfo.UpdateSubTree(region, origin, overlaps, rangeChanged)
+	return overlaps
 }
 
 // GetRegionByKey searches the RegionInfo from regionTree
@@ -289,7 +289,7 @@ func (r *RaftEngine) GetRegionByKey(regionKey []byte) *core.RegionInfo {
 func (r *RaftEngine) BootstrapRegion() *core.RegionInfo {
 	r.RLock()
 	defer r.RUnlock()
-	regions := r.regionsInfo.ScanRange(nil, nil, 1)
+	regions := r.regionsInfo.ScanRegions(nil, nil, 1)
 	if len(regions) > 0 {
 		return regions[0]
 	}

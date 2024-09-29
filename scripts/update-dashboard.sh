@@ -43,5 +43,8 @@ go mod tidy
 make pd-server
 go mod tidy
 
-cd tests/client
+cd ./tests/integrations
+go mod tidy
+
+cd ../../tools
 go mod tidy
