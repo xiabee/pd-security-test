@@ -15,9 +15,8 @@
 package config
 
 import (
-	"github.com/BurntSushi/toml"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pkg/errors"
 	flag "github.com/spf13/pflag"
 	"github.com/tikv/pd/pkg/utils/configutil"
 	"github.com/tikv/pd/tools/pd-api-bench/cases"
@@ -45,7 +44,7 @@ type Config struct {
 	// only for init
 	HTTP map[string]cases.Config `toml:"http" json:"http"`
 	GRPC map[string]cases.Config `toml:"grpc" json:"grpc"`
-	ETCD map[string]cases.Config `toml:"etcd" json:"etcd"`
+	Etcd map[string]cases.Config `toml:"etcd" json:"etcd"`
 }
 
 // NewConfig return a set of settings.
@@ -73,14 +72,13 @@ func (c *Config) Parse(arguments []string) error {
 	}
 
 	// Load config file if specified.
-	var meta *toml.MetaData
 	if c.configFile != "" {
-		meta, err = configutil.ConfigFromFile(c, c.configFile)
+		_, err = configutil.ConfigFromFile(c, c.configFile)
 		if err != nil {
 			return err
 		}
 	}
-	c.Adjust(meta)
+	c.Adjust()
 
 	// Parse again to replace with command line options.
 	err = c.flagSet.Parse(arguments)
@@ -98,19 +96,22 @@ func (c *Config) Parse(arguments []string) error {
 // InitCoordinator set case config from config itself.
 func (c *Config) InitCoordinator(co *cases.Coordinator) {
 	for name, cfg := range c.HTTP {
+		cfg := cfg
 		err := co.SetHTTPCase(name, &cfg)
 		if err != nil {
 			log.Error("create HTTP case failed", zap.Error(err))
 		}
 	}
 	for name, cfg := range c.GRPC {
+		cfg := cfg
 		err := co.SetGRPCCase(name, &cfg)
 		if err != nil {
 			log.Error("create gRPC case failed", zap.Error(err))
 		}
 	}
-	for name, cfg := range c.ETCD {
-		err := co.SetETCDCase(name, &cfg)
+	for name, cfg := range c.Etcd {
+		cfg := cfg
+		err := co.SetEtcdCase(name, &cfg)
 		if err != nil {
 			log.Error("create etcd case failed", zap.Error(err))
 		}
@@ -118,7 +119,7 @@ func (c *Config) InitCoordinator(co *cases.Coordinator) {
 }
 
 // Adjust is used to adjust configurations
-func (c *Config) Adjust(meta *toml.MetaData) {
+func (c *Config) Adjust() {
 	if len(c.Log.Format) == 0 {
 		c.Log.Format = "text"
 	}

@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/core/storelimit"
-	mcs "github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
 	"github.com/tikv/pd/pkg/utils/testutil"
@@ -70,6 +70,7 @@ func (suite *serverTestSuite) SetupSuite() {
 	re.NoError(err)
 
 	leaderName := suite.cluster.WaitLeader()
+	re.NotEmpty(leaderName)
 	suite.pdLeader = suite.cluster.GetServer(leaderName)
 	suite.backendEndpoints = suite.pdLeader.GetAddr()
 	re.NoError(suite.pdLeader.BootstrapCluster())
@@ -116,6 +117,7 @@ func (suite *serverTestSuite) TestAllocIDAfterLeaderChange() {
 	re.NotEqual(uint64(0), id)
 	suite.cluster.ResignLeader()
 	leaderName := suite.cluster.WaitLeader()
+	re.NotEmpty(leaderName)
 	suite.pdLeader = suite.cluster.GetServer(leaderName)
 	suite.backendEndpoints = suite.pdLeader.GetAddr()
 	time.Sleep(time.Second)
@@ -139,7 +141,7 @@ func (suite *serverTestSuite) TestPrimaryChange() {
 	primary := tc.GetPrimaryServer()
 	oldPrimaryAddr := primary.GetAddr()
 	testutil.Eventually(re, func() bool {
-		watchedAddr, ok := suite.pdLeader.GetServicePrimaryAddr(suite.ctx, mcs.SchedulingServiceName)
+		watchedAddr, ok := suite.pdLeader.GetServicePrimaryAddr(suite.ctx, constant.SchedulingServiceName)
 		return ok && oldPrimaryAddr == watchedAddr &&
 			len(primary.GetCluster().GetCoordinator().GetSchedulersController().GetSchedulerNames()) == 4
 	})
@@ -150,7 +152,7 @@ func (suite *serverTestSuite) TestPrimaryChange() {
 	newPrimaryAddr := primary.GetAddr()
 	re.NotEqual(oldPrimaryAddr, newPrimaryAddr)
 	testutil.Eventually(re, func() bool {
-		watchedAddr, ok := suite.pdLeader.GetServicePrimaryAddr(suite.ctx, mcs.SchedulingServiceName)
+		watchedAddr, ok := suite.pdLeader.GetServicePrimaryAddr(suite.ctx, constant.SchedulingServiceName)
 		return ok && newPrimaryAddr == watchedAddr &&
 			len(primary.GetCluster().GetCoordinator().GetSchedulersController().GetSchedulerNames()) == 4
 	})
@@ -310,7 +312,7 @@ func (suite *serverTestSuite) TestSchedulerSync() {
 	checkEvictLeaderSchedulerExist(re, schedulersController, true)
 	checkEvictLeaderStoreIDs(re, schedulersController, []uint64{1})
 	// Add a store_id to the evict-leader-scheduler through the API server.
-	err = suite.pdLeader.GetServer().GetRaftCluster().PutStore(
+	err = suite.pdLeader.GetServer().GetRaftCluster().PutMetaStore(
 		&metapb.Store{
 			Id:            2,
 			Address:       "mock://2",
@@ -482,7 +484,7 @@ func (suite *serverTestSuite) TestForwardRegionHeartbeat() {
 	re.NoError(err)
 	testutil.Eventually(re, func() bool {
 		region := tc.GetPrimaryServer().GetCluster().GetRegion(10)
-		return region.GetBytesRead() == 20 && region.GetBytesWritten() == 10 &&
+		return region != nil && region.GetBytesRead() == 20 && region.GetBytesWritten() == 10 &&
 			region.GetKeysRead() == 200 && region.GetKeysWritten() == 100 && region.GetTerm() == 1 &&
 			region.GetApproximateKeys() == 300 && region.GetApproximateSize() == 30 &&
 			reflect.DeepEqual(region.GetLeader(), peers[0]) &&
@@ -635,6 +637,7 @@ func (suite *multipleServerTestSuite) SetupSuite() {
 	re.NoError(err)
 
 	leaderName := suite.cluster.WaitLeader()
+	re.NotEmpty(leaderName)
 	suite.pdLeader = suite.cluster.GetServer(leaderName)
 	suite.backendEndpoints = suite.pdLeader.GetAddr()
 	re.NoError(suite.pdLeader.BootstrapCluster())
@@ -649,6 +652,10 @@ func (suite *multipleServerTestSuite) TearDownSuite() {
 
 func (suite *multipleServerTestSuite) TestReElectLeader() {
 	re := suite.Require()
+	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/member/changeFrequencyTimes", "return(10)"))
+	defer func() {
+		re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/member/changeFrequencyTimes"))
+	}()
 	tc, err := tests.NewTestSchedulingCluster(suite.ctx, 1, suite.backendEndpoints)
 	re.NoError(err)
 	defer tc.Destroy()

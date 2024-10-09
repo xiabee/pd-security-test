@@ -20,9 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -30,7 +28,6 @@ import (
 
 	grpcprometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/diagnosticspb"
 	"github.com/pingcap/kvproto/pkg/tsopb"
 	"github.com/pingcap/log"
@@ -41,6 +38,7 @@ import (
 	"github.com/tikv/pd/pkg/mcs/discovery"
 	"github.com/tikv/pd/pkg/mcs/server"
 	"github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/member"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/systimemon"
@@ -106,6 +104,11 @@ func (s *Server) GetAddr() string {
 	return s.cfg.ListenAddr
 }
 
+// GetAdvertiseListenAddr returns the advertise address of the server.
+func (s *Server) GetAdvertiseListenAddr() string {
+	return s.cfg.AdvertiseListenAddr
+}
+
 // GetBackendEndpoints returns the backend endpoints.
 func (s *Server) GetBackendEndpoints() string {
 	return s.cfg.BackendEndpoints
@@ -143,24 +146,20 @@ func (s *Server) SetLogLevel(level string) error {
 }
 
 // Run runs the TSO server.
-func (s *Server) Run() error {
-	skipWaitAPIServiceReady := false
-	failpoint.Inject("skipWaitAPIServiceReady", func() {
-		skipWaitAPIServiceReady = true
-	})
-	if !skipWaitAPIServiceReady {
-		if err := utils.WaitAPIServiceReady(s); err != nil {
-			return err
-		}
-	}
+func (s *Server) Run() (err error) {
 	go systimemon.StartMonitor(s.Context(), time.Now, func() {
 		log.Error("system time jumps backward", errs.ZapError(errs.ErrIncorrectSystemTime))
 		timeJumpBackCounter.Inc()
 	})
 
-	if err := utils.InitClient(s); err != nil {
+	if err = utils.InitClient(s); err != nil {
 		return err
 	}
+
+	if s.clusterID, s.serviceID, s.serviceRegister, err = utils.Register(s, constant.TSOServiceName); err != nil {
+		return err
+	}
+
 	return s.startServer()
 }
 
@@ -174,7 +173,9 @@ func (s *Server) Close() {
 	log.Info("closing tso server ...")
 	// close tso service loops in the keyspace group manager
 	s.keyspaceGroupManager.Close()
-	s.serviceRegister.Deregister()
+	if err := s.serviceRegister.Deregister(); err != nil {
+		log.Error("failed to deregister the service", errs.ZapError(err))
+	}
 	utils.StopHTTPServer(s)
 	utils.StopGRPCServer(s)
 	s.GetListener().Close()
@@ -197,7 +198,7 @@ func (s *Server) Close() {
 // IsServing implements basicserver. It returns whether the server is the leader
 // if there is embedded etcd, or the primary otherwise.
 func (s *Server) IsServing() bool {
-	return s.IsKeyspaceServing(utils.DefaultKeyspaceID, utils.DefaultKeyspaceGroupID)
+	return s.IsKeyspaceServing(constant.DefaultKeyspaceID, constant.DefaultKeyspaceGroupID)
 }
 
 // IsKeyspaceServing returns whether the server is the primary of the given keyspace.
@@ -220,7 +221,7 @@ func (s *Server) IsKeyspaceServing(keyspaceID, keyspaceGroupID uint32) bool {
 // The entry at the index 0 is the primary's service endpoint.
 func (s *Server) GetLeaderListenUrls() []string {
 	member, err := s.keyspaceGroupManager.GetElectionMember(
-		utils.DefaultKeyspaceID, utils.DefaultKeyspaceGroupID)
+		constant.DefaultKeyspaceID, constant.DefaultKeyspaceGroupID)
 	if err != nil {
 		log.Error("failed to get election member", errs.ZapError(err))
 		return nil
@@ -250,7 +251,7 @@ func (s *Server) ResignPrimary(keyspaceID, keyspaceGroupID uint32) error {
 
 // AddServiceReadyCallback implements basicserver.
 // It adds callbacks when it's ready for providing tso service.
-func (s *Server) AddServiceReadyCallback(callbacks ...func(context.Context) error) {
+func (*Server) AddServiceReadyCallback(...func(context.Context) error) {
 	// Do nothing here. The primary of each keyspace group assigned to this host
 	// will respond to the requests accordingly.
 }
@@ -278,7 +279,7 @@ func (s *Server) GetTSOAllocatorManager(keyspaceGroupID uint32) (*tso.AllocatorM
 }
 
 // IsLocalRequest checks if the forwarded host is the current host
-func (s *Server) IsLocalRequest(forwardedHost string) bool {
+func (*Server) IsLocalRequest(forwardedHost string) bool {
 	// TODO: Check if the forwarded host is the current host.
 	// The logic is depending on etcd service mode -- if the TSO service
 	// uses the embedded etcd, check against ClientUrls; otherwise check
@@ -310,13 +311,13 @@ func (s *Server) ValidateRequest(header *tsopb.RequestHeader) error {
 
 // GetExternalTS returns external timestamp from the cache or the persistent storage.
 // TODO: Implement GetExternalTS
-func (s *Server) GetExternalTS() uint64 {
+func (*Server) GetExternalTS() uint64 {
 	return 0
 }
 
 // SetExternalTS saves external timestamp to cache and the persistent storage.
 // TODO: Implement SetExternalTS
-func (s *Server) SetExternalTS(externalTS uint64) error {
+func (*Server) SetExternalTS(uint64) error {
 	return nil
 }
 
@@ -353,11 +354,6 @@ func (s *Server) GetTLSConfig() *grpcutil.TLSConfig {
 }
 
 func (s *Server) startServer() (err error) {
-	if s.clusterID, err = utils.InitClusterID(s.Context(), s.GetClient()); err != nil {
-		return err
-	}
-	log.Info("init cluster id", zap.Uint64("cluster-id", s.clusterID))
-
 	// It may lose accuracy if use float64 to store uint64. So we store the cluster id in label.
 	metaDataGauge.WithLabelValues(fmt.Sprintf("cluster%d", s.clusterID)).Set(0)
 	// The independent TSO service still reuses PD version info since PD and TSO are just
@@ -369,18 +365,6 @@ func (s *Server) startServer() (err error) {
 	s.serverLoopCtx, s.serverLoopCancel = context.WithCancel(s.Context())
 	legacySvcRootPath := endpoint.LegacyRootPath(s.clusterID)
 	tsoSvcRootPath := endpoint.TSOSvcRootPath(s.clusterID)
-	execPath, err := os.Executable()
-	deployPath := filepath.Dir(execPath)
-	if err != nil {
-		deployPath = ""
-	}
-	s.serviceID = &discovery.ServiceRegistryEntry{
-		ServiceAddr:    s.cfg.AdvertiseListenAddr,
-		Version:        versioninfo.PDReleaseVersion,
-		GitHash:        versioninfo.PDGitHash,
-		DeployPath:     deployPath,
-		StartTimestamp: s.StartTimestamp(),
-	}
 	s.keyspaceGroupManager = tso.NewKeyspaceGroupManager(
 		s.serverLoopCtx, s.serviceID, s.GetClient(), s.GetHTTPClient(), s.cfg.AdvertiseListenAddr,
 		s.clusterID, legacySvcRootPath, tsoSvcRootPath, s.cfg)
@@ -407,18 +391,6 @@ func (s *Server) startServer() (err error) {
 		cb()
 	}
 
-	// Server has started.
-	serializedEntry, err := s.serviceID.Serialize()
-	if err != nil {
-		return err
-	}
-	s.serviceRegister = discovery.NewServiceRegister(s.Context(), s.GetClient(), strconv.FormatUint(s.clusterID, 10),
-		utils.TSOServiceName, s.cfg.AdvertiseListenAddr, serializedEntry, discovery.DefaultLeaseInSeconds)
-	if err := s.serviceRegister.Register(); err != nil {
-		log.Error("failed to register the service", zap.String("service-name", utils.TSOServiceName), errs.ZapError(err))
-		return err
-	}
-
 	atomic.StoreInt64(&s.isRunning, 1)
 	return nil
 }
@@ -435,10 +407,14 @@ func CreateServer(ctx context.Context, cfg *Config) *Server {
 
 // CreateServerWrapper encapsulates the configuration/log/metrics initialization and create the server
 func CreateServerWrapper(cmd *cobra.Command, args []string) {
-	cmd.Flags().Parse(args)
+	err := cmd.Flags().Parse(args)
+	if err != nil {
+		cmd.Println(err)
+		return
+	}
 	cfg := NewConfig()
 	flagSet := cmd.Flags()
-	err := cfg.Parse(flagSet)
+	err = cfg.Parse(flagSet)
 	defer logutil.LogPanic()
 
 	if err != nil {
@@ -462,7 +438,7 @@ func CreateServerWrapper(cmd *cobra.Command, args []string) {
 		log.Fatal("initialize logger error", errs.ZapError(err))
 	}
 	// Flushing any buffered log entries
-	defer log.Sync()
+	log.Sync()
 
 	versioninfo.Log(serviceName)
 	log.Info("TSO service config", zap.Reflect("config", cfg))

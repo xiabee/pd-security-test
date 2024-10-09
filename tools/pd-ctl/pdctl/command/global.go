@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	pdControlCallerID = "pd-ctl"
+	PDControlCallerID = "pd-ctl"
 	clusterPrefix     = "pd/api/v1/cluster"
 )
 
@@ -99,13 +99,13 @@ func initNewPDClient(cmd *cobra.Command, opts ...pd.ClientOption) error {
 	if PDCli != nil {
 		PDCli.Close()
 	}
-	PDCli = pd.NewClient(pdControlCallerID, getEndpoints(cmd), opts...)
+	PDCli = pd.NewClient(PDControlCallerID, getEndpoints(cmd), opts...).WithCallerID(PDControlCallerID)
 	return nil
 }
 
 // TODO: replace dialClient with the PD HTTP client completely.
 var dialClient = &http.Client{
-	Transport: apiutil.NewCallerIDRoundTripper(http.DefaultTransport, pdControlCallerID),
+	Transport: apiutil.NewCallerIDRoundTripper(http.DefaultTransport, PDControlCallerID),
 }
 
 func parseTLSConfig(cmd *cobra.Command) (*tls.Config, error) {
@@ -137,7 +137,7 @@ func RequireHTTPSClient(cmd *cobra.Command, _ []string) error {
 	}
 	dialClient = &http.Client{
 		Transport: apiutil.NewCallerIDRoundTripper(
-			&http.Transport{TLSClientConfig: tlsConfig}, pdControlCallerID),
+			&http.Transport{TLSClientConfig: tlsConfig}, PDControlCallerID),
 	}
 	return nil
 }
@@ -294,10 +294,11 @@ func requestJSON(cmd *cobra.Command, method, prefix string, input map[string]any
 		return nil
 	})
 	if err != nil {
-		cmd.Printf("Failed! %s\n", err)
+		cmd.Printf("Failed! %s\n", strings.TrimSpace(err.Error()))
 		return
 	}
-	cmd.Printf("Success! %s\n", strings.Trim(string(msg), "\""))
+	msg = bytes.Trim(bytes.TrimSpace(msg), "\"")
+	cmd.Printf("Success! %s\n", string(msg))
 }
 
 func postJSON(cmd *cobra.Command, prefix string, input map[string]any) {

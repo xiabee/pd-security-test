@@ -103,7 +103,7 @@ func (suite *configTestSuite) TearDownTest() {
 func (suite *configTestSuite) TestConfig() {
 	re := suite.Require()
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/dashboard/adapter/skipDashboardLoop", `return(true)`))
-	suite.env.RunTestInTwoModes(suite.checkConfig)
+	suite.env.RunTestBasedOnMode(suite.checkConfig)
 	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/dashboard/adapter/skipDashboardLoop"))
 }
 
@@ -130,7 +130,6 @@ func (suite *configTestSuite) checkConfig(cluster *pdTests.TestCluster) {
 
 	// hidden config
 	scheduleConfig.Schedulers = nil
-	scheduleConfig.SchedulersPayload = nil
 	scheduleConfig.StoreLimit = nil
 	scheduleConfig.SchedulerMaxWaitingOperator = 0
 	scheduleConfig.EnableRemoveDownReplica = false
@@ -348,7 +347,7 @@ func (suite *configTestSuite) checkConfig(cluster *pdTests.TestCluster) {
 func (suite *configTestSuite) TestConfigForwardControl() {
 	re := suite.Require()
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/dashboard/adapter/skipDashboardLoop", `return(true)`))
-	suite.env.RunTestInTwoModes(suite.checkConfigForwardControl)
+	suite.env.RunTestBasedOnMode(suite.checkConfigForwardControl)
 	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/dashboard/adapter/skipDashboardLoop"))
 }
 
@@ -357,7 +356,7 @@ func (suite *configTestSuite) checkConfigForwardControl(cluster *pdTests.TestClu
 	leaderServer := cluster.GetLeaderServer()
 	pdAddr := leaderServer.GetAddr()
 
-	f, _ := os.CreateTemp("/tmp", "pd_tests")
+	f, _ := os.CreateTemp(os.TempDir(), "pd_tests")
 	fname := f.Name()
 	f.Close()
 	defer os.RemoveAll(fname)
@@ -547,7 +546,7 @@ func (suite *configTestSuite) checkConfigForwardControl(cluster *pdTests.TestClu
 }
 
 func (suite *configTestSuite) TestPlacementRules() {
-	suite.env.RunTestInTwoModes(suite.checkPlacementRules)
+	suite.env.RunTestBasedOnMode(suite.checkPlacementRules)
 }
 
 func (suite *configTestSuite) checkPlacementRules(cluster *pdTests.TestCluster) {
@@ -568,15 +567,15 @@ func (suite *configTestSuite) checkPlacementRules(cluster *pdTests.TestCluster) 
 	re.Contains(string(output), "Success!")
 
 	// test show
-	suite.checkShowRuleKey(re, pdAddr, [][2]string{{placement.DefaultGroupID, placement.DefaultRuleID}})
+	checkShowRuleKey(re, pdAddr, [][2]string{{placement.DefaultGroupID, placement.DefaultRuleID}})
 
-	f, _ := os.CreateTemp("/tmp", "pd_tests")
+	f, _ := os.CreateTemp(os.TempDir(), "pd_tests")
 	fname := f.Name()
 	f.Close()
 	defer os.RemoveAll(fname)
 
 	// test load
-	rules := suite.checkLoadRule(re, pdAddr, fname, [][2]string{{placement.DefaultGroupID, placement.DefaultRuleID}})
+	rules := checkLoadRule(re, pdAddr, fname, [][2]string{{placement.DefaultGroupID, placement.DefaultRuleID}})
 
 	// test save
 	rules = append(rules, placement.Rule{
@@ -596,11 +595,11 @@ func (suite *configTestSuite) checkPlacementRules(cluster *pdTests.TestCluster) 
 	re.NoError(err)
 
 	// test show group
-	suite.checkShowRuleKey(re, pdAddr, [][2]string{{placement.DefaultGroupID, placement.DefaultRuleID}, {placement.DefaultGroupID, "test1"}}, "--group=pd")
+	checkShowRuleKey(re, pdAddr, [][2]string{{placement.DefaultGroupID, placement.DefaultRuleID}, {placement.DefaultGroupID, "test1"}}, "--group=pd")
 
 	// test rule region detail
 	pdTests.MustPutRegion(re, cluster, 1, 1, []byte("a"), []byte("b"))
-	suite.checkShowRuleKey(re, pdAddr, [][2]string{{placement.DefaultGroupID, placement.DefaultRuleID}}, "--region=1", "--detail")
+	checkShowRuleKey(re, pdAddr, [][2]string{{placement.DefaultGroupID, placement.DefaultRuleID}}, "--region=1", "--detail")
 
 	// test delete
 	// need clear up args, so create new a cobra.Command. Otherwise gourp still exists.
@@ -609,11 +608,11 @@ func (suite *configTestSuite) checkPlacementRules(cluster *pdTests.TestCluster) 
 	os.WriteFile(fname, b, 0600)
 	_, err = tests.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "save", "--in="+fname)
 	re.NoError(err)
-	suite.checkShowRuleKey(re, pdAddr, [][2]string{{placement.DefaultGroupID, "test1"}}, "--group=pd")
+	checkShowRuleKey(re, pdAddr, [][2]string{{placement.DefaultGroupID, "test1"}}, "--group=pd")
 }
 
 func (suite *configTestSuite) TestPlacementRuleGroups() {
-	suite.env.RunTestInTwoModes(suite.checkPlacementRuleGroups)
+	suite.env.RunTestBasedOnMode(suite.checkPlacementRuleGroups)
 }
 
 func (suite *configTestSuite) checkPlacementRuleGroups(cluster *pdTests.TestCluster) {
@@ -690,7 +689,7 @@ func (suite *configTestSuite) checkPlacementRuleGroups(cluster *pdTests.TestClus
 }
 
 func (suite *configTestSuite) TestPlacementRuleBundle() {
-	suite.env.RunTestInTwoModes(suite.checkPlacementRuleBundle)
+	suite.env.RunTestBasedOnMode(suite.checkPlacementRuleBundle)
 }
 
 func (suite *configTestSuite) checkPlacementRuleBundle(cluster *pdTests.TestCluster) {
@@ -717,14 +716,14 @@ func (suite *configTestSuite) checkPlacementRuleBundle(cluster *pdTests.TestClus
 	re.NoError(json.Unmarshal(output, &bundle))
 	re.Equal(placement.GroupBundle{ID: placement.DefaultGroupID, Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: placement.DefaultGroupID, ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}}, bundle)
 
-	f, err := os.CreateTemp("/tmp", "pd_tests")
+	f, err := os.CreateTemp(os.TempDir(), "pd_tests")
 	re.NoError(err)
 	fname := f.Name()
 	f.Close()
 	defer os.RemoveAll(fname)
 
 	// test load
-	suite.checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
+	checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
 		{ID: placement.DefaultGroupID, Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: placement.DefaultGroupID, ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 	})
 
@@ -736,7 +735,7 @@ func (suite *configTestSuite) checkPlacementRuleBundle(cluster *pdTests.TestClus
 	re.NoError(os.WriteFile(fname, b, 0600))
 	_, err = tests.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "set", "--in="+fname)
 	re.NoError(err)
-	suite.checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
+	checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
 		{ID: placement.DefaultGroupID, Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: placement.DefaultGroupID, ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 		{ID: "pe", Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: "pe", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 	})
@@ -745,7 +744,7 @@ func (suite *configTestSuite) checkPlacementRuleBundle(cluster *pdTests.TestClus
 	_, err = tests.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "delete", placement.DefaultGroupID)
 	re.NoError(err)
 
-	suite.checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
+	checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
 		{ID: "pe", Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: "pe", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 	})
 
@@ -757,7 +756,7 @@ func (suite *configTestSuite) checkPlacementRuleBundle(cluster *pdTests.TestClus
 	re.NoError(os.WriteFile(fname, b, 0600))
 	_, err = tests.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "set", "--in="+fname)
 	re.NoError(err)
-	suite.checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
+	checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
 		{ID: "pe", Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: "pe", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 		{ID: "pf", Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: "pf", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 	})
@@ -768,7 +767,7 @@ func (suite *configTestSuite) checkPlacementRuleBundle(cluster *pdTests.TestClus
 	bundles := []placement.GroupBundle{
 		{ID: "pe", Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: "pe", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 	}
-	suite.checkLoadRuleBundle(re, pdAddr, fname, bundles)
+	checkLoadRuleBundle(re, pdAddr, fname, bundles)
 
 	// test save
 	bundle.Rules = []*placement.Rule{{GroupID: "pf", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}
@@ -778,7 +777,7 @@ func (suite *configTestSuite) checkPlacementRuleBundle(cluster *pdTests.TestClus
 	re.NoError(os.WriteFile(fname, b, 0600))
 	_, err = tests.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "save", "--in="+fname)
 	re.NoError(err)
-	suite.checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
+	checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
 		{ID: "pe", Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: "pe", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 		{ID: "pf", Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: "pf", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 	})
@@ -791,7 +790,7 @@ func (suite *configTestSuite) checkPlacementRuleBundle(cluster *pdTests.TestClus
 	_, err = tests.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "save", "--in="+fname, "--partial")
 	re.NoError(err)
 
-	suite.checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
+	checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
 		{ID: "pf", Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: "pf", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 	})
 
@@ -810,12 +809,12 @@ func (suite *configTestSuite) checkPlacementRuleBundle(cluster *pdTests.TestClus
 	_, err = tests.ExecuteCommand(cmd, "-u", pdAddr, "config", "placement-rules", "rule-bundle", "delete", "--regexp", ".*f")
 	re.NoError(err)
 
-	suite.checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
+	checkLoadRuleBundle(re, pdAddr, fname, []placement.GroupBundle{
 		{ID: "pd", Index: 0, Override: false, Rules: []*placement.Rule{{GroupID: "pd", ID: placement.DefaultRuleID, Role: placement.Voter, Count: 3}}},
 	})
 }
 
-func (suite *configTestSuite) checkLoadRuleBundle(re *require.Assertions, pdAddr string, fname string, expectValues []placement.GroupBundle) {
+func checkLoadRuleBundle(re *require.Assertions, pdAddr string, fname string, expectValues []placement.GroupBundle) {
 	var bundles []placement.GroupBundle
 	cmd := ctl.GetRootCmd()
 	testutil.Eventually(re, func() bool { // wait for the config to be synced to the scheduling server
@@ -828,7 +827,7 @@ func (suite *configTestSuite) checkLoadRuleBundle(re *require.Assertions, pdAddr
 	assertBundles(re, bundles, expectValues)
 }
 
-func (suite *configTestSuite) checkLoadRule(re *require.Assertions, pdAddr string, fname string, expectValues [][2]string) []placement.Rule {
+func checkLoadRule(re *require.Assertions, pdAddr string, fname string, expectValues [][2]string) []placement.Rule {
 	var rules []placement.Rule
 	cmd := ctl.GetRootCmd()
 	testutil.Eventually(re, func() bool { // wait for the config to be synced to the scheduling server
@@ -844,7 +843,7 @@ func (suite *configTestSuite) checkLoadRule(re *require.Assertions, pdAddr strin
 	return rules
 }
 
-func (suite *configTestSuite) checkShowRuleKey(re *require.Assertions, pdAddr string, expectValues [][2]string, opts ...string) {
+func checkShowRuleKey(re *require.Assertions, pdAddr string, expectValues [][2]string, opts ...string) {
 	var (
 		rules []placement.Rule
 		fit   placement.RegionFit
@@ -882,7 +881,7 @@ func TestReplicationMode(t *testing.T) {
 	defer cluster.Destroy()
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	pdAddr := cluster.GetConfig().GetClientURL()
 	cmd := ctl.GetRootCmd()
 
@@ -933,7 +932,7 @@ func TestReplicationMode(t *testing.T) {
 }
 
 func (suite *configTestSuite) TestUpdateDefaultReplicaConfig() {
-	suite.env.RunTestInTwoModes(suite.checkUpdateDefaultReplicaConfig)
+	suite.env.RunTestBasedOnMode(suite.checkUpdateDefaultReplicaConfig)
 }
 
 func (suite *configTestSuite) checkUpdateDefaultReplicaConfig(cluster *pdTests.TestCluster) {
@@ -1082,7 +1081,7 @@ func (suite *configTestSuite) checkUpdateDefaultReplicaConfig(cluster *pdTests.T
 }
 
 func (suite *configTestSuite) TestPDServerConfig() {
-	suite.env.RunTestInTwoModes(suite.checkPDServerConfig)
+	suite.env.RunTestBasedOnMode(suite.checkPDServerConfig)
 }
 
 func (suite *configTestSuite) checkPDServerConfig(cluster *pdTests.TestCluster) {
@@ -1115,7 +1114,7 @@ func (suite *configTestSuite) checkPDServerConfig(cluster *pdTests.TestCluster) 
 }
 
 func (suite *configTestSuite) TestMicroServiceConfig() {
-	suite.env.RunTestInTwoModes(suite.checkMicroServiceConfig)
+	suite.env.RunTestBasedOnMode(suite.checkMicroServiceConfig)
 }
 
 func (suite *configTestSuite) checkMicroServiceConfig(cluster *pdTests.TestCluster) {
@@ -1142,6 +1141,34 @@ func (suite *configTestSuite) checkMicroServiceConfig(cluster *pdTests.TestClust
 	_, err = tests.ExecuteCommand(cmd, args...)
 	re.NoError(err)
 	re.False(svr.GetMicroServiceConfig().EnableSchedulingFallback)
+}
+
+func (suite *configTestSuite) TestRegionRules() {
+	suite.env.RunTestBasedOnMode(suite.checkRegionRules)
+}
+
+func (suite *configTestSuite) checkRegionRules(cluster *pdTests.TestCluster) {
+	re := suite.Require()
+	leaderServer := cluster.GetLeaderServer()
+	pdAddr := leaderServer.GetAddr()
+	cmd := ctl.GetRootCmd()
+
+	storeID, regionID := uint64(1), uint64(2)
+	store := &metapb.Store{
+		Id:    storeID,
+		State: metapb.StoreState_Up,
+	}
+	pdTests.MustPutStore(re, cluster, store)
+	pdTests.MustPutRegion(re, cluster, regionID, storeID, []byte{}, []byte{})
+
+	args := []string{"-u", pdAddr, "config", "placement-rules", "show", "--region=" + strconv.Itoa(int(regionID)), "--detail"}
+	output, err := tests.ExecuteCommand(cmd, args...)
+	re.NoError(err)
+	fit := &placement.RegionFit{}
+	re.NoError(json.Unmarshal(output, fit))
+	re.Len(fit.RuleFits, 1)
+	re.Equal(placement.DefaultGroupID, fit.RuleFits[0].Rule.GroupID)
+	re.Equal(placement.DefaultRuleID, fit.RuleFits[0].Rule.ID)
 }
 
 func assertBundles(re *require.Assertions, a, b []placement.GroupBundle) {

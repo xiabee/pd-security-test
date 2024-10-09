@@ -80,7 +80,7 @@ BUILD_BIN_PATH := $(ROOT_PATH)/bin
 
 build: pd-server pd-ctl pd-recover
 
-tools: pd-tso-bench pd-heartbeat-bench regions-dump stores-dump pd-api-bench
+tools: pd-tso-bench pd-heartbeat-bench regions-dump stores-dump pd-api-bench pd-ut
 
 PD_SERVER_DEP :=
 ifeq ($(SWAGGER), 1)
@@ -108,7 +108,6 @@ pd-server-basic:
 .PHONY: pre-build build tools pd-server pd-server-basic
 
 # Tools
-
 pd-ctl:
 	cd tools && GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_TOOL_CGO_ENABLED) go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-ctl pd-ctl/main.go
 pd-tso-bench:
@@ -122,13 +121,17 @@ pd-analysis:
 pd-heartbeat-bench:
 	cd tools && CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-heartbeat-bench pd-heartbeat-bench/main.go
 simulator:
-	cd tools && CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-simulator pd-simulator/main.go
+	cd tools && GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_CGO_ENABLED) go build $(BUILD_FLAGS) -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-simulator pd-simulator/main.go
 regions-dump:
 	cd tools && CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/regions-dump regions-dump/main.go
 stores-dump:
 	cd tools && CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/stores-dump stores-dump/main.go
+pd-ut: pd-xprog
+	cd tools && GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_TOOL_CGO_ENABLED) go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-ut pd-ut/ut.go pd-ut/coverProfile.go
+pd-xprog:
+	cd tools && GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_TOOL_CGO_ENABLED) go build -tags xprog -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/xprog pd-ut/xprog.go
 
-.PHONY: pd-ctl pd-tso-bench pd-recover pd-analysis pd-heartbeat-bench simulator regions-dump stores-dump pd-api-bench
+.PHONY: pd-ctl pd-tso-bench pd-recover pd-analysis pd-heartbeat-bench simulator regions-dump stores-dump pd-api-bench pd-ut
 
 #### Docker image ####
 
@@ -181,9 +184,6 @@ static: install-tools pre-build
 	@ gofmt -s -l -d $(PACKAGE_DIRECTORIES) 2>&1 | awk '{ print } END { if (NR > 0) { exit 1 } }'
 	@ echo "golangci-lint ..."
 	@ golangci-lint run --verbose $(PACKAGE_DIRECTORIES) --allow-parallel-runners
-	@ echo "revive ..."
-	@ revive -formatter friendly -config revive.toml $(PACKAGES)
-
 	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) static && cd $(ROOT_PATH) > /dev/null; done
 
 # Because CI downloads the dashboard code and runs gofmt, we can't add this check into static now.
@@ -225,6 +225,13 @@ failpoint-disable: install-tools
 
 #### Test ####
 
+ut: pd-ut
+	@$(FAILPOINT_ENABLE)
+	# only run unit tests
+	./bin/pd-ut run --ignore tests --race --junitfile ./junitfile
+	@$(CLEAN_UT_BINARY)
+	@$(FAILPOINT_DISABLE)
+
 PACKAGE_DIRECTORIES := $(subst $(PD_PKG)/,,$(PACKAGES))
 TEST_PKGS := $(filter $(shell find . -iname "*_test.go" -exec dirname {} \; | \
                      sort -u | sed -e "s/^\./github.com\/tikv\/pd/"),$(PACKAGES))
@@ -245,9 +252,9 @@ basic-test: install-tools
 	go test $(BASIC_TEST_PKGS) || { $(FAILPOINT_DISABLE); exit 1; }
 	@$(FAILPOINT_DISABLE)
 
-ci-test-job: install-tools dashboard-ui
+ci-test-job: install-tools dashboard-ui pd-ut
 	@$(FAILPOINT_ENABLE)
-	./scripts/ci-subtask.sh $(JOB_COUNT) $(JOB_INDEX) || { $(FAILPOINT_DISABLE); exit 1; }
+	./scripts/ci-subtask.sh $(JOB_INDEX) || { $(FAILPOINT_DISABLE); exit 1; }
 	@$(FAILPOINT_DISABLE)
 
 TSO_INTEGRATION_TEST_PKGS := $(PD_PKG)/tests/server/tso
@@ -273,6 +280,7 @@ test-tso-consistency: install-tools
 REAL_CLUSTER_TEST_PATH := $(ROOT_PATH)/tests/integrations/realcluster
 
 test-real-cluster:
+	@ rm -rf ~/.tiup/data/pd_real_cluster_test
 	# testing with the real cluster...
 	cd $(REAL_CLUSTER_TEST_PATH) && $(MAKE) check
 
@@ -303,6 +311,8 @@ split:
 
 clean: failpoint-disable clean-test clean-build
 
+CLEAN_UT_BINARY := find . -name '*.test.bin'| xargs rm -f
+
 clean-test:
 	# Cleaning test tmp...
 	rm -rf /tmp/test_pd*
@@ -310,6 +320,7 @@ clean-test:
 	rm -rf /tmp/test_etcd*
 	rm -f $(REAL_CLUSTER_TEST_PATH)/playground.log
 	go clean -testcache
+	@$(CLEAN_UT_BINARY)
 
 clean-build:
 	# Cleaning building files...

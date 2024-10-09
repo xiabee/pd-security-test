@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ROOT_PATH := ../../..
+ROOT_PATH := $(shell pwd)/../../..
 GO_TOOLS_BIN_PATH := $(ROOT_PATH)/.tools/bin
 PATH := $(GO_TOOLS_BIN_PATH):$(PATH)
 SHELL := env PATH='$(PATH)' GOBIN='$(GO_TOOLS_BIN_PATH)' $(shell which bash)
@@ -22,8 +22,6 @@ static: install-tools
 	@ gofmt -s -l -d . 2>&1 | awk '{ print } END { if (NR > 0) { exit 1 } }'
 	@ echo "golangci-lint ..."
 	@ golangci-lint run -c $(ROOT_PATH)/.golangci.yml --verbose ./... --allow-parallel-runners
-	@ echo "revive ..."
-	@ revive -formatter friendly -config $(ROOT_PATH)/revive.toml ./...
 
 tidy:
 	@ go mod tidy
@@ -52,7 +50,14 @@ kill_cluster:
 	fi
 
 test:
-	CGO_ENABLED=1 go test ./... -v -tags deadlock -race -cover || { exit 1; }
+	CGO_ENABLED=1 go test ./... -v -tags deadlock -race -cover || (\
+	echo "follow is pd-0 log\n" ; \
+	cat ~/.tiup/data/pd_real_cluster_test/pd-0/pd.log ; \
+	echo "follow is pd-1 log\n" ; \
+	cat ~/.tiup/data/pd_real_cluster_test/pd-1/pd.log ; \
+	echo "follow is pd-2 log\n" ; \
+	cat ~/.tiup/data/pd_real_cluster_test/pd-2/pd.log ; \
+	exit 1)
 
 install-tools:
 	cd $(ROOT_PATH) && $(MAKE) install-tools

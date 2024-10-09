@@ -34,8 +34,9 @@ import (
 	"github.com/tikv/pd/pkg/cache"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/core/storelimit"
-	"github.com/tikv/pd/pkg/mcs/utils"
+	mcsconstant "github.com/tikv/pd/pkg/mcs/utils/constant"
 	sc "github.com/tikv/pd/pkg/schedule/config"
+	types "github.com/tikv/pd/pkg/schedule/type"
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/configutil"
@@ -104,6 +105,7 @@ func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 	}
 
 	// Ignore the error check here
+	configutil.AdjustCommandLineString(flagSet, &c.Name, "name")
 	configutil.AdjustCommandLineString(flagSet, &c.Log.Level, "log-level")
 	configutil.AdjustCommandLineString(flagSet, &c.Log.File.Filename, "log-file")
 	configutil.AdjustCommandLineString(flagSet, &c.Metric.PushAddress, "metrics-addr")
@@ -142,13 +144,15 @@ func (c *Config) adjust(meta *toml.MetaData) error {
 	configutil.AdjustString(&c.AdvertiseListenAddr, c.ListenAddr)
 
 	if !configMetaData.IsDefined("enable-grpc-gateway") {
-		c.EnableGRPCGateway = utils.DefaultEnableGRPCGateway
+		c.EnableGRPCGateway = mcsconstant.DefaultEnableGRPCGateway
 	}
 
 	c.adjustLog(configMetaData.Child("log"))
-	c.Security.Encryption.Adjust()
+	if err := c.Security.Encryption.Adjust(); err != nil {
+		return err
+	}
 
-	configutil.AdjustInt64(&c.LeaderLease, utils.DefaultLeaderLease)
+	configutil.AdjustInt64(&c.LeaderLease, mcsconstant.DefaultLeaderLease)
 
 	if err := c.Schedule.Adjust(configMetaData.Child("schedule"), false); err != nil {
 		return err
@@ -158,10 +162,10 @@ func (c *Config) adjust(meta *toml.MetaData) error {
 
 func (c *Config) adjustLog(meta *configutil.ConfigMetaData) {
 	if !meta.IsDefined("disable-error-verbose") {
-		c.Log.DisableErrorVerbose = utils.DefaultDisableErrorVerbose
+		c.Log.DisableErrorVerbose = mcsconstant.DefaultDisableErrorVerbose
 	}
-	configutil.AdjustString(&c.Log.Format, utils.DefaultLogFormat)
-	configutil.AdjustString(&c.Log.Level, utils.DefaultLogLevel)
+	configutil.AdjustString(&c.Log.Format, mcsconstant.DefaultLogFormat)
+	configutil.AdjustString(&c.Log.Level, mcsconstant.DefaultLogLevel)
 }
 
 // GetName returns the Name
@@ -292,7 +296,7 @@ func (o *PersistConfig) SetScheduleConfig(cfg *sc.ScheduleConfig) {
 }
 
 // AdjustScheduleCfg adjusts the schedule config during the initialization.
-func (o *PersistConfig) AdjustScheduleCfg(scheduleCfg *sc.ScheduleConfig) {
+func AdjustScheduleCfg(scheduleCfg *sc.ScheduleConfig) {
 	// In case we add new default schedulers.
 	for _, ps := range sc.DefaultSchedulers {
 		if slice.NoneOf(scheduleCfg.Schedulers, func(i int) bool {
@@ -372,7 +376,7 @@ func (o *PersistConfig) IsUseJointConsensus() bool {
 }
 
 // GetKeyType returns the key type.
-func (o *PersistConfig) GetKeyType() constant.KeyType {
+func (*PersistConfig) GetKeyType() constant.KeyType {
 	return constant.StringToKeyType("table")
 }
 
@@ -644,10 +648,11 @@ func (o *PersistConfig) SetMaxReplicas(replicas int) {
 }
 
 // IsSchedulerDisabled returns if the scheduler is disabled.
-func (o *PersistConfig) IsSchedulerDisabled(t string) bool {
+func (o *PersistConfig) IsSchedulerDisabled(tp types.CheckerSchedulerType) bool {
+	oldType := types.SchedulerTypeCompatibleMap[tp]
 	schedulers := o.GetScheduleConfig().Schedulers
 	for _, s := range schedulers {
-		if t == s.Type {
+		if oldType == s.Type {
 			return s.Disable
 		}
 	}
@@ -687,7 +692,7 @@ func (o *PersistConfig) SetSplitMergeInterval(splitMergeInterval time.Duration) 
 func (*PersistConfig) SetSchedulingAllowanceStatus(bool, string) {}
 
 // SetHaltScheduling set HaltScheduling.
-func (o *PersistConfig) SetHaltScheduling(halt bool, source string) {
+func (o *PersistConfig) SetHaltScheduling(halt bool, _ string) {
 	v := o.GetScheduleConfig().Clone()
 	v.HaltScheduling = halt
 	o.SetScheduleConfig(v)
@@ -737,25 +742,25 @@ func (o *PersistConfig) IsRaftKV2() bool {
 
 // AddSchedulerCfg adds the scheduler configurations.
 // This method is a no-op since we only use configurations derived from one-way synchronization from API server now.
-func (o *PersistConfig) AddSchedulerCfg(string, []string) {}
+func (*PersistConfig) AddSchedulerCfg(types.CheckerSchedulerType, []string) {}
 
 // RemoveSchedulerCfg removes the scheduler configurations.
 // This method is a no-op since we only use configurations derived from one-way synchronization from API server now.
-func (o *PersistConfig) RemoveSchedulerCfg(tp string) {}
+func (*PersistConfig) RemoveSchedulerCfg(types.CheckerSchedulerType) {}
 
 // CheckLabelProperty checks if the label property is satisfied.
-func (o *PersistConfig) CheckLabelProperty(typ string, labels []*metapb.StoreLabel) bool {
+func (*PersistConfig) CheckLabelProperty(string, []*metapb.StoreLabel) bool {
 	return false
 }
 
 // IsTraceRegionFlow returns if the region flow is tracing.
 // If the accuracy cannot reach 0.1 MB, it is considered not.
-func (o *PersistConfig) IsTraceRegionFlow() bool {
+func (*PersistConfig) IsTraceRegionFlow() bool {
 	return false
 }
 
 // Persist saves the configuration to the storage.
-func (o *PersistConfig) Persist(storage endpoint.ConfigStorage) error {
+func (*PersistConfig) Persist(endpoint.ConfigStorage) error {
 	return nil
 }
 

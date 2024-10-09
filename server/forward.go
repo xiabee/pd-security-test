@@ -27,7 +27,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/tsopb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/tso"
 	"github.com/tikv/pd/pkg/utils/grpcutil"
 	"github.com/tikv/pd/pkg/utils/logutil"
@@ -39,7 +39,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func (s *GrpcServer) forwardTSORequest(
+func forwardTSORequest(
 	ctx context.Context,
 	request *pdpb.TsoRequest,
 	forwardStream tsopb.TSO_TsoClient) (*tsopb.TsoResponse, error) {
@@ -47,8 +47,8 @@ func (s *GrpcServer) forwardTSORequest(
 		Header: &tsopb.RequestHeader{
 			ClusterId:       request.GetHeader().GetClusterId(),
 			SenderId:        request.GetHeader().GetSenderId(),
-			KeyspaceId:      utils.DefaultKeyspaceID,
-			KeyspaceGroupId: utils.DefaultKeyspaceGroupID,
+			KeyspaceId:      constant.DefaultKeyspaceID,
+			KeyspaceGroupId: constant.DefaultKeyspaceGroupID,
 		},
 		Count:      request.GetCount(),
 		DcLocation: request.GetDcLocation(),
@@ -122,7 +122,7 @@ func (s *GrpcServer) forwardTSO(stream pdpb.PD_TsoServer) error {
 		default:
 		}
 
-		request, err := server.Recv(s.GetTSOProxyRecvFromClientTimeout())
+		request, err := server.recv(s.GetTSOProxyRecvFromClientTimeout())
 		if err == io.EOF {
 			return nil
 		}
@@ -134,7 +134,7 @@ func (s *GrpcServer) forwardTSO(stream pdpb.PD_TsoServer) error {
 			return status.Errorf(codes.Unknown, err.Error())
 		}
 
-		forwardedHost, ok := s.GetServicePrimaryAddr(stream.Context(), utils.TSOServiceName)
+		forwardedHost, ok := s.GetServicePrimaryAddr(stream.Context(), constant.TSOServiceName)
 		if !ok || len(forwardedHost) == 0 {
 			tsoStreamErr = errors.WithStack(ErrNotFoundTSOAddr)
 			return tsoStreamErr
@@ -149,7 +149,7 @@ func (s *GrpcServer) forwardTSO(stream pdpb.PD_TsoServer) error {
 				tsoStreamErr = errors.WithStack(err)
 				return tsoStreamErr
 			}
-			forwardStream, forwardCtx, cancelForward, err = s.createTSOForwardStream(stream.Context(), clientConn)
+			forwardStream, forwardCtx, cancelForward, err = createTSOForwardStream(stream.Context(), clientConn)
 			if err != nil {
 				tsoStreamErr = errors.WithStack(err)
 				return tsoStreamErr
@@ -189,7 +189,7 @@ func (s *GrpcServer) forwardTSO(stream pdpb.PD_TsoServer) error {
 			Count:     tsopbResp.GetCount(),
 			Timestamp: tsopbResp.GetTimestamp(),
 		}
-		if err := server.Send(response); err != nil {
+		if err := server.send(response); err != nil {
 			return errors.WithStack(err)
 		}
 	}
@@ -210,7 +210,7 @@ func (s *GrpcServer) forwardTSORequestWithDeadLine(
 	}
 
 	start := time.Now()
-	resp, err := s.forwardTSORequest(forwardCtx, request, forwardStream)
+	resp, err := forwardTSORequest(forwardCtx, request, forwardStream)
 	close(done)
 	if err != nil {
 		if strings.Contains(err.Error(), errs.NotLeaderErr) {
@@ -223,7 +223,7 @@ func (s *GrpcServer) forwardTSORequestWithDeadLine(
 	return resp, nil
 }
 
-func (s *GrpcServer) createTSOForwardStream(ctx context.Context, client *grpc.ClientConn) (tsopb.TSO_TsoClient, context.Context, context.CancelFunc, error) {
+func createTSOForwardStream(ctx context.Context, client *grpc.ClientConn) (tsopb.TSO_TsoClient, context.Context, context.CancelFunc, error) {
 	done := make(chan struct{})
 	forwardCtx, cancelForward := context.WithCancel(ctx)
 	go grpcutil.CheckStream(forwardCtx, cancelForward, done)
@@ -241,7 +241,7 @@ func (s *GrpcServer) createRegionHeartbeatForwardStream(client *grpc.ClientConn)
 	return forwardStream, cancel, err
 }
 
-func (s *GrpcServer) createRegionHeartbeatSchedulingStream(ctx context.Context, client *grpc.ClientConn) (schedulingpb.Scheduling_RegionHeartbeatClient, context.Context, context.CancelFunc, error) {
+func createRegionHeartbeatSchedulingStream(ctx context.Context, client *grpc.ClientConn) (schedulingpb.Scheduling_RegionHeartbeatClient, context.Context, context.CancelFunc, error) {
 	done := make(chan struct{})
 	forwardCtx, cancelForward := context.WithCancel(ctx)
 	go grpcutil.CheckStream(forwardCtx, cancelForward, done)
@@ -332,7 +332,7 @@ func forwardReportBucketClientToServer(forwardStream pdpb.PD_ReportBucketsClient
 			errCh <- errors.WithStack(err)
 			return
 		}
-		if err := server.Send(resp); err != nil {
+		if err := server.send(resp); err != nil {
 			errCh <- errors.WithStack(err)
 			return
 		}
@@ -408,8 +408,8 @@ func (s *GrpcServer) getGlobalTSO(ctx context.Context) (pdpb.Timestamp, error) {
 	request := &tsopb.TsoRequest{
 		Header: &tsopb.RequestHeader{
 			ClusterId:       s.ClusterID(),
-			KeyspaceId:      utils.DefaultKeyspaceID,
-			KeyspaceGroupId: utils.DefaultKeyspaceGroupID,
+			KeyspaceId:      constant.DefaultKeyspaceID,
+			KeyspaceGroupId: constant.DefaultKeyspaceGroupID,
 		},
 		Count: 1,
 	}
@@ -439,7 +439,7 @@ func (s *GrpcServer) getGlobalTSO(ctx context.Context) (pdpb.Timestamp, error) {
 		if i > 0 {
 			time.Sleep(retryIntervalRequestTSOServer)
 		}
-		forwardedHost, ok = s.GetServicePrimaryAddr(ctx, utils.TSOServiceName)
+		forwardedHost, ok = s.GetServicePrimaryAddr(ctx, constant.TSOServiceName)
 		if !ok || forwardedHost == "" {
 			return pdpb.Timestamp{}, ErrNotFoundTSOAddr
 		}

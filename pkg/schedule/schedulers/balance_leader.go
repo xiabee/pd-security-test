@@ -31,6 +31,7 @@ import (
 	"github.com/tikv/pd/pkg/schedule/filter"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
+	types "github.com/tikv/pd/pkg/schedule/type"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/reflectutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
@@ -42,8 +43,6 @@ import (
 const (
 	// BalanceLeaderName is balance leader scheduler name.
 	BalanceLeaderName = "balance-leader-scheduler"
-	// BalanceLeaderType is balance leader scheduler type.
-	BalanceLeaderType = "balance-leader"
 	// BalanceLeaderBatchSize is the default number of operators to transfer leaders by one scheduling.
 	// Default value is 4 which is subjected by scheduler-max-waiting-operator and leader-schedule-limit
 	// If you want to increase balance speed more, please increase above-mentioned param.
@@ -55,17 +54,6 @@ const (
 	transferOut = "transfer-out"
 )
 
-var (
-	// WithLabelValues is a heavy operation, define variable to avoid call it every time.
-	balanceLeaderScheduleCounter         = schedulerCounter.WithLabelValues(BalanceLeaderName, "schedule")
-	balanceLeaderNoLeaderRegionCounter   = schedulerCounter.WithLabelValues(BalanceLeaderName, "no-leader-region")
-	balanceLeaderRegionHotCounter        = schedulerCounter.WithLabelValues(BalanceLeaderName, "region-hot")
-	balanceLeaderNoTargetStoreCounter    = schedulerCounter.WithLabelValues(BalanceLeaderName, "no-target-store")
-	balanceLeaderNoFollowerRegionCounter = schedulerCounter.WithLabelValues(BalanceLeaderName, "no-follower-region")
-	balanceLeaderSkipCounter             = schedulerCounter.WithLabelValues(BalanceLeaderName, "skip")
-	balanceLeaderNewOpCounter            = schedulerCounter.WithLabelValues(BalanceLeaderName, "new-operator")
-)
-
 type balanceLeaderSchedulerConfig struct {
 	syncutil.RWMutex
 	storage endpoint.ConfigStorage
@@ -74,7 +62,7 @@ type balanceLeaderSchedulerConfig struct {
 	Batch int `json:"batch"`
 }
 
-func (conf *balanceLeaderSchedulerConfig) Update(data []byte) (int, any) {
+func (conf *balanceLeaderSchedulerConfig) update(data []byte) (int, any) {
 	conf.Lock()
 	defer conf.Unlock()
 
@@ -86,10 +74,14 @@ func (conf *balanceLeaderSchedulerConfig) Update(data []byte) (int, any) {
 	newConfig, _ := json.Marshal(conf)
 	if !bytes.Equal(oldConfig, newConfig) {
 		if !conf.validateLocked() {
-			json.Unmarshal(oldConfig, conf)
+			if err := json.Unmarshal(oldConfig, conf); err != nil {
+				return http.StatusInternalServerError, err.Error()
+			}
 			return http.StatusBadRequest, "invalid batch size which should be an integer between 1 and 10"
 		}
-		conf.persistLocked()
+		if err := conf.persistLocked(); err != nil {
+			log.Warn("failed to save balance-leader-scheduler config", errs.ZapError(err))
+		}
 		log.Info("balance-leader-scheduler config is updated", zap.ByteString("old", oldConfig), zap.ByteString("new", newConfig))
 		return http.StatusOK, "Config is updated."
 	}
@@ -108,7 +100,7 @@ func (conf *balanceLeaderSchedulerConfig) validateLocked() bool {
 	return conf.Batch >= 1 && conf.Batch <= 10
 }
 
-func (conf *balanceLeaderSchedulerConfig) Clone() *balanceLeaderSchedulerConfig {
+func (conf *balanceLeaderSchedulerConfig) clone() *balanceLeaderSchedulerConfig {
 	conf.RLock()
 	defer conf.RUnlock()
 	ranges := make([]core.KeyRange, len(conf.Ranges))
@@ -152,27 +144,26 @@ func newBalanceLeaderHandler(conf *balanceLeaderSchedulerConfig) http.Handler {
 		rd:     render.New(render.Options{IndentJSON: true}),
 	}
 	router := mux.NewRouter()
-	router.HandleFunc("/config", handler.UpdateConfig).Methods(http.MethodPost)
-	router.HandleFunc("/list", handler.ListConfig).Methods(http.MethodGet)
+	router.HandleFunc("/config", handler.updateConfig).Methods(http.MethodPost)
+	router.HandleFunc("/list", handler.listConfig).Methods(http.MethodGet)
 	return router
 }
 
-func (handler *balanceLeaderHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
+func (handler *balanceLeaderHandler) updateConfig(w http.ResponseWriter, r *http.Request) {
 	data, _ := io.ReadAll(r.Body)
 	r.Body.Close()
-	httpCode, v := handler.config.Update(data)
+	httpCode, v := handler.config.update(data)
 	handler.rd.JSON(w, httpCode, v)
 }
 
-func (handler *balanceLeaderHandler) ListConfig(w http.ResponseWriter, r *http.Request) {
-	conf := handler.config.Clone()
+func (handler *balanceLeaderHandler) listConfig(w http.ResponseWriter, _ *http.Request) {
+	conf := handler.config.clone()
 	handler.rd.JSON(w, http.StatusOK, conf)
 }
 
 type balanceLeaderScheduler struct {
 	*BaseScheduler
 	*retryQuota
-	name          string
 	conf          *balanceLeaderSchedulerConfig
 	handler       http.Handler
 	filters       []filter.Filter
@@ -182,14 +173,11 @@ type balanceLeaderScheduler struct {
 // newBalanceLeaderScheduler creates a scheduler that tends to keep leaders on
 // each store balanced.
 func newBalanceLeaderScheduler(opController *operator.Controller, conf *balanceLeaderSchedulerConfig, options ...BalanceLeaderCreateOption) Scheduler {
-	base := NewBaseScheduler(opController)
 	s := &balanceLeaderScheduler{
-		BaseScheduler: base,
+		BaseScheduler: NewBaseScheduler(opController, types.BalanceLeaderScheduler),
 		retryQuota:    newRetryQuota(),
-		name:          BalanceLeaderName,
 		conf:          conf,
 		handler:       newBalanceLeaderHandler(conf),
-		filterCounter: filter.NewCounter(filter.BalanceLeader.String()),
 	}
 	for _, option := range options {
 		option(s)
@@ -198,22 +186,17 @@ func newBalanceLeaderScheduler(opController *operator.Controller, conf *balanceL
 		&filter.StoreStateFilter{ActionScope: s.GetName(), TransferLeader: true, OperatorLevel: constant.High},
 		filter.NewSpecialUseFilter(s.GetName()),
 	}
+	s.filterCounter = filter.NewCounter(s.GetName())
 	return s
 }
 
+// ServeHTTP implements the http.Handler interface.
 func (l *balanceLeaderScheduler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	l.handler.ServeHTTP(w, r)
 }
 
 // BalanceLeaderCreateOption is used to create a scheduler with an option.
 type BalanceLeaderCreateOption func(s *balanceLeaderScheduler)
-
-// WithBalanceLeaderFilterCounterName sets the filter counter name for the scheduler.
-func WithBalanceLeaderFilterCounterName(name string) BalanceLeaderCreateOption {
-	return func(s *balanceLeaderScheduler) {
-		s.filterCounter.SetScope(name)
-	}
-}
 
 // WithBalanceLeaderName sets the name for the scheduler.
 func WithBalanceLeaderName(name string) BalanceLeaderCreateOption {
@@ -222,20 +205,14 @@ func WithBalanceLeaderName(name string) BalanceLeaderCreateOption {
 	}
 }
 
-func (l *balanceLeaderScheduler) GetName() string {
-	return l.name
-}
-
-func (l *balanceLeaderScheduler) GetType() string {
-	return BalanceLeaderType
-}
-
+// EncodeConfig implements the Scheduler interface.
 func (l *balanceLeaderScheduler) EncodeConfig() ([]byte, error) {
 	l.conf.RLock()
 	defer l.conf.RUnlock()
 	return EncodeConfig(l.conf)
 }
 
+// ReloadConfig implements the Scheduler interface.
 func (l *balanceLeaderScheduler) ReloadConfig() error {
 	l.conf.Lock()
 	defer l.conf.Unlock()
@@ -255,10 +232,11 @@ func (l *balanceLeaderScheduler) ReloadConfig() error {
 	return nil
 }
 
+// IsScheduleAllowed implements the Scheduler interface.
 func (l *balanceLeaderScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
 	allowed := l.OpController.OperatorCount(operator.OpLeader) < cluster.GetSchedulerConfig().GetLeaderScheduleLimit()
 	if !allowed {
-		operator.OperatorLimitCounter.WithLabelValues(l.GetType(), operator.OpLeader.String()).Inc()
+		operator.IncOperatorLimitCounter(l.GetType(), operator.OpLeader)
 	}
 	return allowed
 }
@@ -355,6 +333,7 @@ func (cs *candidateStores) resortStoreWithPos(pos int) {
 	}
 }
 
+// Schedule implements the Scheduler interface.
 func (l *balanceLeaderScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	basePlan := plan.NewBalanceSchedulerPlan()
 	var collector *plan.Collector
@@ -372,7 +351,7 @@ func (l *balanceLeaderScheduler) Schedule(cluster sche.SchedulerCluster, dryRun 
 
 	stores := cluster.GetStores()
 	scoreFunc := func(store *core.StoreInfo) float64 {
-		return store.LeaderScore(solver.kind.Policy, solver.GetOpInfluence(store.GetID()))
+		return store.LeaderScore(solver.kind.Policy, solver.getOpInfluence(store.GetID()))
 	}
 	sourceCandidate := newCandidateStores(filter.SelectSourceStores(stores, l.filters, cluster.GetSchedulerConfig(), collector, l.filterCounter), false, scoreFunc)
 	targetCandidate := newCandidateStores(filter.SelectTargetStores(stores, l.filters, cluster.GetSchedulerConfig(), nil, l.filterCounter), true, scoreFunc)
@@ -403,7 +382,7 @@ func (l *balanceLeaderScheduler) Schedule(cluster sche.SchedulerCluster, dryRun 
 			}
 		}
 	}
-	l.retryQuota.GC(append(sourceCandidate.stores, targetCandidate.stores...))
+	l.retryQuota.gc(append(sourceCandidate.stores, targetCandidate.stores...))
 	return result, collector.GetPlans()
 }
 
@@ -412,7 +391,7 @@ func createTransferLeaderOperator(cs *candidateStores, dir string, l *balanceLea
 	store := cs.getStore()
 	ssolver.Step++
 	defer func() { ssolver.Step-- }()
-	retryLimit := l.retryQuota.GetLimit(store)
+	retryLimit := l.retryQuota.getLimit(store)
 	var creator func(*solver, *plan.Collector) *operator.Operator
 	switch dir {
 	case transferOut:
@@ -432,9 +411,9 @@ func createTransferLeaderOperator(cs *candidateStores, dir string, l *balanceLea
 		}
 	}
 	if op != nil {
-		l.retryQuota.ResetLimit(store)
+		l.retryQuota.resetLimit(store)
 	} else {
-		l.Attenuate(store)
+		l.attenuate(store)
 		log.Debug("no operator created for selected stores", zap.String("scheduler", l.GetName()), zap.Uint64(dir, store.GetID()))
 		cs.next()
 	}
@@ -460,10 +439,10 @@ func makeInfluence(op *operator.Operator, plan *solver, usedRegions map[uint64]s
 // It randomly selects a health region from the source store, then picks
 // the best follower peer and transfers the leader.
 func (l *balanceLeaderScheduler) transferLeaderOut(solver *solver, collector *plan.Collector) *operator.Operator {
-	solver.Region = filter.SelectOneRegion(solver.RandLeaderRegions(solver.SourceStoreID(), l.conf.getRanges()),
+	solver.Region = filter.SelectOneRegion(solver.RandLeaderRegions(solver.sourceStoreID(), l.conf.getRanges()),
 		collector, filter.NewRegionPendingFilter(), filter.NewRegionDownFilter())
 	if solver.Region == nil {
-		log.Debug("store has no leader", zap.String("scheduler", l.GetName()), zap.Uint64("store-id", solver.SourceStoreID()))
+		log.Debug("store has no leader", zap.String("scheduler", l.GetName()), zap.Uint64("store-id", solver.sourceStoreID()))
 		balanceLeaderNoLeaderRegionCounter.Inc()
 		return nil
 	}
@@ -486,8 +465,8 @@ func (l *balanceLeaderScheduler) transferLeaderOut(solver *solver, collector *pl
 	targets = filter.SelectTargetStores(targets, finalFilters, conf, collector, l.filterCounter)
 	leaderSchedulePolicy := conf.GetLeaderSchedulePolicy()
 	sort.Slice(targets, func(i, j int) bool {
-		iOp := solver.GetOpInfluence(targets[i].GetID())
-		jOp := solver.GetOpInfluence(targets[j].GetID())
+		iOp := solver.getOpInfluence(targets[i].GetID())
+		jOp := solver.getOpInfluence(targets[j].GetID())
 		return targets[i].LeaderScore(leaderSchedulePolicy, iOp) < targets[j].LeaderScore(leaderSchedulePolicy, jOp)
 	})
 	for _, solver.Target = range targets {
@@ -504,10 +483,10 @@ func (l *balanceLeaderScheduler) transferLeaderOut(solver *solver, collector *pl
 // It randomly selects a health region from the target store, then picks
 // the worst follower peer and transfers the leader.
 func (l *balanceLeaderScheduler) transferLeaderIn(solver *solver, collector *plan.Collector) *operator.Operator {
-	solver.Region = filter.SelectOneRegion(solver.RandFollowerRegions(solver.TargetStoreID(), l.conf.getRanges()),
+	solver.Region = filter.SelectOneRegion(solver.RandFollowerRegions(solver.targetStoreID(), l.conf.getRanges()),
 		nil, filter.NewRegionPendingFilter(), filter.NewRegionDownFilter())
 	if solver.Region == nil {
-		log.Debug("store has no follower", zap.String("scheduler", l.GetName()), zap.Uint64("store-id", solver.TargetStoreID()))
+		log.Debug("store has no follower", zap.String("scheduler", l.GetName()), zap.Uint64("store-id", solver.targetStoreID()))
 		balanceLeaderNoFollowerRegionCounter.Inc()
 		return nil
 	}
@@ -560,7 +539,7 @@ func (l *balanceLeaderScheduler) createOperator(solver *solver, collector *plan.
 	}
 	solver.Step++
 	defer func() { solver.Step-- }()
-	op, err := operator.CreateTransferLeaderOperator(BalanceLeaderType, solver, solver.Region, solver.Region.GetLeader().GetStoreId(), solver.TargetStoreID(), []uint64{}, operator.OpLeader)
+	op, err := operator.CreateTransferLeaderOperator(l.GetName(), solver, solver.Region, solver.targetStoreID(), []uint64{}, operator.OpLeader)
 	if err != nil {
 		log.Debug("fail to create balance leader operator", errs.ZapError(err))
 		if collector != nil {
@@ -572,7 +551,7 @@ func (l *balanceLeaderScheduler) createOperator(solver *solver, collector *plan.
 		balanceLeaderNewOpCounter,
 	)
 	op.FinishedCounters = append(op.FinishedCounters,
-		balanceDirectionCounter.WithLabelValues(l.GetName(), solver.SourceMetricLabel(), solver.TargetMetricLabel()),
+		balanceDirectionCounter.WithLabelValues(l.GetName(), solver.sourceMetricLabel(), solver.targetMetricLabel()),
 	)
 	op.SetAdditionalInfo("sourceScore", strconv.FormatFloat(solver.sourceScore, 'f', 2, 64))
 	op.SetAdditionalInfo("targetScore", strconv.FormatFloat(solver.targetScore, 'f', 2, 64))

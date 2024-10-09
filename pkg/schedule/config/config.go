@@ -20,6 +20,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/core/storelimit"
+	types "github.com/tikv/pd/pkg/schedule/type"
 	"github.com/tikv/pd/pkg/utils/configutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/pkg/utils/typeutil"
@@ -52,6 +53,7 @@ const (
 	defaultEnableJointConsensus            = true
 	defaultEnableTiKVSplitRegion           = true
 	defaultEnableHeartbeatBreakdownMetrics = true
+	defaultEnableHeartbeatConcurrentRunner = true
 	defaultEnableCrossTableMerge           = true
 	defaultEnableDiagnostic                = true
 	defaultStrictlyMatchLabel              = false
@@ -267,11 +269,11 @@ type ScheduleConfig struct {
 	// EnableHeartbeatBreakdownMetrics is the option to enable heartbeat stats metrics.
 	EnableHeartbeatBreakdownMetrics bool `toml:"enable-heartbeat-breakdown-metrics" json:"enable-heartbeat-breakdown-metrics,string"`
 
+	// EnableHeartbeatConcurrentRunner is the option to enable heartbeat concurrent runner.
+	EnableHeartbeatConcurrentRunner bool `toml:"enable-heartbeat-concurrent-runner" json:"enable-heartbeat-concurrent-runner,string"`
+
 	// Schedulers support for loading customized schedulers
 	Schedulers SchedulerConfigs `toml:"schedulers" json:"schedulers-v2"` // json v2 is for the sake of compatible upgrade
-
-	// Only used to display
-	SchedulersPayload map[string]any `toml:"schedulers-payload" json:"schedulers-payload"`
 
 	// Controls the time interval between write hot regions info into leveldb.
 	HotRegionsWriteInterval typeutil.Duration `toml:"hot-regions-write-interval" json:"hot-regions-write-interval"`
@@ -316,7 +318,6 @@ func (c *ScheduleConfig) Clone() *ScheduleConfig {
 	cfg := *c
 	cfg.StoreLimit = storeLimit
 	cfg.Schedulers = schedulers
-	cfg.SchedulersPayload = nil
 	return &cfg
 }
 
@@ -382,6 +383,10 @@ func (c *ScheduleConfig) Adjust(meta *configutil.ConfigMetaData, reloading bool)
 		c.EnableHeartbeatBreakdownMetrics = defaultEnableHeartbeatBreakdownMetrics
 	}
 
+	if !meta.IsDefined("enable-heartbeat-concurrent-runner") {
+		c.EnableHeartbeatConcurrentRunner = defaultEnableHeartbeatConcurrentRunner
+	}
+
 	if !meta.IsDefined("enable-cross-table-merge") {
 		c.EnableCrossTableMerge = defaultEnableCrossTableMerge
 	}
@@ -407,7 +412,7 @@ func (c *ScheduleConfig) Adjust(meta *configutil.ConfigMetaData, reloading bool)
 	adjustSchedulers(&c.Schedulers, DefaultSchedulers)
 
 	for k, b := range c.migrateConfigurationMap() {
-		v, err := c.parseDeprecatedFlag(meta, k, *b[0], *b[1])
+		v, err := parseDeprecatedFlag(meta, k, *b[0], *b[1])
 		if err != nil {
 			return err
 		}
@@ -456,7 +461,7 @@ func (c *ScheduleConfig) GetMaxMergeRegionKeys() uint64 {
 	return c.MaxMergeRegionSize * 10000
 }
 
-func (c *ScheduleConfig) parseDeprecatedFlag(meta *configutil.ConfigMetaData, name string, old, new bool) (bool, error) {
+func parseDeprecatedFlag(meta *configutil.ConfigMetaData, name string, old, new bool) (bool, error) {
 	oldName, newName := "disable-"+name, "enable-"+name
 	defineOld, defineNew := meta.IsDefined(oldName), meta.IsDefined(newName)
 	switch {
@@ -560,10 +565,10 @@ type SchedulerConfig struct {
 // If these schedulers are not in the persistent configuration, they
 // will be created automatically when reloading.
 var DefaultSchedulers = SchedulerConfigs{
-	{Type: "balance-region"},
-	{Type: "balance-leader"},
-	{Type: "hot-region"},
-	{Type: "evict-slow-store"},
+	{Type: types.SchedulerTypeCompatibleMap[types.BalanceRegionScheduler]},
+	{Type: types.SchedulerTypeCompatibleMap[types.BalanceLeaderScheduler]},
+	{Type: types.SchedulerTypeCompatibleMap[types.BalanceHotRegionScheduler]},
+	{Type: types.SchedulerTypeCompatibleMap[types.EvictSlowStoreScheduler]},
 }
 
 // IsDefaultScheduler checks whether the scheduler is enabled by default.

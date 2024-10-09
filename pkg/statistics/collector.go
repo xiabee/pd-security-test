@@ -22,12 +22,12 @@ import (
 
 // storeCollector define the behavior of different engines of stores.
 type storeCollector interface {
-	// Engine returns the type of Store.
-	Engine() string
-	// Filter determines whether the Store needs to be handled by itself.
-	Filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool
-	// GetLoads obtains available loads from storeLoads and peerLoadSum according to rwTy and kind.
-	GetLoads(storeLoads, peerLoadSum []float64, rwTy utils.RWType, kind constant.ResourceKind) (loads []float64)
+	// engine returns the type of Store.
+	engine() string
+	// filter determines whether the Store needs to be handled by itself.
+	filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool
+	// getLoads obtains available loads from storeLoads and peerLoadSum according to rwTy and kind.
+	getLoads(storeLoads, peerLoadSum []float64, rwTy utils.RWType, kind constant.ResourceKind) (loads []float64)
 }
 
 type tikvCollector struct{}
@@ -36,11 +36,11 @@ func newTikvCollector() storeCollector {
 	return tikvCollector{}
 }
 
-func (c tikvCollector) Engine() string {
+func (tikvCollector) engine() string {
 	return core.EngineTiKV
 }
 
-func (c tikvCollector) Filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool {
+func (tikvCollector) filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool {
 	if info.IsTiFlash() {
 		return false
 	}
@@ -53,7 +53,7 @@ func (c tikvCollector) Filter(info *StoreSummaryInfo, kind constant.ResourceKind
 	return false
 }
 
-func (c tikvCollector) GetLoads(storeLoads, peerLoadSum []float64, rwTy utils.RWType, kind constant.ResourceKind) (loads []float64) {
+func (tikvCollector) getLoads(storeLoads, peerLoadSum []float64, rwTy utils.RWType, kind constant.ResourceKind) (loads []float64) {
 	loads = make([]float64, utils.DimLen)
 	switch rwTy {
 	case utils.Read:
@@ -87,11 +87,11 @@ func newTiFlashCollector(isTraceRegionFlow bool) storeCollector {
 	return tiflashCollector{isTraceRegionFlow: isTraceRegionFlow}
 }
 
-func (c tiflashCollector) Engine() string {
+func (tiflashCollector) engine() string {
 	return core.EngineTiFlash
 }
 
-func (c tiflashCollector) Filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool {
+func (tiflashCollector) filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool {
 	switch kind {
 	case constant.LeaderKind:
 		return false
@@ -101,7 +101,7 @@ func (c tiflashCollector) Filter(info *StoreSummaryInfo, kind constant.ResourceK
 	return false
 }
 
-func (c tiflashCollector) GetLoads(storeLoads, peerLoadSum []float64, rwTy utils.RWType, kind constant.ResourceKind) (loads []float64) {
+func (c tiflashCollector) getLoads(storeLoads, peerLoadSum []float64, rwTy utils.RWType, kind constant.ResourceKind) (loads []float64) {
 	loads = make([]float64, utils.DimLen)
 	switch rwTy {
 	case utils.Read:

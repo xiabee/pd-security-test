@@ -34,7 +34,7 @@ import (
 	"github.com/tikv/pd/pkg/id"
 	"github.com/tikv/pd/pkg/keyspace"
 	scheduling "github.com/tikv/pd/pkg/mcs/scheduling/server"
-	"github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
 	"github.com/tikv/pd/pkg/swaggerserver"
 	"github.com/tikv/pd/pkg/tso"
@@ -84,10 +84,12 @@ func NewTestServer(ctx context.Context, cfg *config.Config) (*TestServer, error)
 
 // NewTestAPIServer creates a new TestServer.
 func NewTestAPIServer(ctx context.Context, cfg *config.Config) (*TestServer, error) {
-	return createTestServer(ctx, cfg, []string{utils.APIServiceName})
+	return createTestServer(ctx, cfg, []string{constant.APIServiceName})
 }
 
 func createTestServer(ctx context.Context, cfg *config.Config, services []string) (*TestServer, error) {
+	//  disable the heartbeat async runner in test
+	cfg.Schedule.EnableHeartbeatConcurrentRunner = false
 	err := logutil.SetupLogger(cfg.Log, &cfg.Logger, &cfg.LogProps, cfg.Security.RedactInfoLog)
 	if err != nil {
 		return nil, err
@@ -570,17 +572,17 @@ func restartTestCluster(
 }
 
 // RunServer starts to run TestServer.
-func (c *TestCluster) RunServer(server *TestServer) <-chan error {
+func RunServer(server *TestServer) <-chan error {
 	resC := make(chan error)
 	go func() { resC <- server.Run() }()
 	return resC
 }
 
 // RunServers starts to run multiple TestServer.
-func (c *TestCluster) RunServers(servers []*TestServer) error {
+func RunServers(servers []*TestServer) error {
 	res := make([]<-chan error, len(servers))
 	for i, s := range servers {
-		res[i] = c.RunServer(s)
+		res[i] = RunServer(s)
 	}
 	for _, c := range res {
 		if err := <-c; err != nil {
@@ -596,7 +598,7 @@ func (c *TestCluster) RunInitialServers() error {
 	for _, conf := range c.config.InitialServers {
 		servers = append(servers, c.GetServer(conf.Name))
 	}
-	return c.RunServers(servers)
+	return RunServers(servers)
 }
 
 // StopAll is used to stop all servers.
@@ -808,7 +810,7 @@ func (c *TestCluster) HandleReportBuckets(b *metapb.Buckets) error {
 
 // Join is used to add a new TestServer into the cluster.
 func (c *TestCluster) Join(ctx context.Context, opts ...ConfigOption) (*TestServer, error) {
-	conf, err := c.config.Join().Generate(opts...)
+	conf, err := c.config.join().Generate(opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -822,7 +824,7 @@ func (c *TestCluster) Join(ctx context.Context, opts ...ConfigOption) (*TestServ
 
 // JoinAPIServer is used to add a new TestAPIServer into the cluster.
 func (c *TestCluster) JoinAPIServer(ctx context.Context, opts ...ConfigOption) (*TestServer, error) {
-	conf, err := c.config.Join().Generate(opts...)
+	conf, err := c.config.join().Generate(opts...)
 	if err != nil {
 		return nil, err
 	}

@@ -56,14 +56,13 @@ import (
 	rm_server "github.com/tikv/pd/pkg/mcs/resourcemanager/server"
 	_ "github.com/tikv/pd/pkg/mcs/resourcemanager/server/apis/v1" // init API group
 	_ "github.com/tikv/pd/pkg/mcs/tso/server/apis/v1"             // init tso API group
-	mcs "github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/member"
 	"github.com/tikv/pd/pkg/ratelimit"
 	"github.com/tikv/pd/pkg/replication"
 	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/schedule/hbstream"
 	"github.com/tikv/pd/pkg/schedule/placement"
-	"github.com/tikv/pd/pkg/schedule/schedulers"
 	"github.com/tikv/pd/pkg/storage"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/storage/kv"
@@ -127,7 +126,6 @@ var (
 )
 
 // Server is the pd server. It implements bs.Server
-// nolint
 type Server struct {
 	diagnosticspb.DiagnosticsServer
 
@@ -443,9 +441,15 @@ func (s *Server) startServer(ctx context.Context) error {
 
 	s.rootPath = endpoint.PDRootPath(clusterID)
 	s.member.InitMemberInfo(s.cfg.AdvertiseClientUrls, s.cfg.AdvertisePeerUrls, s.Name(), s.rootPath)
-	s.member.SetMemberDeployPath(s.member.ID())
-	s.member.SetMemberBinaryVersion(s.member.ID(), versioninfo.PDReleaseVersion)
-	s.member.SetMemberGitHash(s.member.ID(), versioninfo.PDGitHash)
+	if err := s.member.SetMemberDeployPath(s.member.ID()); err != nil {
+		return err
+	}
+	if err := s.member.SetMemberBinaryVersion(s.member.ID(), versioninfo.PDReleaseVersion); err != nil {
+		return err
+	}
+	if err := s.member.SetMemberGitHash(s.member.ID(), versioninfo.PDGitHash); err != nil {
+		return err
+	}
 	s.idAllocator = id.NewAllocator(&id.AllocatorParams{
 		Client:    s.client,
 		RootPath:  s.rootPath,
@@ -471,18 +475,16 @@ func (s *Server) startServer(ctx context.Context) error {
 	s.tsoDispatcher = tsoutil.NewTSODispatcher(tsoProxyHandleDuration, tsoProxyBatchSize)
 	s.tsoProtoFactory = &tsoutil.TSOProtoFactory{}
 	s.pdProtoFactory = &tsoutil.PDProtoFactory{}
-	if !s.IsAPIServiceMode() {
-		s.tsoAllocatorManager = tso.NewAllocatorManager(s.ctx, mcs.DefaultKeyspaceGroupID, s.member, s.rootPath, s.storage, s, false)
-		// When disabled the Local TSO, we should clean up the Local TSO Allocator's meta info written in etcd if it exists.
-		if !s.cfg.EnableLocalTSO {
-			if err = s.tsoAllocatorManager.CleanUpDCLocation(); err != nil {
-				return err
-			}
+	s.tsoAllocatorManager = tso.NewAllocatorManager(s.ctx, constant.DefaultKeyspaceGroupID, s.member, s.rootPath, s.storage, s, false)
+	// When disabled the Local TSO, we should clean up the Local TSO Allocator's meta info written in etcd if it exists.
+	if !s.cfg.EnableLocalTSO {
+		if err = s.tsoAllocatorManager.CleanUpDCLocation(); err != nil {
+			return err
 		}
-		if zone, exist := s.cfg.Labels[config.ZoneLabel]; exist && zone != "" && s.cfg.EnableLocalTSO {
-			if err = s.tsoAllocatorManager.SetLocalTSOConfig(zone); err != nil {
-				return err
-			}
+	}
+	if zone, exist := s.cfg.Labels[config.ZoneLabel]; exist && zone != "" && s.cfg.EnableLocalTSO {
+		if err = s.tsoAllocatorManager.SetLocalTSOConfig(zone); err != nil {
+			return err
 		}
 	}
 
@@ -592,7 +594,7 @@ func (s *Server) Close() {
 		cb()
 	}
 
-	s.clientConns.Range(func(key, value any) bool {
+	s.clientConns.Range(func(_, value any) bool {
 		conn := value.(*grpc.ClientConn)
 		if err := conn.Close(); err != nil {
 			log.Error("close grpc client meet error", errs.ZapError(err))
@@ -979,14 +981,6 @@ func (s *Server) GetConfig() *config.Config {
 	cfg.MicroService = *s.persistOptions.GetMicroServiceConfig().Clone()
 	cfg.LabelProperty = s.persistOptions.GetLabelPropertyConfig().Clone()
 	cfg.ClusterVersion = *s.persistOptions.GetClusterVersion()
-	if s.storage == nil {
-		return cfg
-	}
-	sches, configs, err := s.storage.LoadAllSchedulerConfigs()
-	if err != nil {
-		return cfg
-	}
-	cfg.Schedule.SchedulersPayload = schedulers.ToPayload(sches, configs)
 	return cfg
 }
 
@@ -1051,7 +1045,6 @@ func (s *Server) SetScheduleConfig(cfg sc.ScheduleConfig) error {
 		return err
 	}
 	old := s.persistOptions.GetScheduleConfig()
-	cfg.SchedulersPayload = nil
 	s.persistOptions.SetScheduleConfig(&cfg)
 	if err := s.persistOptions.Persist(s.storage); err != nil {
 		s.persistOptions.SetScheduleConfig(old)
@@ -1462,15 +1455,6 @@ func (s *Server) GetRegions() []*core.RegionInfo {
 	return nil
 }
 
-// IsServiceIndependent returns if the service is enabled
-func (s *Server) IsServiceIndependent(name string) bool {
-	rc := s.GetRaftCluster()
-	if rc != nil {
-		return rc.IsServiceIndependent(name)
-	}
-	return false
-}
-
 // GetServiceLabels returns ApiAccessPaths by given service label
 // TODO: this function will be used for updating api rate limit config
 func (s *Server) GetServiceLabels(serviceLabel string) []apiutil.AccessPath {
@@ -1555,8 +1539,6 @@ func (s *Server) UpdateGRPCServiceRateLimiter(serviceLabel string, opts ...ratel
 
 // GetClusterStatus gets cluster status.
 func (s *Server) GetClusterStatus() (*cluster.Status, error) {
-	s.cluster.Lock()
-	defer s.cluster.Unlock()
 	return s.cluster.LoadClusterStatus()
 }
 
@@ -1688,7 +1670,9 @@ func (s *Server) leaderLoop() {
 						zap.String("current-leader-member-id", types.ID(etcdLeader).String()),
 						zap.String("transferee-member-id", types.ID(s.member.ID()).String()),
 					)
-					s.member.MoveEtcdLeader(s.ctx, etcdLeader, s.member.ID())
+					if err := s.member.MoveEtcdLeader(s.ctx, etcdLeader, s.member.ID()); err != nil {
+						log.Error("failed to move etcd leader", errs.ZapError(err))
+					}
 				}
 			}
 			log.Info("skip campaigning of pd leader and check later",
@@ -1743,7 +1727,7 @@ func (s *Server) campaignLeader() {
 			return
 		}
 		defer func() {
-			s.tsoAllocatorManager.ResetAllocatorGroup(tso.GlobalDCLocation)
+			s.tsoAllocatorManager.ResetAllocatorGroup(tso.GlobalDCLocation, false)
 			failpoint.Inject("updateAfterResetTSO", func() {
 				if err = allocator.UpdateTSO(); !errorspkg.Is(err, errs.ErrUpdateTimestamp) {
 					log.Panic("the tso update after reset should return ErrUpdateTimestamp as expected", zap.Error(err))
@@ -1805,7 +1789,7 @@ func (s *Server) campaignLeader() {
 	CheckPDVersionWithClusterVersion(s.persistOptions)
 	log.Info(fmt.Sprintf("%s leader is ready to serve", s.mode), zap.String("leader-name", s.Name()))
 
-	leaderTicker := time.NewTicker(mcs.LeaderTickInterval)
+	leaderTicker := time.NewTicker(constant.LeaderTickInterval)
 	defer leaderTicker.Stop()
 
 	for {
@@ -2034,15 +2018,15 @@ func (s *Server) SetServicePrimaryAddr(serviceName, addr string) {
 }
 
 func (s *Server) initTSOPrimaryWatcher() {
-	serviceName := mcs.TSOServiceName
+	serviceName := constant.TSOServiceName
 	tsoRootPath := endpoint.TSOSvcRootPath(s.ClusterID())
-	tsoServicePrimaryKey := endpoint.KeyspaceGroupPrimaryPath(tsoRootPath, mcs.DefaultKeyspaceGroupID)
+	tsoServicePrimaryKey := endpoint.KeyspaceGroupPrimaryPath(tsoRootPath, constant.DefaultKeyspaceGroupID)
 	s.tsoPrimaryWatcher = s.initServicePrimaryWatcher(serviceName, tsoServicePrimaryKey)
 	s.tsoPrimaryWatcher.StartWatchLoop()
 }
 
 func (s *Server) initSchedulingPrimaryWatcher() {
-	serviceName := mcs.SchedulingServiceName
+	serviceName := constant.SchedulingServiceName
 	primaryKey := endpoint.SchedulingPrimaryPath(s.ClusterID())
 	s.schedulingPrimaryWatcher = s.initServicePrimaryWatcher(serviceName, primaryKey)
 	s.schedulingPrimaryWatcher.StartWatchLoop()
@@ -2062,7 +2046,7 @@ func (s *Server) initServicePrimaryWatcher(serviceName string, primaryKey string
 		}
 		return nil
 	}
-	deleteFn := func(kv *mvccpb.KeyValue) error {
+	deleteFn := func(*mvccpb.KeyValue) error {
 		var oldPrimary string
 		v, ok := s.servicePrimaryMap.Load(serviceName)
 		if ok {
@@ -2088,7 +2072,7 @@ func (s *Server) initServicePrimaryWatcher(serviceName string, primaryKey string
 }
 
 // RecoverAllocID recover alloc id. set current base id to input id
-func (s *Server) RecoverAllocID(ctx context.Context, id uint64) error {
+func (s *Server) RecoverAllocID(_ context.Context, id uint64) error {
 	return s.idAllocator.SetBase(id)
 }
 

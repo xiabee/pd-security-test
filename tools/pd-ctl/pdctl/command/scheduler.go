@@ -391,7 +391,7 @@ func NewSlowTrendEvictLeaderSchedulerCommand() *cobra.Command {
 	return c
 }
 
-func addSchedulerForSplitBucketCommandFunc(cmd *cobra.Command, args []string) {
+func addSchedulerForSplitBucketCommandFunc(cmd *cobra.Command, _ []string) {
 	input := make(map[string]any)
 	input["name"] = cmd.Name()
 	postJSON(cmd, schedulersPrefix, input)
@@ -592,6 +592,10 @@ func newConfigEvictLeaderCommand() *cobra.Command {
 		Use:   "delete-store <store-id>",
 		Short: "delete a store from evict leader list",
 		Run:   func(cmd *cobra.Command, args []string) { deleteStoreFromSchedulerConfig(cmd, c.Name(), args) },
+	}, &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "set the config item",
+		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
 	})
 	return c
 }
@@ -649,6 +653,18 @@ func addStoreToSchedulerConfig(cmd *cobra.Command, schedulerName string, args []
 	postJSON(cmd, path.Join(schedulerConfigPrefix, schedulerName, "config"), input)
 }
 
+var hiddenHotConfig = []string{
+	"max-zombie-rounds",
+	"max-peer-number",
+	"byte-rate-rank-step-ratio",
+	"key-rate-rank-step-ratio",
+	"query-rate-rank-step-ratio",
+	"count-rank-step-ratio",
+	"great-dec-ratio",
+	"minor-dec-ratio",
+	"enable-for-tiflash",
+}
+
 func listSchedulerConfigCommandFunc(cmd *cobra.Command, args []string) {
 	if len(args) != 0 {
 		cmd.Println(cmd.UsageString())
@@ -666,6 +682,23 @@ func listSchedulerConfigCommandFunc(cmd *cobra.Command, args []string) {
 		}
 		cmd.Println(err)
 		return
+	}
+	if p == "balance-hot-region-scheduler" {
+		schedulerConfig := make(map[string]any)
+		err := json.Unmarshal([]byte(r), &schedulerConfig)
+		if err != nil {
+			cmd.Println(err)
+			return
+		}
+		for _, config := range hiddenHotConfig {
+			delete(schedulerConfig, config)
+		}
+		b, err := json.MarshalIndent(schedulerConfig, "", "  ")
+		if err != nil {
+			cmd.Println(err)
+			return
+		}
+		r = string(b)
 	}
 	cmd.Println(r)
 }

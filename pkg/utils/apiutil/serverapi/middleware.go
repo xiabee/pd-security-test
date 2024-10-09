@@ -23,7 +23,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	mcsutils "github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
@@ -128,8 +128,8 @@ func (h *redirector) matchMicroServiceRedirectRules(r *http.Request) (bool, stri
 	r.URL.Path = strings.TrimRight(r.URL.Path, "/")
 	for _, rule := range h.microserviceRedirectRules {
 		// Now we only support checking the scheduling service whether it is independent
-		if rule.targetServiceName == mcsutils.SchedulingServiceName {
-			if !h.s.IsServiceIndependent(mcsutils.SchedulingServiceName) {
+		if rule.targetServiceName == constant.SchedulingServiceName {
+			if !h.s.GetRaftCluster().IsServiceIndependent(constant.SchedulingServiceName) {
 				continue
 			}
 		}
@@ -208,8 +208,14 @@ func (h *redirector) ServeHTTP(w http.ResponseWriter, r *http.Request, next http
 		w.Header().Add(apiutil.XForwardedToMicroServiceHeader, "true")
 	} else if name := r.Header.Get(apiutil.PDRedirectorHeader); len(name) == 0 {
 		leader := h.waitForLeader(r)
+		// The leader has not been elected yet.
 		if leader == nil {
 			http.Error(w, errs.ErrRedirectNoLeader.FastGenByArgs().Error(), http.StatusServiceUnavailable)
+			return
+		}
+		// If the leader is the current server now, we can handle the request directly.
+		if h.s.GetMember().IsLeader() || leader.GetName() == h.s.Name() {
+			next(w, r)
 			return
 		}
 		clientUrls = leader.GetClientUrls()
