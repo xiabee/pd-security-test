@@ -18,22 +18,20 @@ import (
 	"github.com/docker/go-units"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/core"
-	sc "github.com/tikv/pd/tools/pd-simulator/simulator/config"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/info"
+	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
+	"go.uber.org/zap"
 )
 
-func newRegionSplit(config *sc.SimConfig) *Case {
+func newRegionSplit() *Case {
 	var simCase Case
-	totalStore := config.TotalStore
-	allStores := make(map[uint64]struct{}, totalStore)
-
-	for i := 0; i < totalStore; i++ {
-		id := uint64(i)
+	// Initialize the cluster
+	storeNum := getStoreNum()
+	for i := 1; i <= storeNum; i++ {
 		simCase.Stores = append(simCase.Stores, &Store{
-			ID:     id,
+			ID:     uint64(i),
 			Status: metapb.StoreState_Up,
 		})
-		allStores[id] = struct{}{}
 	}
 	peers := []*metapb.Peer{
 		{Id: 4, StoreId: 1},
@@ -50,7 +48,7 @@ func newRegionSplit(config *sc.SimConfig) *Case {
 	simCase.RegionSplitKeys = 10000
 	// Events description
 	e := &WriteFlowOnSpotDescriptor{}
-	e.Step = func(int64) map[string]int64 {
+	e.Step = func(tick int64) map[string]int64 {
 		return map[string]int64{
 			"foobar": 8 * units.MiB,
 		}
@@ -58,14 +56,16 @@ func newRegionSplit(config *sc.SimConfig) *Case {
 	simCase.Events = []EventDescriptor{e}
 
 	// Checker description
-	simCase.Checker = func(_ []*metapb.Store, regions *core.RegionsInfo, _ []info.StoreStats) bool {
-		for storeID := range allStores {
-			peerCount := regions.GetStoreRegionCount(storeID)
-			if peerCount < 5 {
-				return false
-			}
+	simCase.Checker = func(regions *core.RegionsInfo, stats []info.StoreStats) bool {
+		res := true
+		regionCounts := make([]int, 0, storeNum)
+		for i := 1; i <= storeNum; i++ {
+			regionCount := regions.GetStoreRegionCount(uint64(i))
+			regionCounts = append(regionCounts, regionCount)
+			res = res && regionCount > 5
 		}
-		return true
+		simutil.Logger.Info("current counts", zap.Ints("region", regionCounts))
+		return res
 	}
 	return &simCase
 }

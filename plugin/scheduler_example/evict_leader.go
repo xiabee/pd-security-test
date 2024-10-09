@@ -68,7 +68,7 @@ func init() {
 		}
 	})
 
-	schedulers.RegisterScheduler(EvictLeaderType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder schedulers.ConfigDecoder, _ ...func(string) error) (schedulers.Scheduler, error) {
+	schedulers.RegisterScheduler(EvictLeaderType, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder schedulers.ConfigDecoder, removeSchedulerCb ...func(string) error) (schedulers.Scheduler, error) {
 		conf := &evictLeaderSchedulerConfig{StoreIDWitRanges: make(map[uint64][]core.KeyRange), storage: storage}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -79,11 +79,13 @@ func init() {
 }
 
 // SchedulerType returns the type of the scheduler
+// nolint
 func SchedulerType() string {
 	return EvictLeaderType
 }
 
 // SchedulerArgs returns the args for the scheduler
+// nolint
 func SchedulerArgs() []string {
 	args := []string{"1"}
 	return args
@@ -134,7 +136,7 @@ func (conf *evictLeaderSchedulerConfig) Persist() error {
 	return conf.storage.SaveSchedulerConfig(name, data)
 }
 
-func (*evictLeaderSchedulerConfig) getScheduleName() string {
+func (conf *evictLeaderSchedulerConfig) getScheduleName() string {
 	return EvictLeaderName
 }
 
@@ -170,11 +172,11 @@ func (s *evictLeaderScheduler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	s.handler.ServeHTTP(w, r)
 }
 
-func (*evictLeaderScheduler) GetName() string {
+func (s *evictLeaderScheduler) GetName() string {
 	return EvictLeaderName
 }
 
-func (*evictLeaderScheduler) GetType() string {
+func (s *evictLeaderScheduler) GetType() string {
 	return EvictLeaderType
 }
 
@@ -212,7 +214,7 @@ func (s *evictLeaderScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) 
 	return allowed
 }
 
-func (s *evictLeaderScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) ([]*operator.Operator, []plan.Plan) {
+func (s *evictLeaderScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	ops := make([]*operator.Operator, 0, len(s.conf.StoreIDWitRanges))
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
@@ -229,7 +231,7 @@ func (s *evictLeaderScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) (
 		if target == nil {
 			continue
 		}
-		op, err := operator.CreateTransferLeaderOperator(EvictLeaderType, cluster, region, target.GetID(), []uint64{}, operator.OpLeader)
+		op, err := operator.CreateTransferLeaderOperator(EvictLeaderType, cluster, region, region.GetLeader().GetStoreId(), target.GetID(), []uint64{}, operator.OpLeader)
 		if err != nil {
 			log.Debug("fail to create evict leader operator", errs.ZapError(err))
 			continue
@@ -259,7 +261,7 @@ func (handler *evictLeaderHandler) UpdateConfig(w http.ResponseWriter, r *http.R
 		id = (uint64)(idFloat)
 		if _, exists = handler.config.StoreIDWitRanges[id]; !exists {
 			if err := handler.config.cluster.PauseLeaderTransfer(id); err != nil {
-				_ = handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
+				handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 		}
@@ -273,55 +275,47 @@ func (handler *evictLeaderHandler) UpdateConfig(w http.ResponseWriter, r *http.R
 		args = append(args, handler.config.getRanges(id)...)
 	}
 
-	err := handler.config.BuildWithArgs(args)
+	handler.config.BuildWithArgs(args)
+	err := handler.config.Persist()
 	if err != nil {
-		_ = handler.rd.JSON(w, http.StatusBadRequest, err.Error())
-		return
+		handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
 	}
-	err = handler.config.Persist()
-	if err != nil {
-		_ = handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	_ = handler.rd.JSON(w, http.StatusOK, nil)
+	handler.rd.JSON(w, http.StatusOK, nil)
 }
 
-func (handler *evictLeaderHandler) ListConfig(w http.ResponseWriter, _ *http.Request) {
+func (handler *evictLeaderHandler) ListConfig(w http.ResponseWriter, r *http.Request) {
 	conf := handler.config.Clone()
-	_ = handler.rd.JSON(w, http.StatusOK, conf)
+	handler.rd.JSON(w, http.StatusOK, conf)
 }
 
 func (handler *evictLeaderHandler) DeleteConfig(w http.ResponseWriter, r *http.Request) {
 	idStr := mux.Vars(r)["store_id"]
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
-		_ = handler.rd.JSON(w, http.StatusBadRequest, err.Error())
+		handler.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	handler.config.mu.Lock()
 	defer handler.config.mu.Unlock()
 	_, exists := handler.config.StoreIDWitRanges[id]
-	if !exists {
-		_ = handler.rd.JSON(w, http.StatusInternalServerError, errors.New("the config does not exist"))
-		return
-	}
-	delete(handler.config.StoreIDWitRanges, id)
-	handler.config.cluster.ResumeLeaderTransfer(id)
+	if exists {
+		delete(handler.config.StoreIDWitRanges, id)
+		handler.config.cluster.ResumeLeaderTransfer(id)
 
-	handler.config.mu.Unlock()
-	if err := handler.config.Persist(); err != nil {
+		handler.config.mu.Unlock()
+		handler.config.Persist()
 		handler.config.mu.Lock()
-		_ = handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
+
+		var resp any
+		if len(handler.config.StoreIDWitRanges) == 0 {
+			resp = noStoreInSchedulerInfo
+		}
+		handler.rd.JSON(w, http.StatusOK, resp)
 		return
 	}
-	handler.config.mu.Lock()
 
-	var resp any
-	if len(handler.config.StoreIDWitRanges) == 0 {
-		resp = noStoreInSchedulerInfo
-	}
-	_ = handler.rd.JSON(w, http.StatusOK, resp)
+	handler.rd.JSON(w, http.StatusInternalServerError, errors.New("the config does not exist"))
 }
 
 func newEvictLeaderHandler(config *evictLeaderSchedulerConfig) http.Handler {

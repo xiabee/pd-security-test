@@ -171,10 +171,3 @@ func AdjustPath(p *string) {
 		*p = absPath
 	}
 }
-
-// AdjustBool adjusts the value of a bool variable.
-func AdjustBool(v *bool, defValue bool) {
-	if !*v {
-		*v = defValue
-	}
-}

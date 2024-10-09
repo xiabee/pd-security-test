@@ -36,11 +36,11 @@ func newTikvCollector() storeCollector {
 	return tikvCollector{}
 }
 
-func (tikvCollector) Engine() string {
+func (c tikvCollector) Engine() string {
 	return core.EngineTiKV
 }
 
-func (tikvCollector) Filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool {
+func (c tikvCollector) Filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool {
 	if info.IsTiFlash() {
 		return false
 	}
@@ -53,7 +53,7 @@ func (tikvCollector) Filter(info *StoreSummaryInfo, kind constant.ResourceKind) 
 	return false
 }
 
-func (tikvCollector) GetLoads(storeLoads, peerLoadSum []float64, rwTy utils.RWType, kind constant.ResourceKind) (loads []float64) {
+func (c tikvCollector) GetLoads(storeLoads, peerLoadSum []float64, rwTy utils.RWType, kind constant.ResourceKind) (loads []float64) {
 	loads = make([]float64, utils.DimLen)
 	switch rwTy {
 	case utils.Read:
@@ -87,11 +87,11 @@ func newTiFlashCollector(isTraceRegionFlow bool) storeCollector {
 	return tiflashCollector{isTraceRegionFlow: isTraceRegionFlow}
 }
 
-func (tiflashCollector) Engine() string {
+func (c tiflashCollector) Engine() string {
 	return core.EngineTiFlash
 }
 
-func (tiflashCollector) Filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool {
+func (c tiflashCollector) Filter(info *StoreSummaryInfo, kind constant.ResourceKind) bool {
 	switch kind {
 	case constant.LeaderKind:
 		return false

@@ -624,13 +624,11 @@ func (am *AllocatorManager) campaignAllocatorLeader(
 	dcLocationInfo *pdpb.GetDCLocationInfoResponse,
 	isNextLeader bool,
 ) {
-	logger := log.With(
+	log.Info("start to campaign local tso allocator leader",
 		logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
 		zap.String("dc-location", allocator.GetDCLocation()),
 		zap.Any("dc-location-info", dcLocationInfo),
-		zap.String("name", am.member.Name()),
-	)
-	logger.Info("start to campaign local tso allocator leader")
+		zap.String("name", am.member.Name()))
 	cmps := make([]clientv3.Cmp, 0)
 	nextLeaderKey := am.nextLeaderKey(allocator.GetDCLocation())
 	if !isNextLeader {
@@ -650,9 +648,18 @@ func (am *AllocatorManager) campaignAllocatorLeader(
 	})
 	if err := allocator.CampaignAllocatorLeader(am.leaderLease, cmps...); err != nil {
 		if err.Error() == errs.ErrEtcdTxnConflict.Error() {
-			logger.Info("failed to campaign local tso allocator leader due to txn conflict, another allocator may campaign successfully")
+			log.Info("failed to campaign local tso allocator leader due to txn conflict, another allocator may campaign successfully",
+				logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
+				zap.String("dc-location", allocator.GetDCLocation()),
+				zap.Any("dc-location-info", dcLocationInfo),
+				zap.String("name", am.member.Name()))
 		} else {
-			logger.Error("failed to campaign local tso allocator leader due to etcd error", errs.ZapError(err))
+			log.Error("failed to campaign local tso allocator leader due to etcd error",
+				logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
+				zap.String("dc-location", allocator.GetDCLocation()),
+				zap.Any("dc-location-info", dcLocationInfo),
+				zap.String("name", am.member.Name()),
+				errs.ZapError(err))
 		}
 		return
 	}
@@ -663,25 +670,44 @@ func (am *AllocatorManager) campaignAllocatorLeader(
 	defer am.ResetAllocatorGroup(allocator.GetDCLocation())
 	// Maintain the Local TSO Allocator leader
 	go allocator.KeepAllocatorLeader(ctx)
+	log.Info("campaign local tso allocator leader ok",
+		logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
+		zap.String("dc-location", allocator.GetDCLocation()),
+		zap.Any("dc-location-info", dcLocationInfo),
+		zap.String("name", am.member.Name()))
 
-	logger.Info("Complete campaign local tso allocator leader, begin to initialize the local TSO allocator")
+	log.Info("initialize the local TSO allocator",
+		logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
+		zap.String("dc-location", allocator.GetDCLocation()),
+		zap.Any("dc-location-info", dcLocationInfo),
+		zap.String("name", am.member.Name()))
 	if err := allocator.Initialize(int(dcLocationInfo.Suffix)); err != nil {
-		log.Error("failed to initialize the local TSO allocator", errs.ZapError(err))
+		log.Error("failed to initialize the local TSO allocator",
+			logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
+			zap.String("dc-location", allocator.GetDCLocation()),
+			zap.Any("dc-location-info", dcLocationInfo),
+			errs.ZapError(err))
 		return
 	}
 	if dcLocationInfo.GetMaxTs().GetPhysical() != 0 {
 		if err := allocator.WriteTSO(dcLocationInfo.GetMaxTs()); err != nil {
-			log.Error("failed to write the max local TSO after member changed", errs.ZapError(err))
+			log.Error("failed to write the max local TSO after member changed",
+				logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
+				zap.String("dc-location", allocator.GetDCLocation()),
+				zap.Any("dc-location-info", dcLocationInfo),
+				errs.ZapError(err))
 			return
 		}
 	}
 	am.compareAndSetMaxSuffix(dcLocationInfo.Suffix)
 	allocator.EnableAllocatorLeader()
 	// The next leader is me, delete it to finish campaigning
-	if err := am.deleteNextLeaderID(allocator.GetDCLocation()); err != nil {
-		logger.Warn("failed to delete next leader key after campaign local tso allocator leader", errs.ZapError(err))
-	}
-	logger.Info("local tso allocator leader is ready to serve")
+	am.deleteNextLeaderID(allocator.GetDCLocation())
+	log.Info("local tso allocator leader is ready to serve",
+		logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
+		zap.String("dc-location", allocator.GetDCLocation()),
+		zap.Any("dc-location-info", dcLocationInfo),
+		zap.String("name", am.member.Name()))
 
 	leaderTicker := time.NewTicker(mcsutils.LeaderTickInterval)
 	defer leaderTicker.Stop()
@@ -690,12 +716,20 @@ func (am *AllocatorManager) campaignAllocatorLeader(
 		select {
 		case <-leaderTicker.C:
 			if !allocator.IsAllocatorLeader() {
-				logger.Info("no longer a local tso allocator leader because lease has expired, local tso allocator leader will step down")
+				log.Info("no longer a local tso allocator leader because lease has expired, local tso allocator leader will step down",
+					logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
+					zap.String("dc-location", allocator.GetDCLocation()),
+					zap.Any("dc-location-info", dcLocationInfo),
+					zap.String("name", am.member.Name()))
 				return
 			}
 		case <-ctx.Done():
 			// Server is closed and it should return nil.
-			logger.Info("server is closed, reset the local tso allocator")
+			log.Info("server is closed, reset the local tso allocator",
+				logutil.CondUint32("keyspace-group-id", am.kgID, am.kgID > 0),
+				zap.String("dc-location", allocator.GetDCLocation()),
+				zap.Any("dc-location-info", dcLocationInfo),
+				zap.String("name", am.member.Name()))
 			return
 		}
 	}

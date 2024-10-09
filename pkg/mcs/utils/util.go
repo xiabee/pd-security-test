@@ -266,9 +266,7 @@ func StopHTTPServer(s server) {
 	ch := make(chan struct{})
 	go func() {
 		defer close(ch)
-		if err := s.GetHTTPServer().Shutdown(ctx); err != nil {
-			log.Error("http server graceful shutdown failed", errs.ZapError(err))
-		}
+		s.GetHTTPServer().Shutdown(ctx)
 	}()
 
 	select {
@@ -276,9 +274,7 @@ func StopHTTPServer(s server) {
 	case <-ctx.Done():
 		// Took too long, manually close open transports
 		log.Warn("http server graceful shutdown timeout, forcing close")
-		if err := s.GetHTTPServer().Close(); err != nil {
-			log.Warn("http server close failed", errs.ZapError(err))
-		}
+		s.GetHTTPServer().Close()
 		// concurrent Graceful Shutdown should be interrupted
 		<-ch
 	}
@@ -324,6 +320,6 @@ func StopGRPCServer(s server) {
 
 // Exit exits the program with the given code.
 func Exit(code int) {
-	_ = log.Sync()
+	log.Sync()
 	os.Exit(code)
 }

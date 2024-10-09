@@ -45,6 +45,7 @@ func TestStoreLimit(t *testing.T) {
 }
 
 func TestSlidingWindow(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	capacity := int64(defaultWindowSize)
 	s := NewSlidingWindows()
@@ -91,6 +92,7 @@ func TestSlidingWindow(t *testing.T) {
 }
 
 func TestWindow(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	capacity := int64(100 * 10)
 	s := newWindow(capacity)

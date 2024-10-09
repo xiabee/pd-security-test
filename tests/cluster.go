@@ -88,8 +88,6 @@ func NewTestAPIServer(ctx context.Context, cfg *config.Config) (*TestServer, err
 }
 
 func createTestServer(ctx context.Context, cfg *config.Config, services []string) (*TestServer, error) {
-	//  disable the heartbeat async runner in test
-	cfg.Schedule.EnableHeartbeatConcurrentRunner = false
 	err := logutil.SetupLogger(cfg.Log, &cfg.Logger, &cfg.LogProps, cfg.Security.RedactInfoLog)
 	if err != nil {
 		return nil, err
@@ -572,17 +570,17 @@ func restartTestCluster(
 }
 
 // RunServer starts to run TestServer.
-func RunServer(server *TestServer) <-chan error {
+func (c *TestCluster) RunServer(server *TestServer) <-chan error {
 	resC := make(chan error)
 	go func() { resC <- server.Run() }()
 	return resC
 }
 
 // RunServers starts to run multiple TestServer.
-func RunServers(servers []*TestServer) error {
+func (c *TestCluster) RunServers(servers []*TestServer) error {
 	res := make([]<-chan error, len(servers))
 	for i, s := range servers {
-		res[i] = RunServer(s)
+		res[i] = c.RunServer(s)
 	}
 	for _, c := range res {
 		if err := <-c; err != nil {
@@ -598,7 +596,7 @@ func (c *TestCluster) RunInitialServers() error {
 	for _, conf := range c.config.InitialServers {
 		servers = append(servers, c.GetServer(conf.Name))
 	}
-	return RunServers(servers)
+	return c.RunServers(servers)
 }
 
 // StopAll is used to stop all servers.

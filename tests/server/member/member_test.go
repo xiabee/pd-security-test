@@ -84,13 +84,15 @@ func TestMemberDelete(t *testing.T) {
 		{path: fmt.Sprintf("id/%d", members[1].GetServerID()), members: []*config.Config{leader.GetConfig()}},
 	}
 
+	httpClient := &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	defer httpClient.CloseIdleConnections()
 	for _, table := range tables {
 		t.Log(time.Now(), "try to delete:", table.path)
 		testutil.Eventually(re, func() bool {
 			addr := leader.GetConfig().ClientUrls + "/pd/api/v1/members/" + table.path
 			req, err := http.NewRequest(http.MethodDelete, addr, http.NoBody)
 			re.NoError(err)
-			res, err := tests.TestDialClient.Do(req)
+			res, err := httpClient.Do(req)
 			re.NoError(err)
 			defer res.Body.Close()
 			// Check by status.
@@ -103,7 +105,7 @@ func TestMemberDelete(t *testing.T) {
 			}
 			// Check by member list.
 			cluster.WaitLeader()
-			if err = checkMemberList(re, leader.GetConfig().ClientUrls, table.members); err != nil {
+			if err = checkMemberList(re, *httpClient, leader.GetConfig().ClientUrls, table.members); err != nil {
 				t.Logf("check member fail: %v", err)
 				time.Sleep(time.Second)
 				return false
@@ -120,9 +122,9 @@ func TestMemberDelete(t *testing.T) {
 	}
 }
 
-func checkMemberList(re *require.Assertions, clientURL string, configs []*config.Config) error {
+func checkMemberList(re *require.Assertions, httpClient http.Client, clientURL string, configs []*config.Config) error {
 	addr := clientURL + "/pd/api/v1/members"
-	res, err := tests.TestDialClient.Get(addr)
+	res, err := httpClient.Get(addr)
 	re.NoError(err)
 	defer res.Body.Close()
 	buf, err := io.ReadAll(res.Body)
@@ -150,7 +152,7 @@ func TestLeaderPriority(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cluster, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, _ string) {
+	cluster, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, serverName string) {
 		conf.LeaderPriorityCheckInterval = typeutil.NewDuration(time.Second)
 	})
 	defer cluster.Destroy()
@@ -181,7 +183,7 @@ func TestLeaderPriority(t *testing.T) {
 
 func post(t *testing.T, re *require.Assertions, url string, body string) {
 	testutil.Eventually(re, func() bool {
-		res, err := tests.TestDialClient.Post(url, "", bytes.NewBufferString(body)) // #nosec
+		res, err := http.Post(url, "", bytes.NewBufferString(body)) // #nosec
 		re.NoError(err)
 		b, err := io.ReadAll(res.Body)
 		res.Body.Close()

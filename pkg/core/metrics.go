@@ -15,7 +15,6 @@
 package core
 
 import (
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -91,12 +90,6 @@ func init() {
 	prometheus.MustRegister(AcquireRegionsLockWaitCount)
 }
 
-var tracerPool = &sync.Pool{
-	New: func() any {
-		return &regionHeartbeatProcessTracer{}
-	},
-}
-
 type saveCacheStats struct {
 	startTime              time.Time
 	lastCheckTime          time.Time
@@ -121,7 +114,6 @@ type RegionHeartbeatProcessTracer interface {
 	OnCollectRegionStatsFinished()
 	OnAllStageFinished()
 	LogFields() []zap.Field
-	Release()
 }
 
 type noopHeartbeatProcessTracer struct{}
@@ -131,22 +123,21 @@ func NewNoopHeartbeatProcessTracer() RegionHeartbeatProcessTracer {
 	return &noopHeartbeatProcessTracer{}
 }
 
-func (*noopHeartbeatProcessTracer) Begin()                        {}
-func (*noopHeartbeatProcessTracer) OnPreCheckFinished()           {}
-func (*noopHeartbeatProcessTracer) OnAsyncHotStatsFinished()      {}
-func (*noopHeartbeatProcessTracer) OnRegionGuideFinished()        {}
-func (*noopHeartbeatProcessTracer) OnSaveCacheBegin()             {}
-func (*noopHeartbeatProcessTracer) OnSaveCacheFinished()          {}
-func (*noopHeartbeatProcessTracer) OnCheckOverlapsFinished()      {}
-func (*noopHeartbeatProcessTracer) OnValidateRegionFinished()     {}
-func (*noopHeartbeatProcessTracer) OnSetRegionFinished()          {}
-func (*noopHeartbeatProcessTracer) OnUpdateSubTreeFinished()      {}
-func (*noopHeartbeatProcessTracer) OnCollectRegionStatsFinished() {}
-func (*noopHeartbeatProcessTracer) OnAllStageFinished()           {}
-func (*noopHeartbeatProcessTracer) LogFields() []zap.Field {
+func (n *noopHeartbeatProcessTracer) Begin()                        {}
+func (n *noopHeartbeatProcessTracer) OnPreCheckFinished()           {}
+func (n *noopHeartbeatProcessTracer) OnAsyncHotStatsFinished()      {}
+func (n *noopHeartbeatProcessTracer) OnRegionGuideFinished()        {}
+func (n *noopHeartbeatProcessTracer) OnSaveCacheBegin()             {}
+func (n *noopHeartbeatProcessTracer) OnSaveCacheFinished()          {}
+func (n *noopHeartbeatProcessTracer) OnCheckOverlapsFinished()      {}
+func (n *noopHeartbeatProcessTracer) OnValidateRegionFinished()     {}
+func (n *noopHeartbeatProcessTracer) OnSetRegionFinished()          {}
+func (n *noopHeartbeatProcessTracer) OnUpdateSubTreeFinished()      {}
+func (n *noopHeartbeatProcessTracer) OnCollectRegionStatsFinished() {}
+func (n *noopHeartbeatProcessTracer) OnAllStageFinished()           {}
+func (n *noopHeartbeatProcessTracer) LogFields() []zap.Field {
 	return nil
 }
-func (*noopHeartbeatProcessTracer) Release() {}
 
 type regionHeartbeatProcessTracer struct {
 	startTime             time.Time
@@ -160,7 +151,7 @@ type regionHeartbeatProcessTracer struct {
 
 // NewHeartbeatProcessTracer returns a heartbeat process tracer.
 func NewHeartbeatProcessTracer() RegionHeartbeatProcessTracer {
-	return tracerPool.Get().(*regionHeartbeatProcessTracer)
+	return &regionHeartbeatProcessTracer{}
 }
 
 func (h *regionHeartbeatProcessTracer) Begin() {
@@ -262,11 +253,4 @@ func (h *regionHeartbeatProcessTracer) LogFields() []zap.Field {
 		zap.Duration("update-sub-tree-duration", h.saveCacheStats.updateSubTreeDuration),
 		zap.Duration("other-duration", h.OtherDuration),
 	}
-}
-
-// Release puts the tracer back into the pool.
-func (h *regionHeartbeatProcessTracer) Release() {
-	// Reset the fields of h to their zero values.
-	*h = regionHeartbeatProcessTracer{}
-	tracerPool.Put(h)
 }

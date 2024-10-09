@@ -43,7 +43,7 @@ func (w *testingWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-func (*testingWriter) Sync() error {
+func (w *testingWriter) Sync() error {
 	return nil
 }
 
@@ -97,6 +97,7 @@ func TestError(t *testing.T) {
 }
 
 func TestErrorEqual(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	err1 := ErrSchedulerNotFound.FastGenByArgs()
 	err2 := ErrSchedulerNotFound.FastGenByArgs()
@@ -124,7 +125,7 @@ func TestErrorEqual(t *testing.T) {
 	re.False(errors.ErrorEqual(err1, err2))
 }
 
-func TestZapError(_ *testing.T) {
+func TestZapError(t *testing.T) {
 	err := errors.New("test")
 	log.Info("test", ZapError(err))
 	err1 := ErrSchedulerNotFound
@@ -133,6 +134,7 @@ func TestZapError(_ *testing.T) {
 }
 
 func TestErrorWithStack(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	conf := &log.Config{Level: "debug", File: log.FileLogConfig{}, DisableTimestamp: true}
 	lg := newZapTestLogger(conf)

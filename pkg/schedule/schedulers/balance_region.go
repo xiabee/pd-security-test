@@ -103,7 +103,7 @@ func (s *balanceRegionScheduler) GetName() string {
 	return s.conf.Name
 }
 
-func (*balanceRegionScheduler) GetType() string {
+func (s *balanceRegionScheduler) GetType() string {
 	return BalanceRegionType
 }
 

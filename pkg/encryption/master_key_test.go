@@ -24,6 +24,7 @@ import (
 )
 
 func TestPlaintextMasterKey(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	config := &encryptionpb.MasterKey{
 		Backend: &encryptionpb.MasterKey_Plaintext{
@@ -49,6 +50,7 @@ func TestPlaintextMasterKey(t *testing.T) {
 }
 
 func TestEncrypt(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	keyHex := "2f07ec61e5a50284f47f2b402a962ec672e500b26cb3aa568bb1531300c74806" // #nosec G101
 	key, err := hex.DecodeString(keyHex)
@@ -64,6 +66,7 @@ func TestEncrypt(t *testing.T) {
 }
 
 func TestDecrypt(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	keyHex := "2f07ec61e5a50284f47f2b402a962ec672e500b26cb3aa568bb1531300c74806" // #nosec G101
 	key, err := hex.DecodeString(keyHex)
@@ -80,6 +83,7 @@ func TestDecrypt(t *testing.T) {
 }
 
 func TestNewFileMasterKeyMissingPath(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	config := &encryptionpb.MasterKey{
 		Backend: &encryptionpb.MasterKey_File{
@@ -93,6 +97,7 @@ func TestNewFileMasterKeyMissingPath(t *testing.T) {
 }
 
 func TestNewFileMasterKeyMissingFile(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	dir := t.TempDir()
 	path := dir + "/key"
@@ -108,6 +113,7 @@ func TestNewFileMasterKeyMissingFile(t *testing.T) {
 }
 
 func TestNewFileMasterKeyNotHexString(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	dir := t.TempDir()
 	path := dir + "/key"
@@ -124,6 +130,7 @@ func TestNewFileMasterKeyNotHexString(t *testing.T) {
 }
 
 func TestNewFileMasterKeyLengthMismatch(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	dir := t.TempDir()
 	path := dir + "/key"
@@ -140,6 +147,7 @@ func TestNewFileMasterKeyLengthMismatch(t *testing.T) {
 }
 
 func TestNewFileMasterKey(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	key := "2f07ec61e5a50284f47f2b402a962ec672e500b26cb3aa568bb1531300c74806" // #nosec G101
 	dir := t.TempDir()

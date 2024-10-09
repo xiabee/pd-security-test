@@ -255,7 +255,7 @@ func (r *RegionScatterer) scatterRegions(regions map[uint64]*core.RegionInfo, fa
 					continue
 				}
 				failpoint.Inject("scatterHbStreamsDrain", func() {
-					_ = r.opController.GetHBStreams().Drain(1)
+					r.opController.GetHBStreams().Drain(1)
 					r.opController.RemoveOperator(op, operator.AdminStop)
 				})
 			}

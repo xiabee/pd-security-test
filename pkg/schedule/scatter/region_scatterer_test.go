@@ -216,7 +216,7 @@ func scatterSpecial(re *require.Assertions, numOrdinaryStores, numSpecialStores,
 		leaderStoreID := region.GetLeader().GetStoreId()
 		for _, peer := range region.GetPeers() {
 			storeID := peer.GetStoreId()
-			store := tc.GetStore(storeID)
+			store := tc.Stores.GetStore(storeID)
 			if store.GetLabelValue("engine") == "tiflash" {
 				countSpecialPeers[storeID]++
 			} else {

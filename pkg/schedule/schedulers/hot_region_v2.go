@@ -457,13 +457,13 @@ func (bs *balanceSolver) betterThanV2(old *solution) bool {
 	if bs.cur.mainPeerStat != old.mainPeerStat {
 		// We will firstly consider ensuring converge faster, secondly reduce oscillation
 		if bs.resourceTy == writeLeader {
-			return getRkCmpByPriorityV2(bs.firstPriority, bs.cur.firstScore, old.firstScore,
+			return bs.getRkCmpByPriorityV2(bs.firstPriority, bs.cur.firstScore, old.firstScore,
 				bs.cur.getPeersRateFromCache(bs.firstPriority), old.getPeersRateFromCache(bs.firstPriority)) > 0
 		}
 
-		firstCmp := getRkCmpByPriorityV2(bs.firstPriority, bs.cur.firstScore, old.firstScore,
+		firstCmp := bs.getRkCmpByPriorityV2(bs.firstPriority, bs.cur.firstScore, old.firstScore,
 			bs.cur.getPeersRateFromCache(bs.firstPriority), old.getPeersRateFromCache(bs.firstPriority))
-		secondCmp := getRkCmpByPriorityV2(bs.secondPriority, bs.cur.secondScore, old.secondScore,
+		secondCmp := bs.getRkCmpByPriorityV2(bs.secondPriority, bs.cur.secondScore, old.secondScore,
 			bs.cur.getPeersRateFromCache(bs.secondPriority), old.getPeersRateFromCache(bs.secondPriority))
 		switch bs.cur.progressiveRank {
 		case -4, -3, -2: // firstPriority
@@ -482,7 +482,7 @@ func (bs *balanceSolver) betterThanV2(old *solution) bool {
 	return false
 }
 
-func getRkCmpByPriorityV2(dim int, curScore, oldScore int, curPeersRate, oldPeersRate float64) int {
+func (bs *balanceSolver) getRkCmpByPriorityV2(dim int, curScore, oldScore int, curPeersRate, oldPeersRate float64) int {
 	switch {
 	case curScore > oldScore:
 		return 1

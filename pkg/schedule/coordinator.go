@@ -46,14 +46,12 @@ import (
 const (
 	runSchedulerCheckInterval  = 3 * time.Second
 	checkSuspectRangesInterval = 100 * time.Millisecond
-	collectFactor              = 0.9
 	collectTimeout             = 5 * time.Minute
 	maxLoadConfigRetries       = 10
 	// pushOperatorTickInterval is the interval try to push the operator.
 	pushOperatorTickInterval = 500 * time.Millisecond
 
-	// It takes about 1.3 minutes(1000000/128*10/60/1000) to iterate 1 million regions(with DefaultPatrolRegionInterval=10ms).
-	patrolScanRegionLimit = 128
+	patrolScanRegionLimit = 128 // It takes about 14 minutes to iterate 1 million regions.
 	// PluginLoad means action for load plugin
 	PluginLoad = "PluginLoad"
 	// PluginUnload means action for unload plugin

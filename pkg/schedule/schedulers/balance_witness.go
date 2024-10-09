@@ -150,7 +150,7 @@ func (handler *balanceWitnessHandler) UpdateConfig(w http.ResponseWriter, r *htt
 	handler.rd.JSON(w, httpCode, v)
 }
 
-func (handler *balanceWitnessHandler) ListConfig(w http.ResponseWriter, _ *http.Request) {
+func (handler *balanceWitnessHandler) ListConfig(w http.ResponseWriter, r *http.Request) {
 	conf := handler.config.Clone()
 	handler.rd.JSON(w, http.StatusOK, conf)
 }
@@ -214,7 +214,7 @@ func (b *balanceWitnessScheduler) GetName() string {
 	return b.name
 }
 
-func (*balanceWitnessScheduler) GetType() string {
+func (b *balanceWitnessScheduler) GetType() string {
 	return BalanceWitnessType
 }
 

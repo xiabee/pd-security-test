@@ -83,7 +83,7 @@ func setupServer() (*httptest.Server, *config.Config) {
 		},
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		b, err := json.Marshal(serverConfig)
 		if err != nil {
 			res.WriteHeader(http.StatusInternalServerError)
@@ -98,7 +98,7 @@ func setupServer() (*httptest.Server, *config.Config) {
 	return server, serverConfig
 }
 
-func (s *backupTestSuite) BeforeTest(string, string) {
+func (s *backupTestSuite) BeforeTest(suiteName, testName string) {
 	re := s.Require()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
@@ -124,7 +124,7 @@ func (s *backupTestSuite) BeforeTest(string, string) {
 	re.NoError(err)
 }
 
-func (s *backupTestSuite) AfterTest(string, string) {
+func (s *backupTestSuite) AfterTest(suiteName, testName string) {
 	s.etcd.Close()
 }
 

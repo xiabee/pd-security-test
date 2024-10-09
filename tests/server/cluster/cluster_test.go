@@ -186,7 +186,7 @@ func TestRegionStatistics(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	tc, err := tests.NewTestCluster(ctx, 3)
+	tc, err := tests.NewTestCluster(ctx, 2)
 	defer tc.Destroy()
 	re.NoError(err)
 
@@ -223,9 +223,9 @@ func TestRegionStatistics(t *testing.T) {
 	time.Sleep(1000 * time.Millisecond)
 
 	leaderServer.ResignLeader()
-	re.NotEqual(tc.WaitLeader(), leaderName)
+	newLeaderName := tc.WaitLeader()
+	re.NotEqual(newLeaderName, leaderName)
 	leaderServer = tc.GetLeaderServer()
-	leaderName = leaderServer.GetServer().Name()
 	rc = leaderServer.GetRaftCluster()
 	r := rc.GetRegion(region.Id)
 	re.NotNil(r)
@@ -238,9 +238,9 @@ func TestRegionStatistics(t *testing.T) {
 	re.Len(regions, 1)
 
 	leaderServer.ResignLeader()
-	re.NotEqual(tc.WaitLeader(), leaderName)
+	newLeaderName = tc.WaitLeader()
+	re.Equal(newLeaderName, leaderName)
 	leaderServer = tc.GetLeaderServer()
-	leaderName = leaderServer.GetServer().Name()
 	rc = leaderServer.GetRaftCluster()
 	re.NotNil(r)
 	re.True(r.LoadedFromStorage() || r.LoadedFromSync())
@@ -255,12 +255,13 @@ func TestRegionStatistics(t *testing.T) {
 	re.False(r.LoadedFromStorage() && r.LoadedFromSync())
 
 	leaderServer.ResignLeader()
-	re.NotEqual(tc.WaitLeader(), leaderName)
-	leaderServer = tc.GetLeaderServer()
-	leaderName = leaderServer.GetServer().Name()
+	newLeaderName = tc.WaitLeader()
+	re.NotEqual(newLeaderName, leaderName)
 	leaderServer.ResignLeader()
-	re.NotEqual(tc.WaitLeader(), leaderName)
-	rc = tc.GetLeaderServer().GetRaftCluster()
+	newLeaderName = tc.WaitLeader()
+	re.Equal(newLeaderName, leaderName)
+	leaderServer = tc.GetLeaderServer()
+	rc = leaderServer.GetRaftCluster()
 	r = rc.GetRegion(region.Id)
 	re.NotNil(r)
 	re.False(r.LoadedFromStorage() && r.LoadedFromSync())
@@ -600,7 +601,7 @@ func TestRaftClusterMultipleRestart(t *testing.T) {
 	store := newMetaStore(storeID, "127.0.0.1:4", "2.1.0", metapb.StoreState_Offline, getTestDeployPath(storeID))
 	rc := leaderServer.GetRaftCluster()
 	re.NotNil(rc)
-	err = rc.PutMetaStore(store)
+	err = rc.PutStore(store)
 	re.NoError(err)
 	re.NotNil(tc)
 	rc.Stop()
@@ -752,19 +753,20 @@ func TestConcurrentHandleRegion(t *testing.T) {
 		re.NoError(err)
 		peerID, err := id.Alloc()
 		re.NoError(err)
+		regionID, err := id.Alloc()
+		re.NoError(err)
 		peer := &metapb.Peer{Id: peerID, StoreId: store.GetId()}
 		regionReq := &pdpb.RegionHeartbeatRequest{
 			Header: testutil.NewRequestHeader(clusterID),
 			Region: &metapb.Region{
-				// mock error msg to trigger stream.Recv()
-				Id:    0,
+				Id:    regionID,
 				Peers: []*metapb.Peer{peer},
 			},
 			Leader: peer,
 		}
 		err = stream.Send(regionReq)
 		re.NoError(err)
-		// make sure the first store can receive one response(error msg)
+		// make sure the first store can receive one response
 		if i == 0 {
 			wg.Add(1)
 		}
@@ -822,7 +824,7 @@ func TestSetScheduleOpt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// TODO: enable placementrules
-	tc, err := tests.NewTestCluster(ctx, 1, func(cfg *config.Config, _ string) { cfg.Replication.EnablePlacementRules = false })
+	tc, err := tests.NewTestCluster(ctx, 1, func(cfg *config.Config, svr string) { cfg.Replication.EnablePlacementRules = false })
 	defer tc.Destroy()
 	re.NoError(err)
 
@@ -983,7 +985,7 @@ func TestTiFlashWithPlacementRules(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	tc, err := tests.NewTestCluster(ctx, 1, func(cfg *config.Config, _ string) { cfg.Replication.EnablePlacementRules = false })
+	tc, err := tests.NewTestCluster(ctx, 1, func(cfg *config.Config, name string) { cfg.Replication.EnablePlacementRules = false })
 	defer tc.Destroy()
 	re.NoError(err)
 	err = tc.RunInitialServers()
@@ -1033,7 +1035,7 @@ func TestReplicationModeStatus(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	tc, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, _ string) {
+	tc, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, serverName string) {
 		conf.ReplicationMode.ReplicationMode = "dr-auto-sync"
 	})
 
@@ -1332,22 +1334,22 @@ func TestStaleTermHeartbeat(t *testing.T) {
 		Term:            5,
 		ApproximateSize: 10,
 	}
-	flowRoundDivisor := leaderServer.GetConfig().PDServerCfg.FlowRoundByDigit
-	region := core.RegionFromHeartbeat(regionReq, flowRoundDivisor)
+
+	region := core.RegionFromHeartbeat(regionReq)
 	err = rc.HandleRegionHeartbeat(region)
 	re.NoError(err)
 
 	// Transfer leader
 	regionReq.Term = 6
 	regionReq.Leader = peers[1]
-	region = core.RegionFromHeartbeat(regionReq, flowRoundDivisor)
+	region = core.RegionFromHeartbeat(regionReq)
 	err = rc.HandleRegionHeartbeat(region)
 	re.NoError(err)
 
 	// issue #3379
 	regionReq.KeysWritten = uint64(18446744073709551615)  // -1
 	regionReq.BytesWritten = uint64(18446744073709550602) // -1024
-	region = core.RegionFromHeartbeat(regionReq, flowRoundDivisor)
+	region = core.RegionFromHeartbeat(regionReq)
 	re.Equal(uint64(0), region.GetKeysWritten())
 	re.Equal(uint64(0), region.GetBytesWritten())
 	err = rc.HandleRegionHeartbeat(region)
@@ -1356,14 +1358,14 @@ func TestStaleTermHeartbeat(t *testing.T) {
 	// Stale heartbeat, update check should fail
 	regionReq.Term = 5
 	regionReq.Leader = peers[0]
-	region = core.RegionFromHeartbeat(regionReq, flowRoundDivisor)
+	region = core.RegionFromHeartbeat(regionReq)
 	err = rc.HandleRegionHeartbeat(region)
 	re.Error(err)
 
 	// Allow regions that are created by unsafe recover to send a heartbeat, even though they
 	// are considered "stale" because their conf ver and version are both equal to 1.
 	regionReq.Region.RegionEpoch.ConfVer = 1
-	region = core.RegionFromHeartbeat(regionReq, flowRoundDivisor)
+	region = core.RegionFromHeartbeat(regionReq)
 	err = rc.HandleRegionHeartbeat(region)
 	re.NoError(err)
 }

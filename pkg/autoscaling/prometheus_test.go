@@ -168,7 +168,7 @@ func makeJSONResponse(promResp *response) (*http.Response, []byte, error) {
 	return response, body, nil
 }
 
-func (*normalClient) URL(ep string, args map[string]string) *url.URL {
+func (c *normalClient) URL(ep string, args map[string]string) *url.URL {
 	return doURL(ep, args)
 }
 
@@ -180,6 +180,7 @@ func (c *normalClient) Do(_ context.Context, req *http.Request) (response *http.
 }
 
 func TestRetrieveCPUMetrics(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	client := &normalClient{
 		mockData: make(map[string]*response),
@@ -206,11 +207,11 @@ func TestRetrieveCPUMetrics(t *testing.T) {
 
 type emptyResponseClient struct{}
 
-func (*emptyResponseClient) URL(ep string, args map[string]string) *url.URL {
+func (c *emptyResponseClient) URL(ep string, args map[string]string) *url.URL {
 	return doURL(ep, args)
 }
 
-func (*emptyResponseClient) Do(context.Context, *http.Request) (r *http.Response, body []byte, err error) {
+func (c *emptyResponseClient) Do(_ context.Context, req *http.Request) (r *http.Response, body []byte, err error) {
 	promResp := &response{
 		Status: "success",
 		Data: data{
@@ -224,6 +225,7 @@ func (*emptyResponseClient) Do(context.Context, *http.Request) (r *http.Response
 }
 
 func TestEmptyResponse(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	client := &emptyResponseClient{}
 	querier := NewPrometheusQuerier(client)
@@ -235,11 +237,11 @@ func TestEmptyResponse(t *testing.T) {
 
 type errorHTTPStatusClient struct{}
 
-func (*errorHTTPStatusClient) URL(ep string, args map[string]string) *url.URL {
+func (c *errorHTTPStatusClient) URL(ep string, args map[string]string) *url.URL {
 	return doURL(ep, args)
 }
 
-func (*errorHTTPStatusClient) Do(context.Context, *http.Request) (r *http.Response, body []byte, err error) {
+func (c *errorHTTPStatusClient) Do(_ context.Context, req *http.Request) (r *http.Response, body []byte, err error) {
 	promResp := &response{}
 
 	r, body, err = makeJSONResponse(promResp)
@@ -251,6 +253,7 @@ func (*errorHTTPStatusClient) Do(context.Context, *http.Request) (r *http.Respon
 }
 
 func TestErrorHTTPStatus(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	client := &errorHTTPStatusClient{}
 	querier := NewPrometheusQuerier(client)
@@ -262,11 +265,11 @@ func TestErrorHTTPStatus(t *testing.T) {
 
 type errorPrometheusStatusClient struct{}
 
-func (*errorPrometheusStatusClient) URL(ep string, args map[string]string) *url.URL {
+func (c *errorPrometheusStatusClient) URL(ep string, args map[string]string) *url.URL {
 	return doURL(ep, args)
 }
 
-func (*errorPrometheusStatusClient) Do(_ context.Context, _ *http.Request) (r *http.Response, body []byte, err error) {
+func (c *errorPrometheusStatusClient) Do(_ context.Context, req *http.Request) (r *http.Response, body []byte, err error) {
 	promResp := &response{
 		Status: "error",
 	}
@@ -276,6 +279,7 @@ func (*errorPrometheusStatusClient) Do(_ context.Context, _ *http.Request) (r *h
 }
 
 func TestErrorPrometheusStatus(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	client := &errorPrometheusStatusClient{}
 	querier := NewPrometheusQuerier(client)
@@ -286,6 +290,7 @@ func TestErrorPrometheusStatus(t *testing.T) {
 }
 
 func TestGetInstanceNameFromAddress(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	testCases := []struct {
 		address              string
@@ -323,6 +328,7 @@ func TestGetInstanceNameFromAddress(t *testing.T) {
 }
 
 func TestGetDurationExpression(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	testCases := []struct {
 		duration           time.Duration

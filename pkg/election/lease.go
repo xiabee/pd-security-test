@@ -84,9 +84,7 @@ func (l *lease) Close() error {
 	if l.ID.Load() != nil {
 		leaseID = l.ID.Load().(clientv3.LeaseID)
 	}
-	if _, err := l.lease.Revoke(ctx, leaseID); err != nil {
-		log.Error("revoke lease failed", zap.String("purpose", l.Purpose), errs.ZapError(err))
-	}
+	l.lease.Revoke(ctx, leaseID)
 	return l.lease.Close()
 }
 

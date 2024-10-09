@@ -120,18 +120,18 @@ func TestTLSReloadAtomicReplace(t *testing.T) {
 		err = os.Rename(certsDirExp, certsDir)
 		re.NoError(err)
 	}
-	testTLSReload(ctx, re, cloneFunc, replaceFunc, revertFunc)
+	testTLSReload(re, ctx, cloneFunc, replaceFunc, revertFunc)
 }
 
 func testTLSReload(
-	ctx context.Context,
 	re *require.Assertions,
+	ctx context.Context,
 	cloneFunc func() transport.TLSInfo,
 	replaceFunc func(),
 	revertFunc func()) {
 	tlsInfo := cloneFunc()
 	// 1. start cluster with valid certs
-	clus, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, _ string) {
+	clus, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, serverName string) {
 		conf.Security.TLSConfig = grpcutil.TLSConfig{
 			KeyPath:  tlsInfo.KeyFile,
 			CertPath: tlsInfo.CertFile,

@@ -201,12 +201,10 @@ func (l *RegionLabeler) getAndCheckRule(id string, now time.Time) *LabelRule {
 		return rule
 	}
 	if len(rule.Labels) == 0 {
-		if err := l.DeleteLabelRuleLocked(id); err != nil {
-			log.Error("failed to delete label rule", zap.String("rule-key", id), zap.Error(err))
-		}
+		l.DeleteLabelRuleLocked(id)
 		return nil
 	}
-	_ = l.SaveLabelRuleLocked(rule)
+	l.SaveLabelRuleLocked(rule)
 	return rule
 }
 

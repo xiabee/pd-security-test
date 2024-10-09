@@ -83,15 +83,15 @@ func NewStoreRateLimit(ratePerSec float64) StoreLimit {
 }
 
 // Ack does nothing.
-func (*StoreRateLimit) Ack(_ int64, _ Type) {}
+func (l *StoreRateLimit) Ack(_ int64, _ Type) {}
 
 // Version returns v1
-func (*StoreRateLimit) Version() string {
+func (l *StoreRateLimit) Version() string {
 	return VersionV1
 }
 
 // Feedback does nothing.
-func (*StoreRateLimit) Feedback(_ float64) {}
+func (l *StoreRateLimit) Feedback(_ float64) {}
 
 // Available returns the number of available tokens.
 // notice that the priority level is not used.

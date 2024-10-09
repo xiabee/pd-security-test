@@ -22,7 +22,6 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/cases"
-	"github.com/tikv/pd/tools/pd-simulator/simulator/config"
 	"github.com/tikv/pd/tools/pd-simulator/simulator/simutil"
 	"go.uber.org/zap"
 )
@@ -35,12 +34,12 @@ type RaftEngine struct {
 	regionChange      map[uint64][]uint64
 	regionSplitSize   int64
 	regionSplitKeys   int64
-	storeConfig       *config.SimConfig
+	storeConfig       *SimConfig
 	useTiDBEncodedKey bool
 }
 
 // NewRaftEngine creates the initialized raft with the configuration.
-func NewRaftEngine(conf *cases.Case, conn *Connection, storeConfig *config.SimConfig) *RaftEngine {
+func NewRaftEngine(conf *cases.Case, conn *Connection, storeConfig *SimConfig) *RaftEngine {
 	r := &RaftEngine{
 		regionsInfo:     core.NewRegionsInfo(),
 		conn:            conn,
@@ -91,10 +90,11 @@ func NewRaftEngine(conf *cases.Case, conn *Connection, storeConfig *config.SimCo
 }
 
 func (r *RaftEngine) stepRegions() {
-	r.TraverseRegions(func(region *core.RegionInfo) {
+	regions := r.GetRegions()
+	for _, region := range regions {
 		r.stepLeader(region)
 		r.stepSplit(region)
-	})
+	}
 }
 
 func (r *RaftEngine) stepLeader(region *core.RegionInfo) {
@@ -264,9 +264,11 @@ func (r *RaftEngine) ResetRegionChange(storeID uint64, regionID uint64) {
 	}
 }
 
-// TraverseRegions executes a function on all regions, and function need to be self-locked.
-func (r *RaftEngine) TraverseRegions(lockedFunc func(*core.RegionInfo)) {
-	r.regionsInfo.TraverseRegions(lockedFunc)
+// GetRegions gets all RegionInfo from regionMap
+func (r *RaftEngine) GetRegions() []*core.RegionInfo {
+	r.RLock()
+	defer r.RUnlock()
+	return r.regionsInfo.GetRegions()
 }
 
 // SetRegion sets the RegionInfo with regionID

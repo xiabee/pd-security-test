@@ -51,7 +51,7 @@ func NewHandler(_ context.Context, svr *server.Server) (http.Handler, apiutil.AP
 	//	"/checker/{name}", http.MethodPost
 	//	"/checker/{name}", http.MethodGet
 	//	"/schedulers", http.MethodGet
-	//	"/schedulers/{name}", http.MethodPost, which is to be used to pause or resume the scheduler rather than create a new scheduler
+	//	"/schedulers/{name}", http.MethodPost
 	//	"/schedulers/diagnostic/{name}", http.MethodGet
 	//	"/scheduler-config", http.MethodGet
 	//	"/hotspot/regions/read", http.MethodGet
@@ -62,8 +62,6 @@ func NewHandler(_ context.Context, svr *server.Server) (http.Handler, apiutil.AP
 	// Following requests are **not** redirected:
 	//	"/schedulers", http.MethodPost
 	//	"/schedulers/{name}", http.MethodDelete
-	//  Because the writing of all the config of the scheduling service is in the API server,
-	// 	we should not post and delete the scheduler directly in the scheduling service.
 	router.PathPrefix(apiPrefix).Handler(negroni.New(
 		serverapi.NewRuntimeServiceValidator(svr, group),
 		serverapi.NewRedirector(svr,
@@ -165,7 +163,7 @@ func NewHandler(_ context.Context, svr *server.Server) (http.Handler, apiutil.AP
 				mcs.SchedulingServiceName,
 				[]string{http.MethodGet}),
 			serverapi.MicroserviceRedirectRule(
-				prefix+"/schedulers/", // Note: this means "/schedulers/{name}", which is to be used to pause or resume the scheduler
+				prefix+"/schedulers/", // Note: this means "/schedulers/{name}"
 				scheapi.APIPathPrefix+"/schedulers",
 				mcs.SchedulingServiceName,
 				[]string{http.MethodPost}),

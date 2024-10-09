@@ -67,7 +67,7 @@ func relaxEqualStings(re *require.Assertions, a, b []string) {
 	re.Equal(sortedStringB, sortedStringA)
 }
 
-func checkListResponse(re *require.Assertions, body []byte, cfgs []*config.Config) {
+func (suite *memberTestSuite) checkListResponse(re *require.Assertions, body []byte, cfgs []*config.Config) {
 	got := make(map[string][]*pdpb.Member)
 	json.Unmarshal(body, &got)
 	re.Len(cfgs, len(got["members"]))
@@ -92,7 +92,7 @@ func (suite *memberTestSuite) TestMemberList() {
 		buf, err := io.ReadAll(resp.Body)
 		re.NoError(err)
 		resp.Body.Close()
-		checkListResponse(re, buf, suite.cfgs)
+		suite.checkListResponse(re, buf, suite.cfgs)
 	}
 }
 
@@ -158,7 +158,26 @@ func (suite *memberTestSuite) changeLeaderPeerUrls(leader *pdpb.Member, id uint6
 	resp.Body.Close()
 }
 
-func (suite *memberTestSuite) TestResignMyself() {
+type resignTestSuite struct {
+	suite.Suite
+	cfgs    []*config.Config
+	servers []*server.Server
+	clean   testutil.CleanupFunc
+}
+
+func TestResignTestSuite(t *testing.T) {
+	suite.Run(t, new(resignTestSuite))
+}
+
+func (suite *resignTestSuite) SetupSuite() {
+	suite.cfgs, suite.servers, suite.clean = mustNewCluster(suite.Require(), 1)
+}
+
+func (suite *resignTestSuite) TearDownSuite() {
+	suite.clean()
+}
+
+func (suite *resignTestSuite) TestResignMyself() {
 	re := suite.Require()
 	addr := suite.cfgs[0].ClientUrls + apiPrefix + "/api/v1/leader/resign"
 	resp, err := testDialClient.Post(addr, "", nil)

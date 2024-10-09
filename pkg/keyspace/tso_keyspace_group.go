@@ -426,7 +426,7 @@ func (m *GroupManager) UpdateKeyspaceForGroup(userKind endpoint.UserKind, groupI
 	failpoint.Inject("externalAllocNode", func(val failpoint.Value) {
 		failpointOnce.Do(func() {
 			addrs := val.(string)
-			_ = m.SetNodesForKeyspaceGroup(utils.DefaultKeyspaceGroupID, strings.Split(addrs, ","))
+			m.SetNodesForKeyspaceGroup(utils.DefaultKeyspaceGroupID, strings.Split(addrs, ","))
 		})
 	})
 	m.Lock()

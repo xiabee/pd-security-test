@@ -186,9 +186,13 @@ func ResetForwardContext(ctx context.Context) context.Context {
 
 // GetForwardedHost returns the forwarded host in metadata.
 func GetForwardedHost(ctx context.Context) string {
-	s := metadata.ValueFromIncomingContext(ctx, ForwardMetadataKey)
-	if len(s) > 0 {
-		return s[0]
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		log.Debug("failed to get gRPC incoming metadata when getting forwarded host")
+		return ""
+	}
+	if t, ok := md[ForwardMetadataKey]; ok {
+		return t[0]
 	}
 	return ""
 }

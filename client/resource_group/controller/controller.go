@@ -118,13 +118,6 @@ func WithWaitRetryTimes(times int) ResourceControlCreateOption {
 	}
 }
 
-// WithDegradedModeWaitDuration is the option to set the wait duration for degraded mode.
-func WithDegradedModeWaitDuration(d time.Duration) ResourceControlCreateOption {
-	return func(controller *ResourceGroupsController) {
-		controller.ruConfig.DegradedModeWaitDuration = d
-	}
-}
-
 var _ ResourceGroupKVInterceptor = (*ResourceGroupsController)(nil)
 
 // ResourceGroupsController implements ResourceGroupKVInterceptor.
@@ -330,9 +323,7 @@ func (c *ResourceGroupsController) Start(ctx context.Context) {
 			case notifyMsg := <-c.lowTokenNotifyChan:
 				c.executeOnAllGroups((*groupCostController).updateRunState)
 				c.executeOnAllGroups((*groupCostController).updateAvgRequestResourcePerSec)
-				if len(c.run.currentRequests) == 0 {
-					c.collectTokenBucketRequests(c.loopCtx, FromLowRU, lowToken /* select low tokens resource group */, notifyMsg)
-				}
+				c.collectTokenBucketRequests(c.loopCtx, FromLowRU, lowToken /* select low tokens resource group */, notifyMsg)
 				if c.run.inDegradedMode {
 					c.executeOnAllGroups((*groupCostController).applyDegradedMode)
 				}
@@ -407,7 +398,8 @@ func (c *ResourceGroupsController) Start(ctx context.Context) {
 					log.Info("load resource controller config after config changed", zap.Reflect("config", config), zap.Reflect("ruConfig", c.ruConfig))
 				}
 			case gc := <-c.tokenBucketUpdateChan:
-				go gc.handleTokenBucketUpdateEvent(c.loopCtx)
+				now := gc.run.now
+				go gc.handleTokenBucketUpdateEvent(c.loopCtx, now)
 			}
 		}
 	}()
@@ -481,7 +473,7 @@ func (c *ResourceGroupsController) cleanUpResourceGroup() {
 }
 
 func (c *ResourceGroupsController) executeOnAllGroups(f func(controller *groupCostController)) {
-	c.groupsController.Range(func(_, value any) bool {
+	c.groupsController.Range(func(name, value any) bool {
 		f(value.(*groupCostController))
 		return true
 	})
@@ -512,7 +504,7 @@ func (c *ResourceGroupsController) handleTokenBucketResponse(resp []*rmpb.TokenB
 
 func (c *ResourceGroupsController) collectTokenBucketRequests(ctx context.Context, source string, typ selectType, notifyMsg notifyMsg) {
 	c.run.currentRequests = make([]*rmpb.TokenBucketRequest, 0)
-	c.groupsController.Range(func(_, value any) bool {
+	c.groupsController.Range(func(name, value any) bool {
 		gc := value.(*groupCostController)
 		request := gc.collectRequestAndConsumption(typ)
 		if request != nil {
@@ -884,7 +876,7 @@ func (gc *groupCostController) resetEmergencyTokenAcquisition() {
 	}
 }
 
-func (gc *groupCostController) handleTokenBucketUpdateEvent(ctx context.Context) {
+func (gc *groupCostController) handleTokenBucketUpdateEvent(ctx context.Context, now time.Time) {
 	switch gc.mode {
 	case rmpb.GroupMode_RawMode:
 		for _, counter := range gc.run.resourceTokens {
@@ -901,7 +893,7 @@ func (gc *groupCostController) handleTokenBucketUpdateEvent(ctx context.Context)
 				counter.notify.setupNotificationCh = nil
 				threshold := counter.notify.setupNotificationThreshold
 				counter.notify.mu.Unlock()
-				counter.limiter.SetupNotificationThreshold(threshold)
+				counter.limiter.SetupNotificationThreshold(now, threshold)
 			case <-ctx.Done():
 				return
 			}
@@ -922,7 +914,7 @@ func (gc *groupCostController) handleTokenBucketUpdateEvent(ctx context.Context)
 				counter.notify.setupNotificationCh = nil
 				threshold := counter.notify.setupNotificationThreshold
 				counter.notify.mu.Unlock()
-				counter.limiter.SetupNotificationThreshold(threshold)
+				counter.limiter.SetupNotificationThreshold(now, threshold)
 			case <-ctx.Done():
 				return
 			}
@@ -1179,11 +1171,19 @@ func (gc *groupCostController) collectRequestAndConsumption(selectTyp selectType
 			switch selectTyp {
 			case periodicReport:
 				selected = selected || gc.shouldReportConsumption()
+				failpoint.Inject("triggerPeriodicReport", func(val failpoint.Value) {
+					selected = gc.name == val.(string)
+				})
 				fallthrough
 			case lowToken:
 				if counter.limiter.IsLowTokens() {
 					selected = true
 				}
+				failpoint.Inject("triggerLowRUReport", func(val failpoint.Value) {
+					if selectTyp == lowToken {
+						selected = gc.name == val.(string)
+					}
+				})
 			}
 			request := &rmpb.RequestUnitItem{
 				Type:  typ,

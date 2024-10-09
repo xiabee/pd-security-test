@@ -51,7 +51,7 @@ func NewTestSingleConfig() *embed.Config {
 }
 
 func genRandName() string {
-	return "test_etcd_" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	return "test_etcd_" + strconv.FormatInt(time.Now().UnixNano()%10000, 10)
 }
 
 // NewTestEtcdCluster is used to create a etcd cluster for the unit test purpose.
@@ -122,27 +122,18 @@ func MustAddEtcdMember(t *testing.T, cfg1 *embed.Config, client *clientv3.Client
 
 func checkMembers(re *require.Assertions, client *clientv3.Client, etcds []*embed.Etcd) {
 	// Check the client can get the new member.
-	testutil.Eventually(re, func() bool {
-		listResp, err := ListEtcdMembers(client.Ctx(), client)
-		if err != nil {
-			return false
-		}
-		if len(etcds) != len(listResp.Members) {
-			return false
-		}
-		inList := func(m *etcdserverpb.Member) bool {
-			for _, etcd := range etcds {
-				if m.ID == uint64(etcd.Server.ID()) {
-					return true
-				}
-			}
-			return false
-		}
-		for _, m := range listResp.Members {
-			if !inList(m) {
-				return false
+	listResp, err := ListEtcdMembers(client.Ctx(), client)
+	re.NoError(err)
+	re.Len(listResp.Members, len(etcds))
+	inList := func(m *etcdserverpb.Member) bool {
+		for _, etcd := range etcds {
+			if m.ID == uint64(etcd.Server.ID()) {
+				return true
 			}
 		}
-		return true
-	})
+		return false
+	}
+	for _, m := range listResp.Members {
+		re.True(inList(m))
+	}
 }

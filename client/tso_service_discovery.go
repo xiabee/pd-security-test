@@ -339,9 +339,7 @@ func (c *tsoServiceDiscovery) ScheduleCheckMemberChanged() {
 // CheckMemberChanged Immediately check if there is any membership change among the primary/secondaries in
 // a primary/secondary configured cluster.
 func (c *tsoServiceDiscovery) CheckMemberChanged() error {
-	if err := c.apiSvcDiscovery.CheckMemberChanged(); err != nil {
-		log.Warn("[tso] failed to check member changed", errs.ZapError(err))
-	}
+	c.apiSvcDiscovery.CheckMemberChanged()
 	if err := c.retry(tsoQueryRetryMaxTimes, tsoQueryRetryInterval, c.updateMember); err != nil {
 		log.Error("[tso] failed to update member", errs.ZapError(err))
 		return err
@@ -351,11 +349,13 @@ func (c *tsoServiceDiscovery) CheckMemberChanged() error {
 
 // AddServingURLSwitchedCallback adds callbacks which will be called when the primary in
 // a primary/secondary configured cluster is switched.
-func (*tsoServiceDiscovery) AddServingURLSwitchedCallback(...func()) {}
+func (c *tsoServiceDiscovery) AddServingURLSwitchedCallback(callbacks ...func()) {
+}
 
 // AddServiceURLsSwitchedCallback adds callbacks which will be called when any primary/secondary
 // in a primary/secondary configured cluster is changed.
-func (*tsoServiceDiscovery) AddServiceURLsSwitchedCallback(...func()) {}
+func (c *tsoServiceDiscovery) AddServiceURLsSwitchedCallback(callbacks ...func()) {
+}
 
 // SetTSOLocalServURLsUpdatedCallback adds a callback which will be called when the local tso
 // allocator leader list is updated.
@@ -368,9 +368,7 @@ func (c *tsoServiceDiscovery) SetTSOLocalServURLsUpdatedCallback(callback tsoLoc
 func (c *tsoServiceDiscovery) SetTSOGlobalServURLUpdatedCallback(callback tsoGlobalServURLUpdatedFunc) {
 	url := c.getPrimaryURL()
 	if len(url) > 0 {
-		if err := callback(url); err != nil {
-			log.Error("[tso] failed to call back when tso global service url update", zap.String("url", url), errs.ZapError(err))
-		}
+		callback(url)
 	}
 	c.globalAllocPrimariesUpdatedCb = callback
 }
@@ -469,7 +467,7 @@ func (c *tsoServiceDiscovery) updateMember() error {
 	oldGroupID := c.GetKeyspaceGroupID()
 	if oldGroupID != keyspaceGroup.Id {
 		log.Info("[tso] the keyspace group changed",
-			zap.Uint32("keyspace-id", keyspaceID),
+			zap.Uint32("keyspace-id", keyspaceGroup.Id),
 			zap.Uint32("new-keyspace-group-id", keyspaceGroup.Id),
 			zap.Uint32("old-keyspace-group-id", oldGroupID))
 	}

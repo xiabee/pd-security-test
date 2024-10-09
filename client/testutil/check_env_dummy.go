@@ -16,6 +16,6 @@
 
 package testutil
 
-func environmentCheck(_ string) bool {
+func environmentCheck(addr string) bool {
 	return true
 }

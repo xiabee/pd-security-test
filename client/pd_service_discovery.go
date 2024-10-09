@@ -247,9 +247,9 @@ func (c *pdServiceClient) NeedRetry(pdErr *pdpb.Error, err error) bool {
 	return !(err == nil && pdErr == nil)
 }
 
-type errFn func(*pdpb.Error) bool
+type errFn func(pdErr *pdpb.Error) bool
 
-func emptyErrorFn(*pdpb.Error) bool {
+func emptyErrorFn(pdErr *pdpb.Error) bool {
 	return false
 }
 
@@ -618,7 +618,7 @@ func (c *pdServiceDiscovery) checkLeaderHealth(ctx context.Context) {
 }
 
 func (c *pdServiceDiscovery) checkFollowerHealth(ctx context.Context) {
-	c.followers.Range(func(_, value any) bool {
+	c.followers.Range(func(key, value any) bool {
 		// To ensure that the leader's healthy check is not delayed, shorten the duration.
 		ctx, cancel := context.WithTimeout(ctx, MemberHealthCheckInterval/3)
 		defer cancel()
@@ -661,7 +661,7 @@ func (c *pdServiceDiscovery) SetKeyspaceID(keyspaceID uint32) {
 }
 
 // GetKeyspaceGroupID returns the ID of the keyspace group
-func (*pdServiceDiscovery) GetKeyspaceGroupID() uint32 {
+func (c *pdServiceDiscovery) GetKeyspaceGroupID() uint32 {
 	// PD/API service only supports the default keyspace group
 	return defaultKeySpaceGroupID
 }
@@ -805,9 +805,7 @@ func (c *pdServiceDiscovery) SetTSOLocalServURLsUpdatedCallback(callback tsoLoca
 func (c *pdServiceDiscovery) SetTSOGlobalServURLUpdatedCallback(callback tsoGlobalServURLUpdatedFunc) {
 	url := c.getLeaderURL()
 	if len(url) > 0 {
-		if err := callback(url); err != nil {
-			log.Error("[tso] failed to call back when tso global service url update", zap.String("url", url), errs.ZapError(err))
-		}
+		callback(url)
 	}
 	c.tsoGlobalAllocLeaderUpdatedCb = callback
 }

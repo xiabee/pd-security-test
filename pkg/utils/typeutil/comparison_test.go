@@ -23,6 +23,7 @@ import (
 )
 
 func TestMinUint64(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	re.Equal(uint64(1), MinUint64(1, 2))
 	re.Equal(uint64(1), MinUint64(2, 1))
@@ -30,6 +31,7 @@ func TestMinUint64(t *testing.T) {
 }
 
 func TestMaxUint64(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	re.Equal(uint64(2), MaxUint64(1, 2))
 	re.Equal(uint64(2), MaxUint64(2, 1))
@@ -37,6 +39,7 @@ func TestMaxUint64(t *testing.T) {
 }
 
 func TestMinDuration(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	re.Equal(time.Second, MinDuration(time.Minute, time.Second))
 	re.Equal(time.Second, MinDuration(time.Second, time.Minute))
@@ -44,6 +47,7 @@ func TestMinDuration(t *testing.T) {
 }
 
 func TestEqualFloat(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	f1 := rand.Float64()
 	re.True(Float64Equal(f1, f1*1.000))
@@ -51,6 +55,7 @@ func TestEqualFloat(t *testing.T) {
 }
 
 func TestAreStringSlicesEquivalent(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	re.True(AreStringSlicesEquivalent(nil, nil))
 	re.True(AreStringSlicesEquivalent([]string{}, nil))

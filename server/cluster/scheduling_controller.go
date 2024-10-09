@@ -68,7 +68,7 @@ func newSchedulingController(parentCtx context.Context, basicCluster *core.Basic
 		opt:          opt,
 		labelStats:   statistics.NewLabelStatistics(),
 		hotStat:      statistics.NewHotStat(parentCtx),
-		slowStat:     statistics.NewSlowStat(),
+		slowStat:     statistics.NewSlowStat(parentCtx),
 		regionStats:  statistics.NewRegionStatistics(basicCluster, opt, ruleManager),
 	}
 }
@@ -158,7 +158,7 @@ func (sc *schedulingController) runSchedulingMetricsCollectionJob() {
 		select {
 		case <-sc.ctx.Done():
 			log.Info("scheduling metrics are reset")
-			resetSchedulingMetrics()
+			sc.resetSchedulingMetrics()
 			log.Info("scheduling metrics collection job has been stopped")
 			return
 		case <-ticker.C:
@@ -167,7 +167,7 @@ func (sc *schedulingController) runSchedulingMetricsCollectionJob() {
 	}
 }
 
-func resetSchedulingMetrics() {
+func (sc *schedulingController) resetSchedulingMetrics() {
 	statistics.Reset()
 	schedulers.ResetSchedulerMetrics()
 	schedule.ResetHotSpotMetrics()
@@ -182,7 +182,7 @@ func (sc *schedulingController) collectSchedulingMetrics() {
 	stores := sc.GetStores()
 	for _, s := range stores {
 		statsMap.Observe(s)
-		statistics.ObserveHotStat(s, sc.hotStat.StoresStats)
+		statsMap.ObserveHotStat(s, sc.hotStat.StoresStats)
 	}
 	statsMap.Collect()
 	sc.coordinator.GetSchedulersController().CollectSchedulerMetrics()
@@ -195,7 +195,7 @@ func (sc *schedulingController) collectSchedulingMetrics() {
 	// collect hot cache metrics
 	sc.hotStat.CollectMetrics()
 	// collect the lock metrics
-	sc.CollectWaitLockMetrics()
+	sc.RegionsInfo.CollectWaitLockMetrics()
 }
 
 func (sc *schedulingController) removeStoreStatistics(storeID uint64) {

@@ -40,6 +40,7 @@ func (r *releaseUtil) append(d DoneFunc) {
 }
 
 func TestWithConcurrencyLimiter(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 
 	limiter := newLimiter()
@@ -102,6 +103,7 @@ func TestWithConcurrencyLimiter(t *testing.T) {
 }
 
 func TestWithQPSLimiter(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	limiter := newLimiter()
 	status := limiter.updateQPSConfig(float64(rate.Every(time.Second)), 1)
@@ -175,6 +177,7 @@ func TestWithQPSLimiter(t *testing.T) {
 }
 
 func TestWithTwoLimiters(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	cfg := &DimensionConfig{
 		QPS:              100,

@@ -24,6 +24,7 @@ import (
 )
 
 func TestRequestInfo(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	ctx := context.Background()
 	_, ok := RequestInfoFrom(ctx)
@@ -52,6 +53,7 @@ func TestRequestInfo(t *testing.T) {
 }
 
 func TestEndTime(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	ctx := context.Background()
 	_, ok := EndTimeFrom(ctx)

@@ -375,6 +375,7 @@ func splitRegionCommandFunc(cmd *cobra.Command, args []string) {
 	policy := cmd.Flags().Lookup("policy").Value.String()
 	switch policy {
 	case "scan", "approximate", "usekey":
+		break
 	default:
 		cmd.Println("Error: unknown policy")
 		return

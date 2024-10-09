@@ -127,6 +127,7 @@ var (
 )
 
 // Server is the pd server. It implements bs.Server
+// nolint
 type Server struct {
 	diagnosticspb.DiagnosticsServer
 
@@ -452,6 +453,10 @@ func (s *Server) startServer(ctx context.Context) error {
 		Label:     idAllocLabel,
 		Member:    s.member.MemberValue(),
 	})
+	s.encryptionKeyManager, err = encryption.NewManager(s.client, &s.cfg.Security.Encryption)
+	if err != nil {
+		return err
+	}
 	// Initialize an etcd storage as the default storage.
 	defaultStorage := storage.NewStorageWithEtcdBackend(s.client, s.rootPath)
 	// Initialize a specialized LevelDB storage to store the region-related meta info independently.
@@ -479,11 +484,6 @@ func (s *Server) startServer(ctx context.Context) error {
 				return err
 			}
 		}
-	}
-
-	s.encryptionKeyManager, err = encryption.NewManager(s.client, &s.cfg.Security.Encryption)
-	if err != nil {
-		return err
 	}
 
 	s.gcSafePointManager = gc.NewSafePointManager(s.storage, s.cfg.PDServerCfg)
@@ -592,7 +592,7 @@ func (s *Server) Close() {
 		cb()
 	}
 
-	s.clientConns.Range(func(_, value any) bool {
+	s.clientConns.Range(func(key, value any) bool {
 		conn := value.(*grpc.ClientConn)
 		if err := conn.Close(); err != nil {
 			log.Error("close grpc client meet error", errs.ZapError(err))
@@ -1555,6 +1555,8 @@ func (s *Server) UpdateGRPCServiceRateLimiter(serviceLabel string, opts ...ratel
 
 // GetClusterStatus gets cluster status.
 func (s *Server) GetClusterStatus() (*cluster.Status, error) {
+	s.cluster.Lock()
+	defer s.cluster.Unlock()
 	return s.cluster.LoadClusterStatus()
 }
 
@@ -2060,7 +2062,7 @@ func (s *Server) initServicePrimaryWatcher(serviceName string, primaryKey string
 		}
 		return nil
 	}
-	deleteFn := func(*mvccpb.KeyValue) error {
+	deleteFn := func(kv *mvccpb.KeyValue) error {
 		var oldPrimary string
 		v, ok := s.servicePrimaryMap.Load(serviceName)
 		if ok {
@@ -2086,7 +2088,7 @@ func (s *Server) initServicePrimaryWatcher(serviceName string, primaryKey string
 }
 
 // RecoverAllocID recover alloc id. set current base id to input id
-func (s *Server) RecoverAllocID(_ context.Context, id uint64) error {
+func (s *Server) RecoverAllocID(ctx context.Context, id uint64) error {
 	return s.idAllocator.SetBase(id)
 }
 

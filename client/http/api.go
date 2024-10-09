@@ -41,7 +41,6 @@ const (
 	membersPrefix             = "/pd/api/v1/members"
 	leaderPrefix              = "/pd/api/v1/leader"
 	transferLeader            = "/pd/api/v1/leader/transfer"
-	health                    = "/pd/api/v1/health"
 	// Config
 	Config          = "/pd/api/v1/config"
 	ClusterVersion  = "/pd/api/v1/config/cluster-version"

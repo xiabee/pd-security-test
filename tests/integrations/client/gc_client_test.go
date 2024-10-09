@@ -135,7 +135,6 @@ func (suite *gcClientTestSuite) TestClientWatchWithRevision() {
 	suite.testClientWatchWithRevision(true)
 }
 
-// nolint:revive
 func (suite *gcClientTestSuite) testClientWatchWithRevision(fromNewRevision bool) {
 	re := suite.Require()
 	testKeyspaceID := uint32(100)

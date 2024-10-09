@@ -16,10 +16,7 @@ package tempurl
 
 import (
 	"fmt"
-	"io"
 	"net"
-	"net/http"
-	"os"
 	"time"
 
 	"github.com/pingcap/log"
@@ -31,9 +28,6 @@ var (
 	testAddrMutex syncutil.Mutex
 	testAddrMap   = make(map[string]struct{})
 )
-
-// reference: /pd/tools/pd-ut/alloc/server.go
-const AllocURLFromUT = "allocURLFromUT"
 
 // Alloc allocates a local URL for testing.
 func Alloc() string {
@@ -48,9 +42,6 @@ func Alloc() string {
 }
 
 func tryAllocTestURL() string {
-	if url := getFromUT(); url != "" {
-		return url
-	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		log.Fatal("listen failed", errs.ZapError(err))
@@ -71,27 +62,4 @@ func tryAllocTestURL() string {
 	}
 	testAddrMap[addr] = struct{}{}
 	return addr
-}
-
-func getFromUT() string {
-	addr := os.Getenv(AllocURLFromUT)
-	if addr == "" {
-		return ""
-	}
-
-	req, err := http.NewRequest(http.MethodGet, addr, nil)
-	if err != nil {
-		return ""
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return ""
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return ""
-	}
-	url := string(body)
-	return url
 }

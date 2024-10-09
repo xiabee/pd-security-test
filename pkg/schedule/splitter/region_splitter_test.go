@@ -37,7 +37,7 @@ func newMockSplitRegionsHandler() *mockSplitRegionsHandler {
 }
 
 // SplitRegionByKeys mock SplitRegionsHandler
-func (m *mockSplitRegionsHandler) SplitRegionByKeys(region *core.RegionInfo, _ [][]byte) error {
+func (m *mockSplitRegionsHandler) SplitRegionByKeys(region *core.RegionInfo, splitKeys [][]byte) error {
 	m.regions[region.GetID()] = [2][]byte{
 		region.GetStartKey(),
 		region.GetEndKey(),
@@ -76,7 +76,7 @@ func (suite *regionSplitterTestSuite) SetupSuite() {
 	suite.ctx, suite.cancel = context.WithCancel(context.Background())
 }
 
-func (suite *regionSplitterTestSuite) TearDownSuite() {
+func (suite *regionSplitterTestSuite) TearDownTest() {
 	suite.cancel()
 }
 
