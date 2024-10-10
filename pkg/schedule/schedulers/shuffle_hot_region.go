@@ -26,24 +26,19 @@ import (
 	"github.com/tikv/pd/pkg/schedule/filter"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
-	types "github.com/tikv/pd/pkg/schedule/type"
+	"github.com/tikv/pd/pkg/schedule/types"
 	"github.com/tikv/pd/pkg/statistics"
-	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
 )
 
-const (
-	// ShuffleHotRegionName is shuffle hot region scheduler name.
-	ShuffleHotRegionName = "shuffle-hot-region-scheduler"
-)
-
 type shuffleHotRegionSchedulerConfig struct {
 	syncutil.RWMutex
-	storage endpoint.ConfigStorage
-	Limit   uint64 `json:"limit"`
+	schedulerConfig
+
+	Limit uint64 `json:"limit"`
 }
 
 func (conf *shuffleHotRegionSchedulerConfig) clone() *shuffleHotRegionSchedulerConfig {
@@ -52,14 +47,6 @@ func (conf *shuffleHotRegionSchedulerConfig) clone() *shuffleHotRegionSchedulerC
 	return &shuffleHotRegionSchedulerConfig{
 		Limit: conf.Limit,
 	}
-}
-
-func (conf *shuffleHotRegionSchedulerConfig) persistLocked() error {
-	data, err := EncodeConfig(conf)
-	if err != nil {
-		return err
-	}
-	return conf.storage.SaveSchedulerConfig(types.ShuffleHotRegionScheduler.String(), data)
 }
 
 func (conf *shuffleHotRegionSchedulerConfig) getLimit() uint64 {
@@ -80,8 +67,8 @@ type shuffleHotRegionScheduler struct {
 
 // newShuffleHotRegionScheduler creates an admin scheduler that random balance hot regions
 func newShuffleHotRegionScheduler(opController *operator.Controller, conf *shuffleHotRegionSchedulerConfig) Scheduler {
-	base := newBaseHotScheduler(opController,
-		statistics.DefaultHistorySampleDuration, statistics.DefaultHistorySampleInterval)
+	base := newBaseHotScheduler(opController, statistics.DefaultHistorySampleDuration,
+		statistics.DefaultHistorySampleInterval, conf)
 	base.tp = types.ShuffleHotRegionScheduler
 	handler := newShuffleHotRegionHandler(conf)
 	ret := &shuffleHotRegionScheduler{
@@ -106,15 +93,8 @@ func (s *shuffleHotRegionScheduler) EncodeConfig() ([]byte, error) {
 func (s *shuffleHotRegionScheduler) ReloadConfig() error {
 	s.conf.Lock()
 	defer s.conf.Unlock()
-	cfgData, err := s.conf.storage.LoadSchedulerConfig(s.GetName())
-	if err != nil {
-		return err
-	}
-	if len(cfgData) == 0 {
-		return nil
-	}
 	newCfg := &shuffleHotRegionSchedulerConfig{}
-	if err = DecodeConfig([]byte(cfgData), newCfg); err != nil {
+	if err := s.conf.load(newCfg); err != nil {
 		return err
 	}
 	s.conf.Limit = newCfg.Limit
@@ -224,11 +204,12 @@ func (handler *shuffleHotRegionHandler) updateConfig(w http.ResponseWriter, r *h
 		handler.rd.JSON(w, http.StatusBadRequest, "invalid limit")
 		return
 	}
+
 	handler.config.Lock()
 	defer handler.config.Unlock()
 	previous := handler.config.Limit
 	handler.config.Limit = uint64(limit)
-	err := handler.config.persistLocked()
+	err := handler.config.save()
 	if err != nil {
 		handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
 		handler.config.Limit = previous

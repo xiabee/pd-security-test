@@ -16,8 +16,6 @@ package schedulers
 
 import (
 	"context"
-	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +25,7 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/pkg/schedule/operator"
-	types "github.com/tikv/pd/pkg/schedule/type"
+	"github.com/tikv/pd/pkg/schedule/types"
 	"github.com/tikv/pd/pkg/storage"
 	"github.com/tikv/pd/pkg/utils/operatorutil"
 )
@@ -186,17 +184,8 @@ func (suite *evictSlowTrendTestSuite) TestEvictSlowTrend() {
 	re.Zero(es2.conf.evictedStore())
 
 	// check the value from storage.
-	sches, vs, err := es2.conf.storage.LoadAllSchedulerConfigs()
-	re.NoError(err)
-	valueStr := ""
-	for id, sche := range sches {
-		if strings.EqualFold(sche, EvictSlowTrendName) {
-			valueStr = vs[id]
-		}
-	}
-
 	var persistValue evictSlowTrendSchedulerConfig
-	err = json.Unmarshal([]byte(valueStr), &persistValue)
+	err := es2.conf.load(&persistValue)
 	re.NoError(err)
 	re.Equal(es2.conf.EvictedStores, persistValue.EvictedStores)
 	re.Zero(persistValue.evictedStore())

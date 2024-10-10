@@ -56,7 +56,7 @@ import (
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/integrations/mcs"
-	"go.etcd.io/etcd/clientv3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/goleak"
 )
 
@@ -166,19 +166,15 @@ func TestClientLeaderChange(t *testing.T) {
 
 func TestLeaderTransferAndMoveCluster(t *testing.T) {
 	re := require.New(t)
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/member/changeFrequencyTimes", "return(10)"))
+	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/member/skipCampaignLeaderCheck", "return(true)"))
 	defer func() {
-		re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/member/changeFrequencyTimes"))
+		re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/member/skipCampaignLeaderCheck"))
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cluster, err := tests.NewTestCluster(ctx, 3)
 	re.NoError(err)
 	defer cluster.Destroy()
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/member/skipCampaignLeaderCheck", "return(true)"))
-	defer func() {
-		re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/member/skipCampaignLeaderCheck"))
-	}()
 
 	endpoints := runServer(re, cluster)
 	cli := setupCli(ctx, re, endpoints)
@@ -598,7 +594,7 @@ func requestGlobalAndLocalTSO(
 					re.Less(localTS, globalTS2)
 					lastTS = globalTS2
 				}
-				re.Greater(lastTS, uint64(0))
+				re.Positive(lastTS)
 			}(dcLocation)
 		}
 	}
@@ -1128,8 +1124,8 @@ func TestCloseClient(t *testing.T) {
 	cli.Close()
 	physical, logical, err := ts.Wait()
 	if err == nil {
-		re.Greater(physical, int64(0))
-		re.Greater(logical, int64(0))
+		re.Positive(physical)
+		re.Positive(logical)
 	} else {
 		re.ErrorIs(err, context.Canceled)
 		re.Zero(physical)

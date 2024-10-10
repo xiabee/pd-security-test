@@ -40,7 +40,7 @@ import (
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/tools/pd-api-bench/cases"
 	"github.com/tikv/pd/tools/pd-api-bench/config"
-	"go.etcd.io/etcd/clientv3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -255,7 +255,6 @@ func runHTTPServer(cfg *config.Config, co *cases.Coordinator) {
 			return
 		}
 		for name, cfg := range input {
-			cfg := cfg
 			co.SetHTTPCase(name, &cfg)
 		}
 		c.String(http.StatusOK, "")
@@ -273,7 +272,6 @@ func runHTTPServer(cfg *config.Config, co *cases.Coordinator) {
 			return
 		}
 		for name, cfg := range input {
-			cfg := cfg
 			co.SetGRPCCase(name, &cfg)
 		}
 		c.String(http.StatusOK, "")
@@ -291,7 +289,6 @@ func runHTTPServer(cfg *config.Config, co *cases.Coordinator) {
 			return
 		}
 		for name, cfg := range input {
-			cfg := cfg
 			co.SetEtcdCase(name, &cfg)
 		}
 		c.String(http.StatusOK, "")

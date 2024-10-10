@@ -24,12 +24,7 @@ import (
 	"github.com/tikv/pd/pkg/schedule/filter"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
-	types "github.com/tikv/pd/pkg/schedule/type"
-)
-
-const (
-	// ShuffleRegionName is shuffle region scheduler name.
-	ShuffleRegionName = "shuffle-region-scheduler"
+	"github.com/tikv/pd/pkg/schedule/types"
 )
 
 type shuffleRegionScheduler struct {
@@ -41,11 +36,11 @@ type shuffleRegionScheduler struct {
 // newShuffleRegionScheduler creates an admin scheduler that shuffles regions
 // between stores.
 func newShuffleRegionScheduler(opController *operator.Controller, conf *shuffleRegionSchedulerConfig) Scheduler {
+	base := NewBaseScheduler(opController, types.ShuffleRegionScheduler, conf)
 	filters := []filter.Filter{
-		&filter.StoreStateFilter{ActionScope: ShuffleRegionName, MoveRegion: true, OperatorLevel: constant.Low},
-		filter.NewSpecialUseFilter(ShuffleRegionName),
+		&filter.StoreStateFilter{ActionScope: base.GetName(), MoveRegion: true, OperatorLevel: constant.Low},
+		filter.NewSpecialUseFilter(base.GetName()),
 	}
-	base := NewBaseScheduler(opController, types.ShuffleRegionScheduler)
 	return &shuffleRegionScheduler{
 		BaseScheduler: base,
 		conf:          conf,
@@ -67,15 +62,8 @@ func (s *shuffleRegionScheduler) EncodeConfig() ([]byte, error) {
 func (s *shuffleRegionScheduler) ReloadConfig() error {
 	s.conf.Lock()
 	defer s.conf.Unlock()
-	cfgData, err := s.conf.storage.LoadSchedulerConfig(s.GetName())
-	if err != nil {
-		return err
-	}
-	if len(cfgData) == 0 {
-		return nil
-	}
 	newCfg := &shuffleRegionSchedulerConfig{}
-	if err := DecodeConfig([]byte(cfgData), newCfg); err != nil {
+	if err := s.conf.load(newCfg); err != nil {
 		return err
 	}
 	s.conf.Roles = newCfg.Roles
@@ -118,7 +106,7 @@ func (s *shuffleRegionScheduler) Schedule(cluster sche.SchedulerCluster, _ bool)
 }
 
 func (s *shuffleRegionScheduler) scheduleRemovePeer(cluster sche.SchedulerCluster) (*core.RegionInfo, *metapb.Peer) {
-	candidates := filter.NewCandidates(cluster.GetStores()).
+	candidates := filter.NewCandidates(s.R, cluster.GetStores()).
 		FilterSource(cluster.GetSchedulerConfig(), nil, nil, s.filters...).
 		Shuffle()
 
@@ -158,7 +146,7 @@ func (s *shuffleRegionScheduler) scheduleAddPeer(cluster sche.SchedulerCluster, 
 	scoreGuard := filter.NewPlacementSafeguard(s.GetName(), cluster.GetSchedulerConfig(), cluster.GetBasicCluster(), cluster.GetRuleManager(), region, store, nil)
 	excludedFilter := filter.NewExcludedFilter(s.GetName(), nil, region.GetStoreIDs())
 
-	target := filter.NewCandidates(cluster.GetStores()).
+	target := filter.NewCandidates(s.R, cluster.GetStores()).
 		FilterTarget(cluster.GetSchedulerConfig(), nil, nil, append(s.filters, scoreGuard, excludedFilter)...).
 		RandomPick()
 	if target == nil {

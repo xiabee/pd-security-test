@@ -17,6 +17,7 @@ package command
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,19 +34,20 @@ import (
 )
 
 const (
-	configPrefix          = "pd/api/v1/config"
-	schedulePrefix        = "pd/api/v1/config/schedule"
-	replicatePrefix       = "pd/api/v1/config/replicate"
-	labelPropertyPrefix   = "pd/api/v1/config/label-property"
-	clusterVersionPrefix  = "pd/api/v1/config/cluster-version"
-	rulesPrefix           = "pd/api/v1/config/rules"
-	rulesBatchPrefix      = "pd/api/v1/config/rules/batch"
-	rulePrefix            = "pd/api/v1/config/rule"
-	ruleGroupPrefix       = "pd/api/v1/config/rule_group"
-	ruleGroupsPrefix      = "pd/api/v1/config/rule_groups"
-	replicationModePrefix = "pd/api/v1/config/replication-mode"
-	ruleBundlePrefix      = "pd/api/v1/config/placement-rule"
-	pdServerPrefix        = "pd/api/v1/config/pd-server"
+	configPrefix                  = "pd/api/v1/config"
+	schedulePrefix                = "pd/api/v1/config/schedule"
+	replicatePrefix               = "pd/api/v1/config/replicate"
+	labelPropertyPrefix           = "pd/api/v1/config/label-property"
+	clusterVersionPrefix          = "pd/api/v1/config/cluster-version"
+	rulesPrefix                   = "pd/api/v1/config/rules"
+	rulesBatchPrefix              = "pd/api/v1/config/rules/batch"
+	rulePrefix                    = "pd/api/v1/config/rule"
+	ruleGroupPrefix               = "pd/api/v1/config/rule_group"
+	ruleGroupsPrefix              = "pd/api/v1/config/rule_groups"
+	replicationModePrefix         = "pd/api/v1/config/replication-mode"
+	ruleBundlePrefix              = "pd/api/v1/config/placement-rule"
+	pdServerPrefix                = "pd/api/v1/config/pd-server"
+	serviceMiddlewareConfigPrefix = "pd/api/v1/service-middleware/config"
 	// flagFromAPIServer has no influence for pd mode, but it is useful for us to debug in api mode.
 	flagFromAPIServer = "from_api_server"
 )
@@ -77,7 +79,8 @@ func NewShowConfigCommand() *cobra.Command {
 	sc.AddCommand(NewShowClusterVersionCommand())
 	sc.AddCommand(newShowReplicationModeCommand())
 	sc.AddCommand(NewShowServerConfigCommand())
-	sc.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micor service")
+	sc.AddCommand(NewShowServiceMiddlewareConfigCommand())
+	sc.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micro service")
 	return sc
 }
 
@@ -88,7 +91,7 @@ func NewShowAllConfigCommand() *cobra.Command {
 		Short: "show all config of PD",
 		Run:   showAllConfigCommandFunc,
 	}
-	sc.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micor service")
+	sc.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micro service")
 	return sc
 }
 
@@ -99,7 +102,7 @@ func NewShowScheduleConfigCommand() *cobra.Command {
 		Short: "show schedule config of PD",
 		Run:   showScheduleConfigCommandFunc,
 	}
-	sc.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micor service")
+	sc.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micro service")
 	return sc
 }
 
@@ -110,7 +113,7 @@ func NewShowReplicationConfigCommand() *cobra.Command {
 		Short: "show replication config of PD",
 		Run:   showReplicationConfigCommandFunc,
 	}
-	sc.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micor service")
+	sc.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micro service")
 	return sc
 }
 
@@ -151,6 +154,16 @@ func NewShowServerConfigCommand() *cobra.Command {
 	}
 }
 
+// NewShowReplicationConfigCommand return a show all subcommand of show subcommand
+func NewShowServiceMiddlewareConfigCommand() *cobra.Command {
+	sc := &cobra.Command{
+		Use:   "service-middleware",
+		Short: "show service middleware config of PD",
+		Run:   showServiceMiddlewareConfigCommandFunc,
+	}
+	return sc
+}
+
 // NewSetConfigCommand return a set subcommand of configCmd
 func NewSetConfigCommand() *cobra.Command {
 	sc := &cobra.Command{
@@ -161,6 +174,7 @@ func NewSetConfigCommand() *cobra.Command {
 	sc.AddCommand(NewSetLabelPropertyCommand())
 	sc.AddCommand(NewSetClusterVersionCommand())
 	sc.AddCommand(newSetReplicationModeCommand())
+	sc.AddCommand(newSetServiceMiddlewareCommand())
 	return sc
 }
 
@@ -189,6 +203,14 @@ func newSetReplicationModeCommand() *cobra.Command {
 		Use:   "replication-mode <mode> [<key>, <value>]",
 		Short: "set replication mode config",
 		Run:   setReplicationModeCommandFunc,
+	}
+}
+
+func newSetServiceMiddlewareCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "service-middleware <type> [<key> <value> | <label> <qps|concurrency> <value>]",
+		Short: "set service middleware config",
+		Run:   setServiceMiddlewareCommandFunc,
 	}
 }
 
@@ -333,6 +355,16 @@ func showServerCommandFunc(cmd *cobra.Command, _ []string) {
 	cmd.Println(r)
 }
 
+func showServiceMiddlewareConfigCommandFunc(cmd *cobra.Command, _ []string) {
+	header := buildHeader(cmd)
+	r, err := doRequest(cmd, serviceMiddlewareConfigPrefix, http.MethodGet, header)
+	if err != nil {
+		cmd.Printf("Failed to get config: %s\n", err)
+		return
+	}
+	cmd.Println(r)
+}
+
 func postConfigDataWithPath(cmd *cobra.Command, key, value, path string) error {
 	var val any
 	data := make(map[string]any)
@@ -422,6 +454,48 @@ func setReplicationModeCommandFunc(cmd *cobra.Command, args []string) {
 	}
 }
 
+func setServiceMiddlewareCommandFunc(cmd *cobra.Command, args []string) {
+	if len(args) != 3 && len(args) != 4 {
+		cmd.Println(cmd.UsageString())
+		return
+	}
+
+	if len(args) == 3 {
+		cfg := map[string]any{
+			fmt.Sprintf("%s.%s", args[0], args[1]): args[2],
+		}
+		postJSON(cmd, serviceMiddlewareConfigPrefix, cfg)
+		return
+	}
+
+	input := map[string]any{
+		"label": args[1],
+	}
+	value, err := strconv.ParseUint(args[3], 10, 64)
+	if err != nil {
+		cmd.Println(err)
+		return
+	}
+	if strings.ToLower(args[2]) == "qps" {
+		input["qps"] = value
+	} else if strings.ToLower(args[2]) == "concurrency" {
+		input["concurrency"] = value
+	} else {
+		cmd.Println("Input is invalid, should be qps or concurrency")
+		return
+	}
+
+	if args[0] == "rate-limit" {
+		input["type"] = "label"
+		postJSON(cmd, serviceMiddlewareConfigPrefix+"/rate-limit", input)
+		return
+	} else if args[0] == "grpc-rate-limit" {
+		postJSON(cmd, serviceMiddlewareConfigPrefix+"/grpc-rate-limit", input)
+		return
+	}
+	cmd.Printf("Failed to get correct type: %s\n", args[0])
+}
+
 // NewPlacementRulesCommand placement rules subcommand
 func NewPlacementRulesCommand() *cobra.Command {
 	c := &cobra.Command{
@@ -447,7 +521,7 @@ func NewPlacementRulesCommand() *cobra.Command {
 	show.Flags().String("id", "", "rule id")
 	show.Flags().String("region", "", "region id")
 	show.Flags().Bool("detail", false, "detailed match info for region")
-	show.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micor service")
+	show.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micro service")
 	load := &cobra.Command{
 		Use:   "load",
 		Short: "load placement rules to a file",
@@ -457,7 +531,7 @@ func NewPlacementRulesCommand() *cobra.Command {
 	load.Flags().String("id", "", "rule id")
 	load.Flags().String("region", "", "region id")
 	load.Flags().String("out", "rules.json", "the filename contains rules")
-	load.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micor service")
+	load.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micro service")
 	save := &cobra.Command{
 		Use:   "save",
 		Short: "save rules from file",
@@ -473,7 +547,7 @@ func NewPlacementRulesCommand() *cobra.Command {
 		Short: "show rule group configuration(s)",
 		Run:   showRuleGroupFunc,
 	}
-	ruleGroupShow.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micor service")
+	ruleGroupShow.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micro service")
 	ruleGroupSet := &cobra.Command{
 		Use:   "set <id> <index> <override>",
 		Short: "update rule group configuration",
@@ -496,7 +570,7 @@ func NewPlacementRulesCommand() *cobra.Command {
 		Run:   getRuleBundle,
 	}
 	ruleBundleGet.Flags().String("out", "", "the output file")
-	ruleBundleGet.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micor service")
+	ruleBundleGet.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micro service")
 	ruleBundleSet := &cobra.Command{
 		Use:   "set",
 		Short: "set rule group config and its rules from file",
@@ -515,7 +589,7 @@ func NewPlacementRulesCommand() *cobra.Command {
 		Run:   loadRuleBundle,
 	}
 	ruleBundleLoad.Flags().String("out", "rules.json", "the output file")
-	ruleBundleLoad.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micor service")
+	ruleBundleLoad.Flags().Bool(flagFromAPIServer, false, "read data from api server rather than micro service")
 	ruleBundleSave := &cobra.Command{
 		Use:   "save",
 		Short: "save all group configs and rules from file",
