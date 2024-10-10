@@ -59,6 +59,7 @@ func createTestGroupCostController(re *require.Assertions) *groupCostController 
 func TestGroupControlBurstable(t *testing.T) {
 	re := require.New(t)
 	gc := createTestGroupCostController(re)
+	gc.initRunState()
 	args := tokenBucketReconfigureArgs{
 		NewRate:  1000,
 		NewBurst: -1,
@@ -67,12 +68,13 @@ func TestGroupControlBurstable(t *testing.T) {
 		counter.limiter.Reconfigure(time.Now(), args)
 	}
 	gc.updateAvgRequestResourcePerSec()
-	re.True(gc.burstable.Load())
+	re.Equal(gc.burstable.Load(), true)
 }
 
 func TestRequestAndResponseConsumption(t *testing.T) {
 	re := require.New(t)
 	gc := createTestGroupCostController(re)
+	gc.initRunState()
 	testCases := []struct {
 		req  *TestRequestInfo
 		resp *TestResponseInfo
@@ -104,7 +106,7 @@ func TestRequestAndResponseConsumption(t *testing.T) {
 	kvCalculator := gc.getKVCalculator()
 	for idx, testCase := range testCases {
 		caseNum := fmt.Sprintf("case %d", idx)
-		consumption, _, _, priority, err := gc.onRequestWaitImpl(context.TODO(), testCase.req)
+		consumption, _, _, priority, err := gc.onRequestWait(context.TODO(), testCase.req)
 		re.NoError(err, caseNum)
 		re.Equal(priority, gc.meta.Priority)
 		expectedConsumption := &rmpb.Consumption{}
@@ -112,7 +114,7 @@ func TestRequestAndResponseConsumption(t *testing.T) {
 			kvCalculator.calculateWriteCost(expectedConsumption, testCase.req)
 			re.Equal(expectedConsumption.WRU, consumption.WRU)
 		}
-		consumption, err = gc.onResponseImpl(testCase.req, testCase.resp)
+		consumption, err = gc.onResponse(testCase.req, testCase.resp)
 		re.NoError(err, caseNum)
 		kvCalculator.calculateReadCost(expectedConsumption, testCase.resp)
 		kvCalculator.calculateCPUCost(expectedConsumption, testCase.resp)
@@ -121,55 +123,16 @@ func TestRequestAndResponseConsumption(t *testing.T) {
 	}
 }
 
-func TestOnResponseWaitConsumption(t *testing.T) {
-	re := require.New(t)
-	gc := createTestGroupCostController(re)
-
-	req := &TestRequestInfo{
-		isWrite: false,
-	}
-	resp := &TestResponseInfo{
-		readBytes: 2000 * 64 * 1024, // 2000RU
-		succeed:   true,
-	}
-
-	consumption, waitTIme, err := gc.onResponseWaitImpl(context.TODO(), req, resp)
-	re.NoError(err)
-	re.Zero(waitTIme)
-	verify := func() {
-		expectedConsumption := &rmpb.Consumption{}
-		kvCalculator := gc.getKVCalculator()
-		kvCalculator.calculateReadCost(expectedConsumption, resp)
-		re.Equal(expectedConsumption.RRU, consumption.RRU)
-	}
-	verify()
-
-	// modify the counter, then on response should has wait time.
-	counter := gc.run.requestUnitTokens[rmpb.RequestUnitType_RU]
-	gc.modifyTokenCounter(counter, &rmpb.TokenBucket{
-		Settings: &rmpb.TokenLimitSettings{
-			FillRate:   1000,
-			BurstLimit: 1000,
-		},
-	},
-		int64(5*time.Second/time.Millisecond),
-	)
-
-	consumption, waitTIme, err = gc.onResponseWaitImpl(context.TODO(), req, resp)
-	re.NoError(err)
-	re.NotZero(waitTIme)
-	verify()
-}
-
 func TestResourceGroupThrottledError(t *testing.T) {
 	re := require.New(t)
 	gc := createTestGroupCostController(re)
+	gc.initRunState()
 	req := &TestRequestInfo{
 		isWrite:    true,
 		writeBytes: 10000000,
 	}
 	// The group is throttled
-	_, _, _, _, err := gc.onRequestWaitImpl(context.TODO(), req)
+	_, _, _, _, err := gc.onRequestWait(context.TODO(), req)
 	re.Error(err)
 	re.True(errs.ErrClientResourceGroupThrottled.Equal(err))
 }
@@ -179,21 +142,13 @@ type MockResourceGroupProvider struct {
 	mock.Mock
 }
 
-func newMockResourceGroupProvider() *MockResourceGroupProvider {
-	mockProvider := &MockResourceGroupProvider{}
-	mockProvider.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(&meta_storagepb.GetResponse{}, nil)
-	mockProvider.On("LoadResourceGroups", mock.Anything).Return([]*rmpb.ResourceGroup{}, int64(0), nil)
-	mockProvider.On("Watch", mock.Anything, mock.Anything, mock.Anything).Return(make(chan []*meta_storagepb.Event), nil)
-	return mockProvider
-}
-
-func (m *MockResourceGroupProvider) GetResourceGroup(ctx context.Context, resourceGroupName string, opts ...pd.GetResourceGroupOption) (*rmpb.ResourceGroup, error) {
-	args := m.Called(ctx, resourceGroupName, opts)
+func (m *MockResourceGroupProvider) GetResourceGroup(ctx context.Context, resourceGroupName string) (*rmpb.ResourceGroup, error) {
+	args := m.Called(ctx, resourceGroupName)
 	return args.Get(0).(*rmpb.ResourceGroup), args.Error(1)
 }
 
-func (m *MockResourceGroupProvider) ListResourceGroups(ctx context.Context, opts ...pd.GetResourceGroupOption) ([]*rmpb.ResourceGroup, error) {
-	args := m.Called(ctx, opts)
+func (m *MockResourceGroupProvider) ListResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, error) {
+	args := m.Called(ctx)
 	return args.Get(0).([]*rmpb.ResourceGroup), args.Error(1)
 }
 
@@ -236,26 +191,32 @@ func TestControllerWithTwoGroupRequestConcurrency(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	mockProvider := new(MockResourceGroupProvider)
 
-	re.NoError(failpoint.Enable("github.com/tikv/pd/client/resource_group/controller/triggerPeriodicReport", fmt.Sprintf("return(\"%s\")", defaultResourceGroupName)))
+	mockProvider.On("Get", mock.Anything, mock.Anything, mock.Anything).Return(&meta_storagepb.GetResponse{}, nil)
+	// LoadResourceGroups
+	mockProvider.On("LoadResourceGroups", mock.Anything).Return([]*rmpb.ResourceGroup{}, int64(0), nil)
+	// Watch
+	mockProvider.On("Watch", mock.Anything, mock.Anything, mock.Anything).Return(make(chan []*meta_storagepb.Event), nil)
+
+	re.NoError(failpoint.Enable("github.com/tikv/pd/client/resource_group/controller/triggerPeriodicReport", fmt.Sprintf("return(\"%s\")", "default")))
 	defer failpoint.Disable("github.com/tikv/pd/client/resource_group/controller/triggerPeriodicReport")
 	re.NoError(failpoint.Enable("github.com/tikv/pd/client/resource_group/controller/triggerLowRUReport", fmt.Sprintf("return(\"%s\")", "test-group")))
 	defer failpoint.Disable("github.com/tikv/pd/client/resource_group/controller/triggerLowRUReport")
 
-	mockProvider := newMockResourceGroupProvider()
 	controller, _ := NewResourceGroupController(ctx, 1, mockProvider, nil)
 	controller.Start(ctx)
 
-	defaultResourceGroup := &rmpb.ResourceGroup{Name: defaultResourceGroupName, Mode: rmpb.GroupMode_RUMode, RUSettings: &rmpb.GroupRequestUnitSettings{RU: &rmpb.TokenBucket{Settings: &rmpb.TokenLimitSettings{FillRate: 1000000}}}}
+	defaultResourceGroup := &rmpb.ResourceGroup{Name: "default", Mode: rmpb.GroupMode_RUMode, RUSettings: &rmpb.GroupRequestUnitSettings{RU: &rmpb.TokenBucket{Settings: &rmpb.TokenLimitSettings{FillRate: 1000000}}}}
 	testResourceGroup := &rmpb.ResourceGroup{Name: "test-group", Mode: rmpb.GroupMode_RUMode, RUSettings: &rmpb.GroupRequestUnitSettings{RU: &rmpb.TokenBucket{Settings: &rmpb.TokenLimitSettings{FillRate: 1000000}}}}
-	mockProvider.On("GetResourceGroup", mock.Anything, defaultResourceGroupName, mock.Anything).Return(defaultResourceGroup, nil)
+	mockProvider.On("GetResourceGroup", mock.Anything, "default", mock.Anything).Return(defaultResourceGroup, nil)
 	mockProvider.On("GetResourceGroup", mock.Anything, "test-group", mock.Anything).Return(testResourceGroup, nil)
 
-	c1, err := controller.tryGetResourceGroupController(ctx, defaultResourceGroupName, false)
+	c1, err := controller.tryGetResourceGroup(ctx, "default")
 	re.NoError(err)
 	re.Equal(defaultResourceGroup, c1.meta)
 
-	c2, err := controller.tryGetResourceGroupController(ctx, "test-group", false)
+	c2, err := controller.tryGetResourceGroup(ctx, "test-group")
 	re.NoError(err)
 	re.Equal(testResourceGroup, c2.meta)
 
@@ -265,11 +226,11 @@ func TestControllerWithTwoGroupRequestConcurrency(t *testing.T) {
 		request := args.Get(1).(*rmpb.TokenBucketsRequest)
 		var responses []*rmpb.TokenBucketResponse
 		for _, req := range request.Requests {
-			if req.ResourceGroupName == defaultResourceGroupName {
+			if req.ResourceGroupName == "default" {
 				// no response the default group request, that's mean `len(c.run.currentRequests) != 0` always.
 				time.Sleep(100 * time.Second)
 				responses = append(responses, &rmpb.TokenBucketResponse{
-					ResourceGroupName: defaultResourceGroupName,
+					ResourceGroupName: "default",
 					GrantedRUTokens: []*rmpb.GrantedRUTokenBucket{
 						{
 							GrantedTokens: &rmpb.TokenBucket{
@@ -309,68 +270,4 @@ func TestControllerWithTwoGroupRequestConcurrency(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		re.Fail("timeout")
 	}
-}
-
-func TestTryGetController(t *testing.T) {
-	re := require.New(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	mockProvider := newMockResourceGroupProvider()
-	controller, _ := NewResourceGroupController(ctx, 1, mockProvider, nil)
-	controller.Start(ctx)
-
-	defaultResourceGroup := &rmpb.ResourceGroup{Name: defaultResourceGroupName, Mode: rmpb.GroupMode_RUMode, RUSettings: &rmpb.GroupRequestUnitSettings{RU: &rmpb.TokenBucket{Settings: &rmpb.TokenLimitSettings{FillRate: 1000000}}}}
-	testResourceGroup := &rmpb.ResourceGroup{Name: "test-group", Mode: rmpb.GroupMode_RUMode, RUSettings: &rmpb.GroupRequestUnitSettings{RU: &rmpb.TokenBucket{Settings: &rmpb.TokenLimitSettings{FillRate: 1000000}}}}
-	mockProvider.On("GetResourceGroup", mock.Anything, defaultResourceGroupName, mock.Anything).Return(defaultResourceGroup, nil)
-	mockProvider.On("GetResourceGroup", mock.Anything, "test-group", mock.Anything).Return(testResourceGroup, nil)
-	mockProvider.On("GetResourceGroup", mock.Anything, "test-group-non-existent", mock.Anything).Return((*rmpb.ResourceGroup)(nil), nil)
-
-	gc, err := controller.tryGetResourceGroupController(ctx, "test-group-non-existent", false)
-	re.Error(err)
-	re.Nil(gc)
-	gc, err = controller.tryGetResourceGroupController(ctx, defaultResourceGroupName, false)
-	re.NoError(err)
-	re.Equal(defaultResourceGroup, gc.getMeta())
-	gc, err = controller.tryGetResourceGroupController(ctx, "test-group", false)
-	re.NoError(err)
-	re.Equal(testResourceGroup, gc.getMeta())
-	requestInfo, responseInfo := NewTestRequestInfo(true, 1, 1), NewTestResponseInfo(1, time.Millisecond, true)
-	_, _, _, _, err = controller.OnRequestWait(ctx, "test-group", requestInfo)
-	re.NoError(err)
-	consumption, err := controller.OnResponse("test-group", requestInfo, responseInfo)
-	re.NoError(err)
-	re.NotEmpty(consumption)
-	// Mark the tombstone manually to test the fallback case.
-	gc, err = controller.tryGetResourceGroupController(ctx, "test-group", false)
-	re.NoError(err)
-	re.NotNil(gc)
-	controller.tombstoneGroupCostController("test-group")
-	gc, err = controller.tryGetResourceGroupController(ctx, "test-group", false)
-	re.Error(err)
-	re.Nil(gc)
-	gc, err = controller.tryGetResourceGroupController(ctx, "test-group", true)
-	re.NoError(err)
-	re.Equal(defaultResourceGroup, gc.getMeta())
-	_, _, _, _, err = controller.OnRequestWait(ctx, "test-group", requestInfo)
-	re.NoError(err)
-	consumption, err = controller.OnResponse("test-group", requestInfo, responseInfo)
-	re.NoError(err)
-	re.NotEmpty(consumption)
-	// Test the default group protection.
-	gc, err = controller.tryGetResourceGroupController(ctx, defaultResourceGroupName, false)
-	re.NoError(err)
-	re.Equal(defaultResourceGroup, gc.getMeta())
-	controller.tombstoneGroupCostController(defaultResourceGroupName)
-	gc, err = controller.tryGetResourceGroupController(ctx, defaultResourceGroupName, false)
-	re.NoError(err)
-	re.Equal(defaultResourceGroup, gc.getMeta())
-	gc, err = controller.tryGetResourceGroupController(ctx, defaultResourceGroupName, true)
-	re.NoError(err)
-	re.Equal(defaultResourceGroup, gc.getMeta())
-	_, _, _, _, err = controller.OnRequestWait(ctx, defaultResourceGroupName, requestInfo)
-	re.NoError(err)
-	consumption, err = controller.OnResponse(defaultResourceGroupName, requestInfo, responseInfo)
-	re.NoError(err)
-	re.NotEmpty(consumption)
 }

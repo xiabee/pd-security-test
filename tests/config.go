@@ -36,7 +36,7 @@ type serverConfig struct {
 }
 
 func newServerConfig(name string, cc *clusterConfig, join bool) *serverConfig {
-	tempDir, _ := os.MkdirTemp("", "pd_tests")
+	tempDir, _ := os.MkdirTemp("/tmp", "pd-tests")
 	return &serverConfig{
 		Name:          name,
 		DataDir:       tempDir,
@@ -47,7 +47,6 @@ func newServerConfig(name string, cc *clusterConfig, join bool) *serverConfig {
 	}
 }
 
-// Generate generates a config for the server.
 func (c *serverConfig) Generate(opts ...ConfigOption) (*config.Config, error) {
 	arguments := []string{
 		"--name=" + c.Name,
@@ -58,9 +57,9 @@ func (c *serverConfig) Generate(opts ...ConfigOption) (*config.Config, error) {
 		"--advertise-peer-urls=" + c.AdvertisePeerURLs,
 	}
 	if c.Join {
-		arguments = append(arguments, "--join="+c.ClusterConfig.getJoinAddr())
+		arguments = append(arguments, "--join="+c.ClusterConfig.GetJoinAddr())
 	} else {
-		arguments = append(arguments, "--initial-cluster="+c.ClusterConfig.getServerAddrs())
+		arguments = append(arguments, "--initial-cluster="+c.ClusterConfig.GetServerAddrs())
 	}
 
 	flagSet := pflag.NewFlagSet("test", pflag.ContinueOnError)
@@ -111,7 +110,7 @@ func newClusterConfig(n int) *clusterConfig {
 	return &cc
 }
 
-func (c *clusterConfig) join() *serverConfig {
+func (c *clusterConfig) Join() *serverConfig {
 	sc := newServerConfig(c.nextServerName(), c, true)
 	c.JoinServers = append(c.JoinServers, sc)
 	return sc
@@ -121,7 +120,7 @@ func (c *clusterConfig) nextServerName() string {
 	return fmt.Sprintf("pd%d", len(c.InitialServers)+len(c.JoinServers)+1)
 }
 
-func (c *clusterConfig) getServerAddrs() string {
+func (c *clusterConfig) GetServerAddrs() string {
 	addrs := make([]string, 0, len(c.InitialServers))
 	for _, s := range c.InitialServers {
 		addrs = append(addrs, fmt.Sprintf("%s=%s", s.Name, s.PeerURLs))
@@ -129,16 +128,14 @@ func (c *clusterConfig) getServerAddrs() string {
 	return strings.Join(addrs, ",")
 }
 
-func (c *clusterConfig) getJoinAddr() string {
+func (c *clusterConfig) GetJoinAddr() string {
 	return c.InitialServers[0].PeerURLs
 }
 
-// GetClientURL returns the client URL of the cluster.
 func (c *clusterConfig) GetClientURL() string {
 	return c.InitialServers[0].ClientURLs
 }
 
-// GetClientURLs returns all client URLs of the cluster.
 func (c *clusterConfig) GetClientURLs() []string {
 	urls := make([]string, 0, len(c.InitialServers))
 	for _, svr := range c.InitialServers {

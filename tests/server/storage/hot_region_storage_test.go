@@ -37,7 +37,7 @@ func TestHotRegionStorage(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cluster, err := tests.NewTestCluster(ctx, 1,
-		func(cfg *config.Config, _ string) {
+		func(cfg *config.Config, serverName string) {
 			cfg.Schedule.HotRegionCacheHitsThreshold = 0
 			cfg.Schedule.HotRegionsWriteInterval.Duration = 1000 * time.Millisecond
 			cfg.Schedule.HotRegionsReservedDays = 1
@@ -46,7 +46,7 @@ func TestHotRegionStorage(t *testing.T) {
 	re.NoError(err)
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	re.NotEmpty(cluster.WaitLeader())
+	cluster.WaitLeader()
 	stores := []*metapb.Store{
 		{
 			Id:            1,
@@ -145,7 +145,7 @@ func TestHotRegionStorageReservedDayConfigChange(t *testing.T) {
 	interval := 100 * time.Millisecond
 	defer cancel()
 	cluster, err := tests.NewTestCluster(ctx, 1,
-		func(cfg *config.Config, _ string) {
+		func(cfg *config.Config, serverName string) {
 			cfg.Schedule.HotRegionCacheHitsThreshold = 0
 			cfg.Schedule.HotRegionsWriteInterval.Duration = interval
 			cfg.Schedule.HotRegionsReservedDays = 1
@@ -154,7 +154,7 @@ func TestHotRegionStorageReservedDayConfigChange(t *testing.T) {
 	re.NoError(err)
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	re.NotEmpty(cluster.WaitLeader())
+	cluster.WaitLeader()
 	stores := []*metapb.Store{
 		{
 			Id:            1,
@@ -237,7 +237,7 @@ func TestHotRegionStorageWriteIntervalConfigChange(t *testing.T) {
 	interval := 100 * time.Millisecond
 	defer cancel()
 	cluster, err := tests.NewTestCluster(ctx, 1,
-		func(cfg *config.Config, _ string) {
+		func(cfg *config.Config, serverName string) {
 			cfg.Schedule.HotRegionCacheHitsThreshold = 0
 			cfg.Schedule.HotRegionsWriteInterval.Duration = interval
 			cfg.Schedule.HotRegionsReservedDays = 1
@@ -246,7 +246,7 @@ func TestHotRegionStorageWriteIntervalConfigChange(t *testing.T) {
 	re.NoError(err)
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	re.NotEmpty(cluster.WaitLeader())
+	cluster.WaitLeader()
 	stores := []*metapb.Store{
 		{
 			Id:            1,

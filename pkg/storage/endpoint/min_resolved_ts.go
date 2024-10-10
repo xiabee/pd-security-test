@@ -18,7 +18,6 @@ import (
 	"strconv"
 
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/keypath"
 )
 
 // MinResolvedTSPoint is the min resolved ts for a store
@@ -37,7 +36,7 @@ var _ MinResolvedTSStorage = (*StorageEndpoint)(nil)
 
 // LoadMinResolvedTS loads the min resolved ts from storage.
 func (se *StorageEndpoint) LoadMinResolvedTS() (uint64, error) {
-	value, err := se.Load(keypath.MinResolvedTSPath())
+	value, err := se.Load(MinResolvedTSPath())
 	if err != nil || value == "" {
 		return 0, err
 	}
@@ -51,5 +50,5 @@ func (se *StorageEndpoint) LoadMinResolvedTS() (uint64, error) {
 // SaveMinResolvedTS saves the min resolved ts.
 func (se *StorageEndpoint) SaveMinResolvedTS(minResolvedTS uint64) error {
 	value := strconv.FormatUint(minResolvedTS, 16)
-	return se.Save(keypath.MinResolvedTSPath(), value)
+	return se.Save(MinResolvedTSPath(), value)
 }

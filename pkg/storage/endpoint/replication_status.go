@@ -18,20 +18,19 @@ import (
 	"encoding/json"
 
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/keypath"
 )
 
 // ReplicationStatusStorage defines the storage operations on the replication status.
 type ReplicationStatusStorage interface {
-	LoadReplicationStatus(mode string, status any) (bool, error)
-	SaveReplicationStatus(mode string, status any) error
+	LoadReplicationStatus(mode string, status interface{}) (bool, error)
+	SaveReplicationStatus(mode string, status interface{}) error
 }
 
 var _ ReplicationStatusStorage = (*StorageEndpoint)(nil)
 
 // LoadReplicationStatus loads replication status by mode.
-func (se *StorageEndpoint) LoadReplicationStatus(mode string, status any) (bool, error) {
-	v, err := se.Load(keypath.ReplicationModePath(mode))
+func (se *StorageEndpoint) LoadReplicationStatus(mode string, status interface{}) (bool, error) {
+	v, err := se.Load(replicationModePath(mode))
 	if err != nil || v == "" {
 		return false, err
 	}
@@ -43,6 +42,10 @@ func (se *StorageEndpoint) LoadReplicationStatus(mode string, status any) (bool,
 }
 
 // SaveReplicationStatus stores replication status by mode.
-func (se *StorageEndpoint) SaveReplicationStatus(mode string, status any) error {
-	return se.saveJSON(keypath.ReplicationModePath(mode), status)
+func (se *StorageEndpoint) SaveReplicationStatus(mode string, status interface{}) error {
+	value, err := json.Marshal(status)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByArgs()
+	}
+	return se.Save(replicationModePath(mode), string(value))
 }

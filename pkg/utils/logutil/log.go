@@ -15,8 +15,6 @@
 package logutil
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -69,19 +67,16 @@ func StringToZapLogLevel(level string) zapcore.Level {
 }
 
 // SetupLogger setup the logger.
-func SetupLogger(
-	logConfig log.Config,
-	logger **zap.Logger,
-	logProps **log.ZapProperties,
-	redactInfoLogType RedactInfoLogType,
-) error {
+func SetupLogger(logConfig log.Config, logger **zap.Logger, logProps **log.ZapProperties, enabled ...bool) error {
 	lg, p, err := log.InitLogger(&logConfig, zap.AddStacktrace(zapcore.FatalLevel))
 	if err != nil {
 		return errs.ErrInitLogger.Wrap(err)
 	}
 	*logger = lg
 	*logProps = p
-	setRedactType(redactInfoLogType)
+	if len(enabled) > 0 {
+		SetRedactLog(enabled[0])
+	}
 	return nil
 }
 
@@ -93,111 +88,22 @@ func LogPanic() {
 	}
 }
 
-// RedactInfoLogType is the behavior of redacting sensitive information in logs.
-type RedactInfoLogType int
-
-const (
-	// RedactInfoLogOFF means log redaction is disabled.
-	RedactInfoLogOFF RedactInfoLogType = iota
-	// RedactInfoLogON means log redaction is enabled, and will replace the sensitive information with "?".
-	RedactInfoLogON
-	// RedactInfoLogMarker means log redaction is enabled, and will use single guillemets ‹› to enclose the sensitive information.
-	RedactInfoLogMarker
-)
-
-// MarshalJSON implements the `json.Marshaler` interface to ensure the compatibility.
-func (t RedactInfoLogType) MarshalJSON() ([]byte, error) {
-	switch t {
-	case RedactInfoLogON:
-		return json.Marshal(true)
-	case RedactInfoLogMarker:
-		return json.Marshal("MARKER")
-	default:
-	}
-	return json.Marshal(false)
-}
-
-const invalidRedactInfoLogTypeErrMsg = `the "redact-info-log" value is invalid; it should be either false, true, or "MARKER"`
-
-// UnmarshalJSON implements the `json.Marshaler` interface to ensure the compatibility.
-func (t *RedactInfoLogType) UnmarshalJSON(data []byte) error {
-	var s string
-	err := json.Unmarshal(data, &s)
-	if err == nil && strings.ToUpper(s) == "MARKER" {
-		*t = RedactInfoLogMarker
-		return nil
-	}
-	var b bool
-	err = json.Unmarshal(data, &b)
-	if err != nil {
-		return errors.New(invalidRedactInfoLogTypeErrMsg)
-	}
-	if b {
-		*t = RedactInfoLogON
-	} else {
-		*t = RedactInfoLogOFF
-	}
-	return nil
-}
-
-// UnmarshalTOML implements the `toml.Unmarshaler` interface to ensure the compatibility.
-func (t *RedactInfoLogType) UnmarshalTOML(data any) error {
-	switch v := data.(type) {
-	case bool:
-		if v {
-			*t = RedactInfoLogON
-		} else {
-			*t = RedactInfoLogOFF
-		}
-		return nil
-	case string:
-		if strings.ToUpper(v) == "MARKER" {
-			*t = RedactInfoLogMarker
-			return nil
-		}
-		return errors.New(invalidRedactInfoLogTypeErrMsg)
-	default:
-	}
-	return errors.New(invalidRedactInfoLogTypeErrMsg)
-}
-
 var (
-	curRedactType atomic.Value
+	enabledRedactLog atomic.Value
 )
 
 func init() {
-	setRedactType(RedactInfoLogOFF)
+	SetRedactLog(false)
 }
 
-func getRedactType() RedactInfoLogType {
-	return curRedactType.Load().(RedactInfoLogType)
+// IsRedactLogEnabled indicates whether the log desensitization is enabled
+func IsRedactLogEnabled() bool {
+	return enabledRedactLog.Load().(bool)
 }
 
-func setRedactType(redactInfoLogType RedactInfoLogType) {
-	curRedactType.Store(redactInfoLogType)
-}
-
-const (
-	leftMark  = '‹'
-	rightMark = '›'
-)
-
-func redactInfo(input string) string {
-	res := &strings.Builder{}
-	res.Grow(len(input) + 2)
-	_, _ = res.WriteRune(leftMark)
-	for _, c := range input {
-		// Double the mark character if it is already in the input string.
-		// to avoid the ambiguity of the redacted content.
-		if c == leftMark || c == rightMark {
-			_, _ = res.WriteRune(c)
-			_, _ = res.WriteRune(c)
-		} else {
-			_, _ = res.WriteRune(c)
-		}
-	}
-	_, _ = res.WriteRune(rightMark)
-	return res.String()
+// SetRedactLog sets enabledRedactLog
+func SetRedactLog(enabled bool) {
+	enabledRedactLog.Store(enabled)
 }
 
 // ZapRedactByteString receives []byte argument and return omitted information zap.Field if redact log enabled
@@ -217,48 +123,34 @@ func ZapRedactStringer(key string, arg fmt.Stringer) zap.Field {
 
 // RedactBytes receives []byte argument and return omitted information if redact log enabled
 func RedactBytes(arg []byte) []byte {
-	switch getRedactType() {
-	case RedactInfoLogON:
+	if IsRedactLogEnabled() {
 		return []byte("?")
-	case RedactInfoLogMarker:
-		// Use unsafe conversion to avoid copy.
-		return []byte(redactInfo(string(arg)))
-	default:
 	}
 	return arg
 }
 
 // RedactString receives string argument and return omitted information if redact log enabled
 func RedactString(arg string) string {
-	switch getRedactType() {
-	case RedactInfoLogON:
+	if IsRedactLogEnabled() {
 		return "?"
-	case RedactInfoLogMarker:
-		return redactInfo(arg)
-	default:
 	}
 	return arg
 }
 
 // RedactStringer receives stringer argument and return omitted information if redact log enabled
 func RedactStringer(arg fmt.Stringer) fmt.Stringer {
-	switch getRedactType() {
-	case RedactInfoLogON:
-		return &redactedStringer{"?"}
-	case RedactInfoLogMarker:
-		return &redactedStringer{redactInfo(arg.String())}
-	default:
+	if IsRedactLogEnabled() {
+		return stringer{}
 	}
 	return arg
 }
 
-type redactedStringer struct {
-	content string
+type stringer struct {
 }
 
 // String implement fmt.Stringer
-func (rs *redactedStringer) String() string {
-	return rs.content
+func (s stringer) String() string {
+	return "?"
 }
 
 // CondUint32 constructs a field with the given key and value conditionally.

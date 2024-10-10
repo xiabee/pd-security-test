@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/utils/apiutil"
@@ -71,10 +70,9 @@ func (suite *minResolvedTSTestSuite) TearDownSuite() {
 }
 
 func (suite *minResolvedTSTestSuite) TestMinResolvedTS() {
-	re := suite.Require()
 	// case1: default run job
 	interval := suite.svr.GetRaftCluster().GetPDServerConfig().MinResolvedTSPersistenceInterval
-	suite.checkMinResolvedTS(re, &minResolvedTS{
+	suite.checkMinResolvedTS(&minResolvedTS{
 		MinResolvedTS:   0,
 		IsRealTime:      true,
 		PersistInterval: interval,
@@ -82,7 +80,7 @@ func (suite *minResolvedTSTestSuite) TestMinResolvedTS() {
 	// case2: stop run job
 	zero := typeutil.Duration{Duration: 0}
 	suite.setMinResolvedTSPersistenceInterval(zero)
-	suite.checkMinResolvedTS(re, &minResolvedTS{
+	suite.checkMinResolvedTS(&minResolvedTS{
 		MinResolvedTS:   0,
 		IsRealTime:      false,
 		PersistInterval: zero,
@@ -93,7 +91,7 @@ func (suite *minResolvedTSTestSuite) TestMinResolvedTS() {
 	suite.Eventually(func() bool {
 		return interval == suite.svr.GetRaftCluster().GetPDServerConfig().MinResolvedTSPersistenceInterval
 	}, time.Second*10, time.Millisecond*20)
-	suite.checkMinResolvedTS(re, &minResolvedTS{
+	suite.checkMinResolvedTS(&minResolvedTS{
 		MinResolvedTS:   0,
 		IsRealTime:      true,
 		PersistInterval: interval,
@@ -101,7 +99,7 @@ func (suite *minResolvedTSTestSuite) TestMinResolvedTS() {
 	// case4: set min resolved ts
 	ts := uint64(233)
 	suite.setAllStoresMinResolvedTS(ts)
-	suite.checkMinResolvedTS(re, &minResolvedTS{
+	suite.checkMinResolvedTS(&minResolvedTS{
 		MinResolvedTS:   ts,
 		IsRealTime:      true,
 		PersistInterval: interval,
@@ -109,13 +107,13 @@ func (suite *minResolvedTSTestSuite) TestMinResolvedTS() {
 	// case5: stop persist and return last persist value when interval is 0
 	interval = typeutil.Duration{Duration: 0}
 	suite.setMinResolvedTSPersistenceInterval(interval)
-	suite.checkMinResolvedTS(re, &minResolvedTS{
+	suite.checkMinResolvedTS(&minResolvedTS{
 		MinResolvedTS:   ts,
 		IsRealTime:      false,
 		PersistInterval: interval,
 	})
 	suite.setAllStoresMinResolvedTS(ts)
-	suite.checkMinResolvedTS(re, &minResolvedTS{
+	suite.checkMinResolvedTS(&minResolvedTS{
 		MinResolvedTS:   ts, // last persist value
 		IsRealTime:      false,
 		PersistInterval: interval,
@@ -123,7 +121,6 @@ func (suite *minResolvedTSTestSuite) TestMinResolvedTS() {
 }
 
 func (suite *minResolvedTSTestSuite) TestMinResolvedTSByStores() {
-	re := suite.Require()
 	// run job.
 	interval := typeutil.Duration{Duration: suite.defaultInterval}
 	suite.setMinResolvedTSPersistenceInterval(interval)
@@ -145,7 +142,7 @@ func (suite *minResolvedTSTestSuite) TestMinResolvedTSByStores() {
 
 		testStoresID = append(testStoresID, strconv.Itoa(i))
 	}
-	suite.checkMinResolvedTSByStores(re, &minResolvedTS{
+	suite.checkMinResolvedTSByStores(&minResolvedTS{
 		MinResolvedTS:       234,
 		IsRealTime:          true,
 		PersistInterval:     interval,
@@ -154,7 +151,7 @@ func (suite *minResolvedTSTestSuite) TestMinResolvedTSByStores() {
 
 	// set all stores min resolved ts.
 	testStoresIDStr := strings.Join(testStoresID, ",")
-	suite.checkMinResolvedTSByStores(re, &minResolvedTS{
+	suite.checkMinResolvedTSByStores(&minResolvedTS{
 		MinResolvedTS:       234,
 		IsRealTime:          true,
 		PersistInterval:     interval,
@@ -165,7 +162,7 @@ func (suite *minResolvedTSTestSuite) TestMinResolvedTSByStores() {
 	testStoresID = testStoresID[:len(testStoresID)-1]
 	testStoresIDStr = strings.Join(testStoresID, ",")
 	delete(testMap, uint64(suite.storesNum))
-	suite.checkMinResolvedTSByStores(re, &minResolvedTS{
+	suite.checkMinResolvedTSByStores(&minResolvedTS{
 		MinResolvedTS:       234,
 		IsRealTime:          true,
 		PersistInterval:     interval,
@@ -186,28 +183,28 @@ func (suite *minResolvedTSTestSuite) setAllStoresMinResolvedTS(ts uint64) {
 	}
 }
 
-func (suite *minResolvedTSTestSuite) checkMinResolvedTS(re *require.Assertions, expect *minResolvedTS) {
+func (suite *minResolvedTSTestSuite) checkMinResolvedTS(expect *minResolvedTS) {
 	suite.Eventually(func() bool {
 		res, err := testDialClient.Get(suite.url)
-		re.NoError(err)
+		suite.NoError(err)
 		defer res.Body.Close()
 		listResp := &minResolvedTS{}
 		err = apiutil.ReadJSON(res.Body, listResp)
-		re.NoError(err)
-		re.Nil(listResp.StoresMinResolvedTS)
+		suite.NoError(err)
+		suite.Nil(listResp.StoresMinResolvedTS)
 		return reflect.DeepEqual(expect, listResp)
 	}, time.Second*10, time.Millisecond*20)
 }
 
-func (suite *minResolvedTSTestSuite) checkMinResolvedTSByStores(re *require.Assertions, expect *minResolvedTS, scope string) {
+func (suite *minResolvedTSTestSuite) checkMinResolvedTSByStores(expect *minResolvedTS, scope string) {
 	suite.Eventually(func() bool {
 		url := fmt.Sprintf("%s?scope=%s", suite.url, scope)
 		res, err := testDialClient.Get(url)
-		re.NoError(err)
+		suite.NoError(err)
 		defer res.Body.Close()
 		listResp := &minResolvedTS{}
 		err = apiutil.ReadJSON(res.Body, listResp)
-		re.NoError(err)
+		suite.NoError(err)
 		return reflect.DeepEqual(expect, listResp)
 	}, time.Second*10, time.Millisecond*20)
 }

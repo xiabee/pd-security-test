@@ -15,8 +15,6 @@
 package operator
 
 import (
-	"container/heap"
-	"sync"
 	"time"
 )
 
@@ -27,27 +25,22 @@ type operatorWithTime struct {
 
 type operatorQueue []*operatorWithTime
 
-// Len implements heap.Interface.
 func (opn operatorQueue) Len() int { return len(opn) }
 
-// Less implements heap.Interface.
 func (opn operatorQueue) Less(i, j int) bool {
 	return opn[i].time.Before(opn[j].time)
 }
 
-// Swap implements heap.Interface.
 func (opn operatorQueue) Swap(i, j int) {
 	opn[i], opn[j] = opn[j], opn[i]
 }
 
-// Push implements heap.Interface.
-func (opn *operatorQueue) Push(x any) {
+func (opn *operatorQueue) Push(x interface{}) {
 	item := x.(*operatorWithTime)
 	*opn = append(*opn, item)
 }
 
-// Pop implements heap.Interface.
-func (opn *operatorQueue) Pop() any {
+func (opn *operatorQueue) Pop() interface{} {
 	old := *opn
 	n := len(old)
 	if n == 0 {
@@ -56,35 +49,4 @@ func (opn *operatorQueue) Pop() any {
 	item := old[n-1]
 	*opn = old[0 : n-1]
 	return item
-}
-
-type concurrentHeapOpQueue struct {
-	sync.Mutex
-	heap operatorQueue
-}
-
-func newConcurrentHeapOpQueue() *concurrentHeapOpQueue {
-	return &concurrentHeapOpQueue{heap: make(operatorQueue, 0)}
-}
-
-func (ch *concurrentHeapOpQueue) len() int {
-	ch.Lock()
-	defer ch.Unlock()
-	return len(ch.heap)
-}
-
-func (ch *concurrentHeapOpQueue) push(x *operatorWithTime) {
-	ch.Lock()
-	defer ch.Unlock()
-	heap.Push(&ch.heap, x)
-}
-
-func (ch *concurrentHeapOpQueue) pop() (*operatorWithTime, bool) {
-	ch.Lock()
-	defer ch.Unlock()
-	if len(ch.heap) == 0 {
-		return nil, false
-	}
-	x := heap.Pop(&ch.heap).(*operatorWithTime)
-	return x, true
 }

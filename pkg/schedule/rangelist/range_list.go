@@ -19,11 +19,11 @@ import (
 	"sort"
 )
 
-type compareFunc func(a, b any) int
+type compareFunc func(a, b interface{}) int
 
 type segment struct {
 	startKey []byte
-	data     []any
+	data     []interface{}
 }
 
 // List manages a list of key ranges.
@@ -37,12 +37,12 @@ func (l List) Len() int {
 }
 
 // Get returns key and items at the position.
-func (l List) Get(i int) ([]byte, []any) {
+func (l List) Get(i int) ([]byte, []interface{}) {
 	return l.segments[i].startKey, l.segments[i].data
 }
 
 // GetDataByKey returns position and items by key.
-func (l List) GetDataByKey(key []byte) (index int, data []any) {
+func (l List) GetDataByKey(key []byte) (index int, data []interface{}) {
 	i := sort.Search(len(l.segments), func(i int) bool {
 		return bytes.Compare(l.segments[i].startKey, key) > 0
 	})
@@ -53,7 +53,7 @@ func (l List) GetDataByKey(key []byte) (index int, data []any) {
 }
 
 // GetData returns position and items by key range.
-func (l List) GetData(start, end []byte) (index int, data []any) {
+func (l List) GetData(start, end []byte) (index int, data []interface{}) {
 	i := sort.Search(len(l.segments), func(i int) bool {
 		return bytes.Compare(l.segments[i].startKey, start) > 0
 	})

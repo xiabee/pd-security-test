@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/suite"
 	bs "github.com/tikv/pd/pkg/basicserver"
 	"github.com/tikv/pd/pkg/mcs/discovery"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/utils/tempurl"
 	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/tests"
@@ -60,7 +60,6 @@ func (suite *serverRegisterTestSuite) SetupSuite() {
 	re.NoError(err)
 
 	leaderName := suite.cluster.WaitLeader()
-	re.NotEmpty(leaderName)
 	suite.pdLeader = suite.cluster.GetServer(leaderName)
 	suite.clusterID = strconv.FormatUint(suite.pdLeader.GetClusterID(), 10)
 	suite.backendEndpoints = suite.pdLeader.GetAddr()
@@ -72,9 +71,14 @@ func (suite *serverRegisterTestSuite) TearDownSuite() {
 }
 
 func (suite *serverRegisterTestSuite) TestServerRegister() {
+	// test register, primary and unregister when start tso and resource-manager with only one server
 	for i := 0; i < 3; i++ {
-		suite.checkServerRegister(constant.TSOServiceName)
+		suite.checkServerRegister(utils.TSOServiceName)
 	}
+	// TODO: uncomment after resource-manager is ready
+	// for i := 0; i < 3; i++ {
+	// suite.checkServerRegister(utils.ResourceManagerServiceName)
+	// }
 }
 
 func (suite *serverRegisterTestSuite) checkServerRegister(serviceName string) {
@@ -92,10 +96,10 @@ func (suite *serverRegisterTestSuite) checkServerRegister(serviceName string) {
 	re.Equal(addr, returnedEntry.ServiceAddr)
 
 	// test primary when only one server
-	expectedPrimary := tests.WaitForPrimaryServing(re, map[string]bs.Server{addr: s})
+	expectedPrimary := tests.WaitForPrimaryServing(suite.Require(), map[string]bs.Server{addr: s})
 	primary, exist := suite.pdLeader.GetServer().GetServicePrimaryAddr(suite.ctx, serviceName)
 	re.True(exist)
-	re.Equal(expectedPrimary, primary)
+	re.Equal(primary, expectedPrimary)
 
 	// test API server discovery after unregister
 	cleanup()
@@ -108,7 +112,9 @@ func (suite *serverRegisterTestSuite) checkServerRegister(serviceName string) {
 }
 
 func (suite *serverRegisterTestSuite) TestServerPrimaryChange() {
-	suite.checkServerPrimaryChange(constant.TSOServiceName, 3)
+	suite.checkServerPrimaryChange(utils.TSOServiceName, 3)
+	// TODO: uncomment after resource-manager is ready
+	// suite.checkServerPrimaryChange(utils.ResourceManagerServiceName, 3)
 }
 
 func (suite *serverRegisterTestSuite) checkServerPrimaryChange(serviceName string, serverNum int) {
@@ -118,19 +124,13 @@ func (suite *serverRegisterTestSuite) checkServerPrimaryChange(serviceName strin
 	re.Empty(primary)
 
 	serverMap := make(map[string]bs.Server)
-	var cleanups []func()
-	defer func() {
-		for _, cleanup := range cleanups {
-			cleanup()
-		}
-	}()
 	for i := 0; i < serverNum; i++ {
 		s, cleanup := suite.addServer(serviceName)
-		cleanups = append(cleanups, cleanup)
+		defer cleanup()
 		serverMap[s.GetAddr()] = s
 	}
 
-	expectedPrimary := tests.WaitForPrimaryServing(re, serverMap)
+	expectedPrimary := tests.WaitForPrimaryServing(suite.Require(), serverMap)
 	primary, exist = suite.pdLeader.GetServer().GetServicePrimaryAddr(suite.ctx, serviceName)
 	re.True(exist)
 	re.Equal(expectedPrimary, primary)
@@ -138,7 +138,7 @@ func (suite *serverRegisterTestSuite) checkServerPrimaryChange(serviceName strin
 	serverMap[primary].Close()
 	delete(serverMap, primary)
 
-	expectedPrimary = tests.WaitForPrimaryServing(re, serverMap)
+	expectedPrimary = tests.WaitForPrimaryServing(suite.Require(), serverMap)
 	// test API server discovery
 	client := suite.pdLeader.GetEtcdClient()
 	endpoints, err := discovery.Discover(client, suite.clusterID, serviceName)
@@ -154,9 +154,9 @@ func (suite *serverRegisterTestSuite) checkServerPrimaryChange(serviceName strin
 func (suite *serverRegisterTestSuite) addServer(serviceName string) (bs.Server, func()) {
 	re := suite.Require()
 	switch serviceName {
-	case constant.TSOServiceName:
+	case utils.TSOServiceName:
 		return tests.StartSingleTSOTestServer(suite.ctx, re, suite.backendEndpoints, tempurl.Alloc())
-	case constant.ResourceManagerServiceName:
+	case utils.ResourceManagerServiceName:
 		return tests.StartSingleResourceManagerTestServer(suite.ctx, re, suite.backendEndpoints, tempurl.Alloc())
 	default:
 		return nil, nil

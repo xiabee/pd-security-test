@@ -28,6 +28,11 @@ type LearnerChecker struct {
 	cluster sche.CheckerCluster
 }
 
+var (
+	// WithLabelValues is a heavy operation, define variable to avoid call it every time.
+	learnerCheckerPausedCounter = checkerCounter.WithLabelValues("learner_checker", "paused")
+)
+
 // NewLearnerChecker creates a learner checker.
 func NewLearnerChecker(cluster sche.CheckerCluster) *LearnerChecker {
 	return &LearnerChecker{
@@ -36,13 +41,13 @@ func NewLearnerChecker(cluster sche.CheckerCluster) *LearnerChecker {
 }
 
 // Check verifies a region's role, creating an Operator if need.
-func (c *LearnerChecker) Check(region *core.RegionInfo) *operator.Operator {
-	if c.IsPaused() {
+func (l *LearnerChecker) Check(region *core.RegionInfo) *operator.Operator {
+	if l.IsPaused() {
 		learnerCheckerPausedCounter.Inc()
 		return nil
 	}
 	for _, p := range region.GetLearners() {
-		op, err := operator.CreatePromoteLearnerOperator("promote-learner", c.cluster, region, p)
+		op, err := operator.CreatePromoteLearnerOperator("promote-learner", l.cluster, region, p)
 		if err != nil {
 			log.Debug("fail to create promote learner operator", errs.ZapError(err))
 			continue

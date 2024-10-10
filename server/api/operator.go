@@ -66,8 +66,7 @@ func (h *operatorHandler) GetOperatorsByRegion(w http.ResponseWriter, r *http.Re
 
 // @Tags     operator
 // @Summary  List pending operators.
-// @Param    kind   query  string  false  "Specify the operator kind."  Enums(admin, leader, region)
-// @Param    object query  bool    false  "Whether to return as JSON object."
+// @Param    kind  query  string  false  "Specify the operator kind."  Enums(admin, leader, region)
 // @Produce  json
 // @Success  200  {array}   operator.Operator
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
@@ -79,7 +78,6 @@ func (h *operatorHandler) GetOperators(w http.ResponseWriter, r *http.Request) {
 	)
 
 	kinds, ok := r.URL.Query()["kind"]
-	_, objectFlag := r.URL.Query()["object"]
 	if !ok {
 		results, err = h.Handler.GetOperators()
 	} else {
@@ -90,30 +88,7 @@ func (h *operatorHandler) GetOperators(w http.ResponseWriter, r *http.Request) {
 		h.r.JSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if objectFlag {
-		objResults := make([]*operator.OpObject, len(results))
-		for i, op := range results {
-			objResults[i] = op.ToJSONObject()
-		}
-		h.r.JSON(w, http.StatusOK, objResults)
-	} else {
-		h.r.JSON(w, http.StatusOK, results)
-	}
-}
-
-// @Tags     operator
-// @Summary  Cancel all pending operators.
-// @Produce  json
-// @Success  200  {string}  string  "All pending operators are canceled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router   /operators [delete]
-func (h *operatorHandler) DeleteOperators(w http.ResponseWriter, _ *http.Request) {
-	if err := h.RemoveOperators(); err != nil {
-		h.r.JSON(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	h.r.JSON(w, http.StatusOK, "All pending operators are canceled.")
+	h.r.JSON(w, http.StatusOK, results)
 }
 
 // FIXME: details of input json body params
@@ -127,7 +102,7 @@ func (h *operatorHandler) DeleteOperators(w http.ResponseWriter, _ *http.Request
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /operators [post]
 func (h *operatorHandler) CreateOperator(w http.ResponseWriter, r *http.Request) {
-	var input map[string]any
+	var input map[string]interface{}
 	if err := apiutil.ReadJSONRespondError(h.r, w, r.Body, &input); err != nil {
 		return
 	}

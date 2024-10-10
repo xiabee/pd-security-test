@@ -51,7 +51,7 @@ func (p *BalanceSchedulerPlan) GetStep() int {
 }
 
 // SetResource is used to set resource for current step.
-func (p *BalanceSchedulerPlan) SetResource(resource any) {
+func (p *BalanceSchedulerPlan) SetResource(resource interface{}) {
 	switch p.Step {
 	// for balance-region/leader scheduler, the first step is selecting stores as source candidates.
 	case pickSource:
@@ -66,7 +66,7 @@ func (p *BalanceSchedulerPlan) SetResource(resource any) {
 }
 
 // SetResourceWithStep is used to set resource for specific step.
-func (p *BalanceSchedulerPlan) SetResourceWithStep(resource any, step int) {
+func (p *BalanceSchedulerPlan) SetResourceWithStep(resource interface{}, step int) {
 	p.Step = step
 	p.SetResource(resource)
 }

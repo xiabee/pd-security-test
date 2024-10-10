@@ -65,24 +65,24 @@ func newSolver(basePlan *plan.BalanceSchedulerPlan, kind constant.ScheduleKind, 
 	}
 }
 
-func (p *solver) getOpInfluence(storeID uint64) int64 {
+func (p *solver) GetOpInfluence(storeID uint64) int64 {
 	return p.opInfluence.GetStoreInfluence(storeID).ResourceProperty(p.kind)
 }
 
-func (p *solver) sourceStoreID() uint64 {
+func (p *solver) SourceStoreID() uint64 {
 	return p.Source.GetID()
 }
 
-func (p *solver) sourceMetricLabel() string {
-	return strconv.FormatUint(p.sourceStoreID(), 10)
+func (p *solver) SourceMetricLabel() string {
+	return strconv.FormatUint(p.SourceStoreID(), 10)
 }
 
-func (p *solver) targetStoreID() uint64 {
+func (p *solver) TargetStoreID() uint64 {
 	return p.Target.GetID()
 }
 
-func (p *solver) targetMetricLabel() string {
-	return strconv.FormatUint(p.targetStoreID(), 10)
+func (p *solver) TargetMetricLabel() string {
+	return strconv.FormatUint(p.TargetStoreID(), 10)
 }
 
 func (p *solver) sourceStoreScore(scheduleName string) float64 {
@@ -90,7 +90,7 @@ func (p *solver) sourceStoreScore(scheduleName string) float64 {
 	tolerantResource := p.getTolerantResource()
 	// to avoid schedule too much, if A's core greater than B and C a little
 	// we want that A should be moved out one region not two
-	influence := p.getOpInfluence(sourceID)
+	influence := p.GetOpInfluence(sourceID)
 	if influence > 0 {
 		influence = -influence
 	}
@@ -121,7 +121,7 @@ func (p *solver) targetStoreScore(scheduleName string) float64 {
 	tolerantResource := p.getTolerantResource()
 	// to avoid schedule call back
 	// A->B, A's influence is negative, so A will be target, C may move region to A
-	influence := p.getOpInfluence(targetID)
+	influence := p.GetOpInfluence(targetID)
 	if influence < 0 {
 		influence = -influence
 	}
@@ -286,7 +286,7 @@ func sliceLoadCmp(cmps ...storeLoadCmp) storeLoadCmp {
 }
 
 // stLdRankCmp returns a cmp that compares the two loads with discretized data.
-// For example, if the rank function discretize data by step 10 , the load 11 and 19 will be considered equal.
+// For example, if the rank function discretice data by step 10 , the load 11 and 19 will be considered equal.
 func stLdRankCmp(dim func(ld *statistics.StoreLoad) float64, rank func(value float64) int64) storeLoadCmp {
 	return func(ld1, ld2 *statistics.StoreLoad) int {
 		return rankCmp(dim(ld1), dim(ld2), rank)
@@ -358,7 +358,7 @@ func newRetryQuota() *retryQuota {
 	}
 }
 
-func (q *retryQuota) getLimit(store *core.StoreInfo) int {
+func (q *retryQuota) GetLimit(store *core.StoreInfo) int {
 	id := store.GetID()
 	if limit, ok := q.limits[id]; ok {
 		return limit
@@ -367,19 +367,19 @@ func (q *retryQuota) getLimit(store *core.StoreInfo) int {
 	return q.initialLimit
 }
 
-func (q *retryQuota) resetLimit(store *core.StoreInfo) {
+func (q *retryQuota) ResetLimit(store *core.StoreInfo) {
 	q.limits[store.GetID()] = q.initialLimit
 }
 
-func (q *retryQuota) attenuate(store *core.StoreInfo) {
-	newLimit := q.getLimit(store) / q.attenuation
+func (q *retryQuota) Attenuate(store *core.StoreInfo) {
+	newLimit := q.GetLimit(store) / q.attenuation
 	if newLimit < q.minLimit {
 		newLimit = q.minLimit
 	}
 	q.limits[store.GetID()] = newLimit
 }
 
-func (q *retryQuota) gc(keepStores []*core.StoreInfo) {
+func (q *retryQuota) GC(keepStores []*core.StoreInfo) {
 	set := make(map[uint64]struct{}, len(keepStores))
 	for _, store := range keepStores {
 		set[store.GetID()] = struct{}{}
@@ -387,24 +387,6 @@ func (q *retryQuota) gc(keepStores []*core.StoreInfo) {
 	for id := range q.limits {
 		if _, ok := set[id]; !ok {
 			delete(q.limits, id)
-		}
-	}
-}
-
-// pauseAndResumeLeaderTransfer checks the old and new store IDs, and pause or resume the leader transfer.
-func pauseAndResumeLeaderTransfer[T any](cluster *core.BasicCluster, old, new map[uint64]T) {
-	for id := range old {
-		if _, ok := new[id]; ok {
-			continue
-		}
-		cluster.ResumeLeaderTransfer(id)
-	}
-	for id := range new {
-		if _, ok := old[id]; ok {
-			continue
-		}
-		if err := cluster.PauseLeaderTransfer(id); err != nil {
-			log.Error("pause leader transfer failed", zap.Uint64("store-id", id), errs.ZapError(err))
 		}
 	}
 }

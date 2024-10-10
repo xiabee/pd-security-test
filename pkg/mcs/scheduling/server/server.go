@@ -20,8 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime"
-	"strings"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -37,7 +36,6 @@ import (
 	"github.com/pingcap/sysutil"
 	"github.com/spf13/cobra"
 	bs "github.com/tikv/pd/pkg/basicserver"
-	"github.com/tikv/pd/pkg/cache"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/mcs/discovery"
@@ -46,18 +44,14 @@ import (
 	"github.com/tikv/pd/pkg/mcs/scheduling/server/rule"
 	"github.com/tikv/pd/pkg/mcs/server"
 	"github.com/tikv/pd/pkg/mcs/utils"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/member"
 	"github.com/tikv/pd/pkg/schedule"
-	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/schedule/hbstream"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/storage/kv"
 	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/grpcutil"
-	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/memberutil"
 	"github.com/tikv/pd/pkg/utils/metricutil"
@@ -125,19 +119,9 @@ func (s *Server) GetAddr() string {
 	return s.cfg.ListenAddr
 }
 
-// GetAdvertiseListenAddr returns the advertise address of the server.
-func (s *Server) GetAdvertiseListenAddr() string {
-	return s.cfg.AdvertiseListenAddr
-}
-
 // GetBackendEndpoints returns the backend endpoints.
 func (s *Server) GetBackendEndpoints() string {
 	return s.cfg.BackendEndpoints
-}
-
-// GetParticipant returns the participant.
-func (s *Server) GetParticipant() *member.Participant {
-	return s.participant
 }
 
 // SetLogLevel sets log level.
@@ -152,15 +136,20 @@ func (s *Server) SetLogLevel(level string) error {
 }
 
 // Run runs the scheduling server.
-func (s *Server) Run() (err error) {
-	if err = utils.InitClient(s); err != nil {
-		return err
+func (s *Server) Run() error {
+	skipWaitAPIServiceReady := false
+	failpoint.Inject("skipWaitAPIServiceReady", func() {
+		skipWaitAPIServiceReady = true
+	})
+	if !skipWaitAPIServiceReady {
+		if err := utils.WaitAPIServiceReady(s); err != nil {
+			return err
+		}
 	}
 
-	if s.clusterID, s.serviceID, s.serviceRegister, err = utils.Register(s, constant.SchedulingServiceName); err != nil {
+	if err := utils.InitClient(s); err != nil {
 		return err
 	}
-
 	return s.startServer()
 }
 
@@ -179,7 +168,8 @@ func (s *Server) updateAPIServerMemberLoop() {
 	defer cancel()
 	ticker := time.NewTicker(memberUpdateInterval)
 	failpoint.Inject("fastUpdateMember", func() {
-		ticker.Reset(100 * time.Millisecond)
+		ticker.Stop()
+		ticker = time.NewTicker(100 * time.Millisecond)
 	})
 	defer ticker.Stop()
 	var curLeader uint64
@@ -194,16 +184,12 @@ func (s *Server) updateAPIServerMemberLoop() {
 		if !s.IsServing() {
 			continue
 		}
-		members, err := etcdutil.ListEtcdMembers(ctx, s.GetClient())
+		members, err := s.GetClient().MemberList(ctx)
 		if err != nil {
 			log.Warn("failed to list members", errs.ZapError(err))
 			continue
 		}
 		for _, ep := range members.Members {
-			if len(ep.GetClientURLs()) == 0 { // This member is not started yet.
-				log.Info("member is not started yet", zap.String("member-id", fmt.Sprintf("%x", ep.GetID())), errs.ZapError(err))
-				continue
-			}
 			status, err := s.GetClient().Status(ctx, ep.ClientURLs[0])
 			if err != nil {
 				log.Info("failed to get status of member", zap.String("member-id", fmt.Sprintf("%x", ep.ID)), zap.String("endpoint", ep.ClientURLs[0]), errs.ZapError(err))
@@ -213,11 +199,6 @@ func (s *Server) updateAPIServerMemberLoop() {
 				cc, err := s.GetDelegateClient(ctx, s.GetTLSConfig(), ep.ClientURLs[0])
 				if err != nil {
 					log.Info("failed to get delegate client", errs.ZapError(err))
-					continue
-				}
-				if !s.IsServing() {
-					// double check
-					break
 				}
 				if s.cluster.SwitchAPIServerLeader(pdpb.NewPDClient(cc)) {
 					if status.Leader != curLeader {
@@ -252,20 +233,6 @@ func (s *Server) primaryElectionLoop() {
 			// Watch will keep looping and never return unless the primary/leader has changed.
 			primary.Watch(s.serverLoopCtx)
 			log.Info("the scheduling primary has changed, try to re-campaign a primary")
-		}
-
-		// To make sure the expected primary(if existed) and new primary are on the same server.
-		expectedPrimary := utils.GetExpectedPrimaryFlag(s.GetClient(), s.participant.GetLeaderPath())
-		// skip campaign the primary if the expected primary is not empty and not equal to the current memberValue.
-		// expected primary ONLY SET BY `{service}/primary/transfer` API.
-		if len(expectedPrimary) > 0 && !strings.Contains(s.participant.MemberValue(), expectedPrimary) {
-			log.Info("skip campaigning of scheduling primary and check later",
-				zap.String("server-name", s.Name()),
-				zap.String("expected-primary-id", expectedPrimary),
-				zap.Uint64("member-id", s.participant.ID()),
-				zap.String("cur-member-value", s.participant.MemberValue()))
-			time.Sleep(200 * time.Millisecond)
-			continue
 		}
 
 		s.campaignLeader()
@@ -311,21 +278,11 @@ func (s *Server) campaignLeader() {
 			cb()
 		}
 	}()
-	// check expected primary and watch the primary.
-	exitPrimary := make(chan struct{})
-	lease, err := utils.KeepExpectedPrimaryAlive(ctx, s.GetClient(), exitPrimary,
-		s.cfg.LeaderLease, s.participant.GetLeaderPath(), s.participant.MemberValue(), constant.SchedulingServiceName)
-	if err != nil {
-		log.Error("prepare scheduling primary watch error", errs.ZapError(err))
-		return
-	}
-	s.participant.SetExpectedPrimaryLease(lease)
 	s.participant.EnableLeader()
-
 	member.ServiceMemberGauge.WithLabelValues(serviceName).Set(1)
 	log.Info("scheduling primary is ready to serve", zap.String("scheduling-primary-name", s.participant.Name()))
 
-	leaderTicker := time.NewTicker(constant.LeaderTickInterval)
+	leaderTicker := time.NewTicker(utils.LeaderTickInterval)
 	defer leaderTicker.Stop()
 
 	for {
@@ -339,9 +296,6 @@ func (s *Server) campaignLeader() {
 			// Server is closed and it should return nil.
 			log.Info("server is closed")
 			return
-		case <-exitPrimary:
-			log.Info("no longer be primary because primary have been updated, the scheduling primary will step down")
-			return
 		}
 	}
 }
@@ -354,13 +308,10 @@ func (s *Server) Close() {
 	}
 
 	log.Info("closing scheduling server ...")
-	if err := s.serviceRegister.Deregister(); err != nil {
-		log.Error("failed to deregister the service", errs.ZapError(err))
-	}
+	s.serviceRegister.Deregister()
 	utils.StopHTTPServer(s)
 	utils.StopGRPCServer(s)
 	s.GetListener().Close()
-	s.CloseClientConns()
 	s.serverLoopCancel()
 	s.serverLoopWg.Wait()
 
@@ -446,25 +397,29 @@ func (s *Server) GetLeaderListenUrls() []string {
 }
 
 func (s *Server) startServer() (err error) {
+	if s.clusterID, err = utils.InitClusterID(s.Context(), s.GetClient()); err != nil {
+		return err
+	}
+	log.Info("init cluster id", zap.Uint64("cluster-id", s.clusterID))
 	// The independent Scheduling service still reuses PD version info since PD and Scheduling are just
 	// different service modes provided by the same pd-server binary
-	bs.ServerInfoGauge.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
-	bs.ServerMaxProcsGauge.Set(float64(runtime.GOMAXPROCS(0)))
-	uniqueName := s.cfg.GetAdvertiseListenAddr()
+	serverInfo.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
+
+	uniqueName := s.cfg.ListenAddr
 	uniqueID := memberutil.GenerateUniqueID(uniqueName)
 	log.Info("joining primary election", zap.String("participant-name", uniqueName), zap.Uint64("participant-id", uniqueID))
-	s.participant = member.NewParticipant(s.GetClient(), constant.SchedulingServiceName)
+	s.participant = member.NewParticipant(s.GetClient(), utils.SchedulingServiceName)
 	p := &schedulingpb.Participant{
 		Name:       uniqueName,
 		Id:         uniqueID, // id is unique among all participants
-		ListenUrls: []string{s.cfg.GetAdvertiseListenAddr()},
+		ListenUrls: []string{s.cfg.AdvertiseListenAddr},
 	}
-	s.participant.InitInfo(p, keypath.SchedulingSvcRootPath(s.clusterID), constant.PrimaryKey, "primary election")
+	s.participant.InitInfo(p, endpoint.SchedulingSvcRootPath(s.clusterID), utils.PrimaryKey, "primary election")
 
 	s.service = &Service{Server: s}
 	s.AddServiceReadyCallback(s.startCluster)
 	s.AddServiceExitCallback(s.stopCluster)
-	if err := s.InitListener(s.GetTLSConfig(), s.cfg.GetListenAddr()); err != nil {
+	if err := s.InitListener(s.GetTLSConfig(), s.cfg.ListenAddr); err != nil {
 		return err
 	}
 
@@ -482,6 +437,17 @@ func (s *Server) startServer() (err error) {
 		cb()
 	}
 
+	// Server has started.
+	serializedEntry, err := s.serviceID.Serialize()
+	if err != nil {
+		return err
+	}
+	s.serviceRegister = discovery.NewServiceRegister(s.Context(), s.GetClient(), strconv.FormatUint(s.clusterID, 10),
+		utils.SchedulingServiceName, s.cfg.AdvertiseListenAddr, serializedEntry, discovery.DefaultLeaseInSeconds)
+	if err := s.serviceRegister.Register(); err != nil {
+		log.Error("failed to register the service", zap.String("service-name", utils.SchedulingServiceName), errs.ZapError(err))
+		return err
+	}
 	atomic.StoreInt64(&s.isRunning, 1)
 	return nil
 }
@@ -489,22 +455,16 @@ func (s *Server) startServer() (err error) {
 func (s *Server) startCluster(context.Context) error {
 	s.basicCluster = core.NewBasicCluster()
 	s.storage = endpoint.NewStorageEndpoint(kv.NewMemoryKV(), nil)
-	err := s.startMetaConfWatcher()
+	err := s.startWatcher()
 	if err != nil {
 		return err
 	}
-	s.hbStreams = hbstream.NewHeartbeatStreams(s.Context(), s.clusterID, constant.SchedulingServiceName, s.basicCluster)
+	s.hbStreams = hbstream.NewHeartbeatStreams(s.Context(), s.clusterID, utils.SchedulingServiceName, s.basicCluster)
 	s.cluster, err = NewCluster(s.Context(), s.persistConfig, s.storage, s.basicCluster, s.hbStreams, s.clusterID, s.checkMembershipCh)
 	if err != nil {
 		return err
 	}
-	// Inject the cluster components into the config watcher after the scheduler controller is created.
 	s.configWatcher.SetSchedulersController(s.cluster.GetCoordinator().GetSchedulersController())
-	// Start the rule watcher after the cluster is created.
-	err = s.startRuleWatcher()
-	if err != nil {
-		return err
-	}
 	s.cluster.StartBackgroundJobs()
 	return nil
 }
@@ -514,7 +474,7 @@ func (s *Server) stopCluster() {
 	s.stopWatcher()
 }
 
-func (s *Server) startMetaConfWatcher() (err error) {
+func (s *Server) startWatcher() (err error) {
 	s.metaWatcher, err = meta.NewWatcher(s.Context(), s.GetClient(), s.clusterID, s.basicCluster)
 	if err != nil {
 		return err
@@ -523,12 +483,7 @@ func (s *Server) startMetaConfWatcher() (err error) {
 	if err != nil {
 		return err
 	}
-	return err
-}
-
-func (s *Server) startRuleWatcher() (err error) {
-	s.ruleWatcher, err = rule.NewWatcher(s.Context(), s.GetClient(), s.clusterID, s.storage,
-		s.cluster.GetCoordinator().GetCheckerController(), s.cluster.GetRuleManager(), s.cluster.GetRegionLabeler())
+	s.ruleWatcher, err = rule.NewWatcher(s.Context(), s.GetClient(), s.clusterID, s.storage)
 	return err
 }
 
@@ -544,22 +499,13 @@ func (s *Server) GetPersistConfig() *config.PersistConfig {
 	return s.persistConfig
 }
 
-// GetConfig gets the config.
-func (s *Server) GetConfig() *config.Config {
-	cfg := s.cfg.Clone()
-	cfg.Schedule = *s.persistConfig.GetScheduleConfig().Clone()
-	cfg.Replication = *s.persistConfig.GetReplicationConfig().Clone()
-	cfg.ClusterVersion = *s.persistConfig.GetClusterVersion()
-	return cfg
-}
-
 // CreateServer creates the Server
 func CreateServer(ctx context.Context, cfg *config.Config) *Server {
 	svr := &Server{
 		BaseServer:        server.NewBaseServer(ctx),
 		DiagnosticsServer: sysutil.NewDiagnosticsServer(cfg.Log.File.Filename),
 		cfg:               cfg,
-		persistConfig:     config.NewPersistConfig(cfg, cache.NewStringTTL(ctx, sc.DefaultGCInterval, sc.DefaultTTL)),
+		persistConfig:     config.NewPersistConfig(cfg),
 		checkMembershipCh: make(chan struct{}, 1),
 	}
 	return svr
@@ -568,14 +514,10 @@ func CreateServer(ctx context.Context, cfg *config.Config) *Server {
 // CreateServerWrapper encapsulates the configuration/log/metrics initialization and create the server
 func CreateServerWrapper(cmd *cobra.Command, args []string) {
 	schedulers.Register()
-	err := cmd.Flags().Parse(args)
-	if err != nil {
-		cmd.Println(err)
-		return
-	}
+	cmd.Flags().Parse(args)
 	cfg := config.NewConfig()
 	flagSet := cmd.Flags()
-	err = cfg.Parse(flagSet)
+	err := cfg.Parse(flagSet)
 	defer logutil.LogPanic()
 
 	if err != nil {
@@ -599,7 +541,7 @@ func CreateServerWrapper(cmd *cobra.Command, args []string) {
 		log.Fatal("initialize logger error", errs.ZapError(err))
 	}
 	// Flushing any buffered log entries
-	log.Sync()
+	defer log.Sync()
 
 	versioninfo.Log(serviceName)
 	log.Info("scheduling service config", zap.Reflect("config", cfg))

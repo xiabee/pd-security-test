@@ -23,6 +23,7 @@ import (
 )
 
 func TestBytesToUint64(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	str := "\x00\x00\x00\x00\x00\x00\x03\xe8"
 	a, err := BytesToUint64([]byte(str))
@@ -31,6 +32,7 @@ func TestBytesToUint64(t *testing.T) {
 }
 
 func TestUint64ToBytes(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	var a uint64 = 1000
 	b := Uint64ToBytes(a)
@@ -39,6 +41,7 @@ func TestUint64ToBytes(t *testing.T) {
 }
 
 func TestJSONToUint64Slice(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	type testArray struct {
 		Array []uint64 `json:"array"`
@@ -47,7 +50,7 @@ func TestJSONToUint64Slice(t *testing.T) {
 		Array: []uint64{1, 2, 3},
 	}
 	bytes, _ := json.Marshal(a)
-	var jsonStr map[string]any
+	var jsonStr map[string]interface{}
 	err := json.Unmarshal(bytes, &jsonStr)
 	re.NoError(err)
 	// valid case
@@ -66,7 +69,7 @@ func TestJSONToUint64Slice(t *testing.T) {
 		Array: []string{"1", "2", "3"},
 	}
 	bytes, _ = json.Marshal(a1)
-	var jsonStr1 map[string]any
+	var jsonStr1 map[string]interface{}
 	err = json.Unmarshal(bytes, &jsonStr1)
 	re.NoError(err)
 	res, ok = JSONToUint64Slice(jsonStr1["array"])

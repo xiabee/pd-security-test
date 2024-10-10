@@ -26,16 +26,139 @@ import (
 	"github.com/pingcap/errcode"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/log"
+	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/core/storelimit"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/response"
 	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/utils/apiutil"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 )
+
+// MetaStore contains meta information about a store.
+type MetaStore struct {
+	*metapb.Store
+	StateName string `json:"state_name"`
+}
+
+// SlowTrend contains slow trend information about a store.
+type SlowTrend struct {
+	// CauseValue is the slow trend detecting raw input, it changes by the performance and pressure along time of the store.
+	// The value itself is not important, what matter is:
+	//   - The comparition result from store to store.
+	//   - The change magnitude along time (represented by CauseRate).
+	// Currently it's one of store's internal latency (duration of waiting in the task queue of raftstore.store).
+	CauseValue float64 `json:"cause_value"`
+	// CauseRate is for mesuring the change magnitude of CauseValue of the store,
+	//   - CauseRate > 0 means the store is become slower currently
+	//   - CauseRate < 0 means the store is become faster currently
+	//   - CauseRate == 0 means the store's performance and pressure does not have significant changes
+	CauseRate float64 `json:"cause_rate"`
+	// ResultValue is the current gRPC QPS of the store.
+	ResultValue float64 `json:"result_value"`
+	// ResultRate is for mesuring the change magnitude of ResultValue of the store.
+	ResultRate float64 `json:"result_rate"`
+}
+
+// StoreStatus contains status about a store.
+type StoreStatus struct {
+	Capacity           typeutil.ByteSize  `json:"capacity"`
+	Available          typeutil.ByteSize  `json:"available"`
+	UsedSize           typeutil.ByteSize  `json:"used_size"`
+	LeaderCount        int                `json:"leader_count"`
+	LeaderWeight       float64            `json:"leader_weight"`
+	LeaderScore        float64            `json:"leader_score"`
+	LeaderSize         int64              `json:"leader_size"`
+	RegionCount        int                `json:"region_count"`
+	RegionWeight       float64            `json:"region_weight"`
+	RegionScore        float64            `json:"region_score"`
+	RegionSize         int64              `json:"region_size"`
+	LearnerCount       int                `json:"learner_count,omitempty"`
+	WitnessCount       int                `json:"witness_count,omitempty"`
+	SlowScore          uint64             `json:"slow_score,omitempty"`
+	SlowTrend          *SlowTrend         `json:"slow_trend,omitempty"`
+	SendingSnapCount   uint32             `json:"sending_snap_count,omitempty"`
+	ReceivingSnapCount uint32             `json:"receiving_snap_count,omitempty"`
+	IsBusy             bool               `json:"is_busy,omitempty"`
+	StartTS            *time.Time         `json:"start_ts,omitempty"`
+	LastHeartbeatTS    *time.Time         `json:"last_heartbeat_ts,omitempty"`
+	Uptime             *typeutil.Duration `json:"uptime,omitempty"`
+}
+
+// StoreInfo contains information about a store.
+type StoreInfo struct {
+	Store  *MetaStore   `json:"store"`
+	Status *StoreStatus `json:"status"`
+}
+
+const (
+	disconnectedName = "Disconnected"
+	downStateName    = "Down"
+)
+
+func newStoreInfo(opt *sc.ScheduleConfig, store *core.StoreInfo) *StoreInfo {
+	var slowTrend *SlowTrend
+	coreSlowTrend := store.GetSlowTrend()
+	if coreSlowTrend != nil {
+		slowTrend = &SlowTrend{coreSlowTrend.CauseValue, coreSlowTrend.CauseRate, coreSlowTrend.ResultValue, coreSlowTrend.ResultRate}
+	}
+	s := &StoreInfo{
+		Store: &MetaStore{
+			Store:     store.GetMeta(),
+			StateName: store.GetState().String(),
+		},
+		Status: &StoreStatus{
+			Capacity:           typeutil.ByteSize(store.GetCapacity()),
+			Available:          typeutil.ByteSize(store.GetAvailable()),
+			UsedSize:           typeutil.ByteSize(store.GetUsedSize()),
+			LeaderCount:        store.GetLeaderCount(),
+			LeaderWeight:       store.GetLeaderWeight(),
+			LeaderScore:        store.LeaderScore(constant.StringToSchedulePolicy(opt.LeaderSchedulePolicy), 0),
+			LeaderSize:         store.GetLeaderSize(),
+			RegionCount:        store.GetRegionCount(),
+			RegionWeight:       store.GetRegionWeight(),
+			RegionScore:        store.RegionScore(opt.RegionScoreFormulaVersion, opt.HighSpaceRatio, opt.LowSpaceRatio, 0),
+			RegionSize:         store.GetRegionSize(),
+			LearnerCount:       store.GetLearnerCount(),
+			WitnessCount:       store.GetWitnessCount(),
+			SlowScore:          store.GetSlowScore(),
+			SlowTrend:          slowTrend,
+			SendingSnapCount:   store.GetSendingSnapCount(),
+			ReceivingSnapCount: store.GetReceivingSnapCount(),
+			IsBusy:             store.IsBusy(),
+		},
+	}
+
+	if store.GetStoreStats() != nil {
+		startTS := store.GetStartTime()
+		s.Status.StartTS = &startTS
+	}
+	if lastHeartbeat := store.GetLastHeartbeatTS(); !lastHeartbeat.IsZero() {
+		s.Status.LastHeartbeatTS = &lastHeartbeat
+	}
+	if upTime := store.GetUptime(); upTime > 0 {
+		duration := typeutil.NewDuration(upTime)
+		s.Status.Uptime = &duration
+	}
+
+	if store.GetState() == metapb.StoreState_Up {
+		if store.DownTime() > opt.MaxStoreDownTime.Duration {
+			s.Store.StateName = downStateName
+		} else if store.IsDisconnected() {
+			s.Store.StateName = disconnectedName
+		}
+	}
+	return s
+}
+
+// StoresInfo records stores' info.
+type StoresInfo struct {
+	Count  int          `json:"count"`
+	Stores []*StoreInfo `json:"stores"`
+}
 
 type storeHandler struct {
 	handler *server.Handler
@@ -49,14 +172,14 @@ func newStoreHandler(handler *server.Handler, rd *render.Render) *storeHandler {
 	}
 }
 
-// @Tags        store
+// @Tags     store
 // @Summary  Get a store's information.
 // @Param    id  path  integer  true  "Store Id"
-// @Produce     json
-// @Success  200  {object}  response.StoreInfo
+// @Produce  json
+// @Success  200  {object}  StoreInfo
 // @Failure  400  {string}  string  "The input is invalid."
 // @Failure  404  {string}  string  "The store does not exist."
-// @Failure     500  {string}  string  "PD server failed to proceed the request."
+// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /store/{id} [get]
 func (h *storeHandler) GetStore(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
@@ -73,7 +196,7 @@ func (h *storeHandler) GetStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	storeInfo := response.BuildStoreInfo(h.handler.GetScheduleConfig(), store)
+	storeInfo := newStoreInfo(h.handler.GetScheduleConfig(), store)
 	h.rd.JSON(w, http.StatusOK, storeInfo)
 }
 
@@ -211,7 +334,7 @@ func (h *storeHandler) SetStoreLabel(w http.ResponseWriter, r *http.Request) {
 // @Param    id    path  integer  true  "Store Id"
 // @Param    body  body  object   true  "Labels in json format"
 // @Produce  json
-// @Success  200  {string}  string  "The label is deleted for store."
+// @Success  200  {string}  string  "The store's label is updated."
 // @Failure  400  {string}  string  "The input is invalid."
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /store/{id}/label [delete]
@@ -246,7 +369,7 @@ func (h *storeHandler) DeleteStoreLabel(w http.ResponseWriter, r *http.Request) 
 // @Param    id    path  integer  true  "Store Id"
 // @Param    body  body  object   true  "json params"
 // @Produce  json
-// @Success  200  {string}  string  "The store's weight is updated."
+// @Success  200  {string}  string  "The store's label is updated."
 // @Failure  400  {string}  string  "The input is invalid."
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /store/{id}/weight [post]
@@ -259,7 +382,7 @@ func (h *storeHandler) SetStoreWeight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var input map[string]any
+	var input map[string]interface{}
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &input); err != nil {
 		return
 	}
@@ -290,7 +413,7 @@ func (h *storeHandler) SetStoreWeight(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.rd.JSON(w, http.StatusOK, "The store's weight is updated.")
+	h.rd.JSON(w, http.StatusOK, "The store's label is updated.")
 }
 
 // FIXME: details of input json body params
@@ -300,16 +423,12 @@ func (h *storeHandler) SetStoreWeight(w http.ResponseWriter, r *http.Request) {
 // @Param    id         path   integer  true   "Store Id"
 // @Param    body       body   object   true   "json params"
 // @Produce  json
-// @Success  200  {string}  string  "The store's limit is updated."
+// @Success  200  {string}  string  "The store's label is updated."
 // @Failure  400  {string}  string  "The input is invalid."
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /store/{id}/limit [post]
 func (h *storeHandler) SetStoreLimit(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
-	if version := rc.GetScheduleConfig().StoreLimitVersion; version != storelimit.VersionV1 {
-		h.rd.JSON(w, http.StatusBadRequest, fmt.Sprintf("current store limit version:%s not support set limit", version))
-		return
-	}
 	vars := mux.Vars(r)
 	storeID, errParse := apiutil.ParseUint64VarsField(vars, "id")
 	if errParse != nil {
@@ -323,7 +442,7 @@ func (h *storeHandler) SetStoreLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var input map[string]any
+	var input map[string]interface{}
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &input); err != nil {
 		return
 	}
@@ -359,9 +478,7 @@ func (h *storeHandler) SetStoreLimit(w http.ResponseWriter, r *http.Request) {
 			if typ == storelimit.RemovePeer {
 				key = fmt.Sprintf("remove-peer-%v", storeID)
 			}
-			if err := h.handler.SetStoreLimitTTL(key, ratePerMin, time.Duration(ttl)*time.Second); err != nil {
-				log.Warn("failed to set store limit", errs.ZapError(err))
-			}
+			h.handler.SetStoreLimitTTL(key, ratePerMin, time.Duration(ttl)*time.Second)
 			continue
 		}
 		if err := h.handler.SetStoreLimit(storeID, ratePerMin, typ); err != nil {
@@ -369,7 +486,7 @@ func (h *storeHandler) SetStoreLimit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	h.rd.JSON(w, http.StatusOK, "The store's limit is updated.")
+	h.rd.JSON(w, http.StatusOK, "The store's label is updated.")
 }
 
 type storesHandler struct {
@@ -412,12 +529,7 @@ func (h *storesHandler) RemoveTombStone(w http.ResponseWriter, r *http.Request) 
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /stores/limit [post]
 func (h *storesHandler) SetAllStoresLimit(w http.ResponseWriter, r *http.Request) {
-	cfg := h.GetScheduleConfig()
-	if version := cfg.StoreLimitVersion; version != storelimit.VersionV1 {
-		h.rd.JSON(w, http.StatusBadRequest, fmt.Sprintf("current store limit version:%s not support get limit", version))
-		return
-	}
-	var input map[string]any
+	var input map[string]interface{}
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &input); err != nil {
 		return
 	}
@@ -464,7 +576,7 @@ func (h *storesHandler) SetAllStoresLimit(w http.ResponseWriter, r *http.Request
 			}
 		}
 	} else {
-		labelMap := input["labels"].(map[string]any)
+		labelMap := input["labels"].(map[string]interface{})
 		labels := make([]*metapb.StoreLabel, 0, len(input))
 		for k, v := range labelMap {
 			labels = append(labels, &metapb.StoreLabel{
@@ -497,12 +609,7 @@ func (h *storesHandler) SetAllStoresLimit(w http.ResponseWriter, r *http.Request
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /stores/limit [get]
 func (h *storesHandler) GetAllStoresLimit(w http.ResponseWriter, r *http.Request) {
-	cfg := h.GetScheduleConfig()
-	if version := cfg.StoreLimitVersion; version != storelimit.VersionV1 {
-		h.rd.JSON(w, http.StatusBadRequest, fmt.Sprintf("current store limit version:%s not support get limit", version))
-		return
-	}
-	limits := cfg.StoreLimit
+	limits := h.GetScheduleConfig().StoreLimit
 	includeTombstone := false
 	var err error
 	if includeStr := r.URL.Query().Get("include_tombstone"); includeStr != "" {
@@ -628,18 +735,18 @@ func (h *storesHandler) GetStoresProgress(w http.ResponseWriter, r *http.Request
 }
 
 // @Tags     store
-// @Summary     Get all stores in the cluster.
-// @Param       state  query  array  true  "Specify accepted store states."
+// @Summary  Get all stores in the cluster.
+// @Param    state  query  array  true  "Specify accepted store states."
 // @Produce  json
-// @Success     200  {object}  response.StoresInfo
+// @Success  200  {object}  StoresInfo
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
-// @Router      /stores [get]
-// @Deprecated  Better to use /stores/check instead.
+// @Router   /stores [get]
+// @Deprecated Better to use /stores/check instead.
 func (h *storesHandler) GetAllStores(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
 	stores := rc.GetMetaStores()
-	StoresInfo := &response.StoresInfo{
-		Stores: make([]*response.StoreInfo, 0, len(stores)),
+	StoresInfo := &StoresInfo{
+		Stores: make([]*StoreInfo, 0, len(stores)),
 	}
 
 	urlFilter, err := newStoreStateFilter(r.URL)
@@ -657,7 +764,7 @@ func (h *storesHandler) GetAllStores(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		storeInfo := response.BuildStoreInfo(h.GetScheduleConfig(), store)
+		storeInfo := newStoreInfo(h.GetScheduleConfig(), store)
 		StoresInfo.Stores = append(StoresInfo.Stores, storeInfo)
 	}
 	StoresInfo.Count = len(StoresInfo.Stores)
@@ -669,17 +776,17 @@ func (h *storesHandler) GetAllStores(w http.ResponseWriter, r *http.Request) {
 // @Summary  Get all stores by states in the cluster.
 // @Param    state  query  array  true  "Specify accepted store states."
 // @Produce  json
-// @Success  200  {object}  response.StoresInfo
+// @Success  200  {object}  StoresInfo
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /stores/check [get]
 func (h *storesHandler) GetStoresByState(w http.ResponseWriter, r *http.Request) {
 	rc := getCluster(r)
 	stores := rc.GetMetaStores()
-	StoresInfo := &response.StoresInfo{
-		Stores: make([]*response.StoreInfo, 0, len(stores)),
+	StoresInfo := &StoresInfo{
+		Stores: make([]*StoreInfo, 0, len(stores)),
 	}
 
-	lowerStateName := []string{strings.ToLower(response.DownStateName), strings.ToLower(response.DisconnectedName)}
+	lowerStateName := []string{strings.ToLower(downStateName), strings.ToLower(disconnectedName)}
 	for _, v := range metapb.StoreState_name {
 		lowerStateName = append(lowerStateName, strings.ToLower(v))
 	}
@@ -705,7 +812,7 @@ func (h *storesHandler) GetStoresByState(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		storeInfo := response.BuildStoreInfo(h.GetScheduleConfig(), store)
+		storeInfo := newStoreInfo(h.GetScheduleConfig(), store)
 		if queryStates != nil && !slice.Contains(queryStates, strings.ToLower(storeInfo.Store.StateName)) {
 			continue
 		}
@@ -761,7 +868,7 @@ func (filter *storeStateFilter) filter(stores []*metapb.Store) []*metapb.Store {
 	return ret
 }
 
-func getStoreLimitType(input map[string]any) ([]storelimit.Type, error) {
+func getStoreLimitType(input map[string]interface{}) ([]storelimit.Type, error) {
 	typeNameIface, ok := input["type"]
 	var err error
 	if ok {

@@ -15,68 +15,35 @@
 package api
 
 import (
-	"context"
 	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/gorilla/mux"
+	"github.com/pingcap/errors"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/schedule/placement"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/cluster"
 	"github.com/unrolled/render"
 )
 
+var errPlacementDisabled = errors.New("placement rules feature is disabled")
+
 type ruleHandler struct {
-	*server.Handler
 	svr *server.Server
 	rd  *render.Render
 }
 
 func newRulesHandler(svr *server.Server, rd *render.Render) *ruleHandler {
 	return &ruleHandler{
-		Handler: svr.GetHandler(),
-		svr:     svr,
-		rd:      rd,
+		svr: svr,
+		rd:  rd,
 	}
-}
-
-type ruleMiddleware struct {
-	s  *server.Server
-	rd *render.Render
-	*server.Handler
-}
-
-func newRuleMiddleware(s *server.Server, rd *render.Render) ruleMiddleware {
-	return ruleMiddleware{
-		s:       s,
-		rd:      rd,
-		Handler: s.GetHandler(),
-	}
-}
-
-func (m ruleMiddleware) middleware(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		manager, err := m.GetRuleManager()
-		if err == errs.ErrPlacementDisabled {
-			m.rd.JSON(w, http.StatusPreconditionFailed, err.Error())
-			return
-		}
-		if err != nil {
-			m.rd.JSON(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		ctx := context.WithValue(r.Context(), ruleCtxKey{}, manager)
-		h.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-type ruleCtxKey struct{}
-
-func getRuleManager(r *http.Request) *placement.RuleManager {
-	return r.Context().Value(ruleCtxKey{}).(*placement.RuleManager)
 }
 
 // @Tags     rule
@@ -84,11 +51,14 @@ func getRuleManager(r *http.Request) *placement.RuleManager {
 // @Produce  json
 // @Success  200  {array}   placement.Rule
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rules [get]
 func (h *ruleHandler) GetAllRules(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
-	rules := manager.GetAllRules()
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
+	rules := cluster.GetRuleManager().GetAllRules()
 	h.rd.JSON(w, http.StatusOK, rules)
 }
 
@@ -102,7 +72,11 @@ func (h *ruleHandler) GetAllRules(w http.ResponseWriter, r *http.Request) {
 // @Failure  500    {string}  string            "PD server failed to proceed the request."
 // @Router   /config/rules [post]
 func (h *ruleHandler) SetAllRules(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	var rules []*placement.Rule
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &rules); err != nil {
 		return
@@ -113,7 +87,7 @@ func (h *ruleHandler) SetAllRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := manager.SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
+	if err := cluster.GetRuleManager().SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
 		SetRules(rules); err != nil {
 		if errs.ErrRuleContent.Equal(err) || errs.ErrHexDecodingString.Equal(err) {
 			h.rd.JSON(w, http.StatusBadRequest, err.Error())
@@ -131,12 +105,15 @@ func (h *ruleHandler) SetAllRules(w http.ResponseWriter, r *http.Request) {
 // @Produce  json
 // @Success  200  {array}   placement.Rule
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rules/group/{group} [get]
 func (h *ruleHandler) GetRuleByGroup(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	group := mux.Vars(r)["group"]
-	rules := manager.GetRulesByGroup(group)
+	rules := cluster.GetRuleManager().GetRulesByGroup(group)
 	h.rd.JSON(w, http.StatusOK, rules)
 }
 
@@ -148,17 +125,13 @@ func (h *ruleHandler) GetRuleByGroup(w http.ResponseWriter, r *http.Request) {
 // @Failure  400  {string}  string  "The input is invalid."
 // @Failure  404  {string}  string  "The region does not exist."
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rules/region/{region} [get]
 func (h *ruleHandler) GetRulesByRegion(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
-	regionStr := mux.Vars(r)["region"]
-	region, code, err := h.PreCheckForRegion(regionStr)
-	if err != nil {
-		h.rd.JSON(w, code, err.Error())
+	cluster, region := h.preCheckForRegionAndRule(w, r)
+	if cluster == nil || region == nil {
 		return
 	}
-	rules := manager.GetRulesForApplyRegion(region)
+	rules := cluster.GetRuleManager().GetRulesForApplyRegion(region)
 	h.rd.JSON(w, http.StatusOK, rules)
 }
 
@@ -170,25 +143,34 @@ func (h *ruleHandler) GetRulesByRegion(w http.ResponseWriter, r *http.Request) {
 // @Failure  400  {string}  string  "The input is invalid."
 // @Failure  404  {string}  string  "The region does not exist."
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rules/region/{region}/detail [get]
 func (h *ruleHandler) CheckRegionPlacementRule(w http.ResponseWriter, r *http.Request) {
-	regionStr := mux.Vars(r)["region"]
-	region, code, err := h.PreCheckForRegion(regionStr)
-	if err != nil {
-		h.rd.JSON(w, code, err.Error())
+	cluster, region := h.preCheckForRegionAndRule(w, r)
+	if cluster == nil || region == nil {
 		return
 	}
-	regionFit, err := h.Handler.CheckRegionPlacementRule(region)
-	if err == errs.ErrPlacementDisabled {
-		h.rd.JSON(w, http.StatusPreconditionFailed, err.Error())
-		return
-	}
-	if err != nil {
-		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	regionFit := cluster.GetRuleManager().FitRegion(cluster, region)
 	h.rd.JSON(w, http.StatusOK, regionFit)
+}
+
+func (h *ruleHandler) preCheckForRegionAndRule(w http.ResponseWriter, r *http.Request) (*cluster.RaftCluster, *core.RegionInfo) {
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return cluster, nil
+	}
+	regionStr := mux.Vars(r)["region"]
+	regionID, err := strconv.ParseUint(regionStr, 10, 64)
+	if err != nil {
+		h.rd.JSON(w, http.StatusBadRequest, "invalid region id")
+		return cluster, nil
+	}
+	region := cluster.GetRegion(regionID)
+	if region == nil {
+		h.rd.JSON(w, http.StatusNotFound, errs.ErrRegionNotFound.FastGenByArgs(regionID).Error())
+		return cluster, nil
+	}
+	return cluster, region
 }
 
 // @Tags     rule
@@ -198,17 +180,20 @@ func (h *ruleHandler) CheckRegionPlacementRule(w http.ResponseWriter, r *http.Re
 // @Success  200  {array}   placement.Rule
 // @Failure  400  {string}  string  "The input is invalid."
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rules/key/{key} [get]
 func (h *ruleHandler) GetRulesByKey(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	keyHex := mux.Vars(r)["key"]
 	key, err := hex.DecodeString(keyHex)
 	if err != nil {
-		h.rd.JSON(w, http.StatusBadRequest, errs.ErrKeyFormat.FastGenByArgs(err).Error())
+		h.rd.JSON(w, http.StatusBadRequest, "key should be in hex format")
 		return
 	}
-	rules := manager.GetRulesByKey(key)
+	rules := cluster.GetRuleManager().GetRulesByKey(key)
 	h.rd.JSON(w, http.StatusOK, rules)
 }
 
@@ -222,11 +207,15 @@ func (h *ruleHandler) GetRulesByKey(w http.ResponseWriter, r *http.Request) {
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
 // @Router   /config/rule/{group}/{id} [get]
 func (h *ruleHandler) GetRuleByGroupAndID(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	group, id := mux.Vars(r)["group"], mux.Vars(r)["id"]
-	rule := manager.GetRule(group, id)
+	rule := cluster.GetRuleManager().GetRule(group, id)
 	if rule == nil {
-		h.rd.JSON(w, http.StatusNotFound, errs.ErrRuleNotFound.Error())
+		h.rd.JSON(w, http.StatusNotFound, nil)
 		return
 	}
 	h.rd.JSON(w, http.StatusOK, rule)
@@ -243,17 +232,21 @@ func (h *ruleHandler) GetRuleByGroupAndID(w http.ResponseWriter, r *http.Request
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rule [post]
 func (h *ruleHandler) SetRule(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	var rule placement.Rule
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &rule); err != nil {
 		return
 	}
-	oldRule := manager.GetRule(rule.GroupID, rule.ID)
+	oldRule := cluster.GetRuleManager().GetRule(rule.GroupID, rule.ID)
 	if err := h.syncReplicateConfigWithDefaultRule(&rule); err != nil {
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := manager.SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
+	if err := cluster.GetRuleManager().SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
 		SetRule(&rule); err != nil {
 		if errs.ErrRuleContent.Equal(err) || errs.ErrHexDecodingString.Equal(err) {
 			h.rd.JSON(w, http.StatusBadRequest, err.Error())
@@ -262,7 +255,6 @@ func (h *ruleHandler) SetRule(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	cluster := getCluster(r)
 	cluster.AddSuspectKeyRange(rule.StartKey, rule.EndKey)
 	if oldRule != nil {
 		cluster.AddSuspectKeyRange(oldRule.StartKey, oldRule.EndKey)
@@ -273,7 +265,7 @@ func (h *ruleHandler) SetRule(w http.ResponseWriter, r *http.Request) {
 // sync replicate config with default-rule
 func (h *ruleHandler) syncReplicateConfigWithDefaultRule(rule *placement.Rule) error {
 	// sync default rule with replicate config
-	if rule.GroupID == placement.DefaultGroupID && rule.ID == placement.DefaultRuleID {
+	if rule.GroupID == "pd" && rule.ID == "default" {
 		cfg := h.svr.GetReplicationConfig().Clone()
 		cfg.MaxReplicas = uint64(rule.Count)
 		if err := h.svr.SetReplicationConfig(*cfg); err != nil {
@@ -293,15 +285,18 @@ func (h *ruleHandler) syncReplicateConfigWithDefaultRule(rule *placement.Rule) e
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rule/{group}/{id} [delete]
 func (h *ruleHandler) DeleteRuleByGroup(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	group, id := mux.Vars(r)["group"], mux.Vars(r)["id"]
-	rule := manager.GetRule(group, id)
-	if err := manager.DeleteRule(group, id); err != nil {
+	rule := cluster.GetRuleManager().GetRule(group, id)
+	if err := cluster.GetRuleManager().DeleteRule(group, id); err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if rule != nil {
-		cluster := getCluster(r)
 		cluster.AddSuspectKeyRange(rule.StartKey, rule.EndKey)
 	}
 
@@ -318,12 +313,16 @@ func (h *ruleHandler) DeleteRuleByGroup(w http.ResponseWriter, r *http.Request) 
 // @Failure  500         {string}  string              "PD server failed to proceed the request."
 // @Router   /config/rules/batch [post]
 func (h *ruleHandler) BatchRules(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	var opts []placement.RuleOp
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &opts); err != nil {
 		return
 	}
-	if err := manager.SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
+	if err := cluster.GetRuleManager().SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
 		Batch(opts); err != nil {
 		if errs.ErrRuleContent.Equal(err) || errs.ErrHexDecodingString.Equal(err) {
 			h.rd.JSON(w, http.StatusBadRequest, err.Error())
@@ -342,12 +341,15 @@ func (h *ruleHandler) BatchRules(w http.ResponseWriter, r *http.Request) {
 // @Success  200  {object}  placement.RuleGroup
 // @Failure  404  {string}  string  "The RuleGroup does not exist."
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rule_group/{id} [get]
 func (h *ruleHandler) GetGroupConfig(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	id := mux.Vars(r)["id"]
-	group := manager.GetRuleGroup(id)
+	group := cluster.GetRuleManager().GetRuleGroup(id)
 	if group == nil {
 		h.rd.JSON(w, http.StatusNotFound, nil)
 		return
@@ -366,18 +368,21 @@ func (h *ruleHandler) GetGroupConfig(w http.ResponseWriter, r *http.Request) {
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rule_group [post]
 func (h *ruleHandler) SetGroupConfig(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	var ruleGroup placement.RuleGroup
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &ruleGroup); err != nil {
 		return
 	}
-	if err := manager.SetRuleGroup(&ruleGroup); err != nil {
+	if err := cluster.GetRuleManager().SetRuleGroup(&ruleGroup); err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	cluster := getCluster(r)
-	for _, rule := range manager.GetRulesByGroup(ruleGroup.ID) {
-		cluster.AddSuspectKeyRange(rule.StartKey, rule.EndKey)
+	for _, r := range cluster.GetRuleManager().GetRulesByGroup(ruleGroup.ID) {
+		cluster.AddSuspectKeyRange(r.StartKey, r.EndKey)
 	}
 	h.rd.JSON(w, http.StatusOK, "Update rule group successfully.")
 }
@@ -391,15 +396,18 @@ func (h *ruleHandler) SetGroupConfig(w http.ResponseWriter, r *http.Request) {
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rule_group/{id} [delete]
 func (h *ruleHandler) DeleteGroupConfig(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	id := mux.Vars(r)["id"]
-	err := manager.DeleteRuleGroup(id)
+	err := cluster.GetRuleManager().DeleteRuleGroup(id)
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	cluster := getCluster(r)
-	for _, r := range manager.GetRulesByGroup(id) {
+	for _, r := range cluster.GetRuleManager().GetRulesByGroup(id) {
 		cluster.AddSuspectKeyRange(r.StartKey, r.EndKey)
 	}
 	h.rd.JSON(w, http.StatusOK, "Delete rule group successfully.")
@@ -410,11 +418,14 @@ func (h *ruleHandler) DeleteGroupConfig(w http.ResponseWriter, r *http.Request) 
 // @Produce  json
 // @Success  200  {array}   placement.RuleGroup
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/rule_groups [get]
 func (h *ruleHandler) GetAllGroupConfigs(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
-	ruleGroups := manager.GetRuleGroups()
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
+	ruleGroups := cluster.GetRuleManager().GetRuleGroups()
 	h.rd.JSON(w, http.StatusOK, ruleGroups)
 }
 
@@ -423,11 +434,14 @@ func (h *ruleHandler) GetAllGroupConfigs(w http.ResponseWriter, r *http.Request)
 // @Produce  json
 // @Success  200  {array}   placement.GroupBundle
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/placement-rule [get]
 func (h *ruleHandler) GetPlacementRules(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
-	bundles := manager.GetAllGroupBundles()
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
+	bundles := cluster.GetRuleManager().GetAllGroupBundles()
 	h.rd.JSON(w, http.StatusOK, bundles)
 }
 
@@ -441,13 +455,17 @@ func (h *ruleHandler) GetPlacementRules(w http.ResponseWriter, r *http.Request) 
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/placement-rule [post]
 func (h *ruleHandler) SetPlacementRules(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	var groups []placement.GroupBundle
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &groups); err != nil {
 		return
 	}
 	_, partial := r.URL.Query()["partial"]
-	if err := manager.SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
+	if err := cluster.GetRuleManager().SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
 		SetAllGroupBundles(groups, !partial); err != nil {
 		if errs.ErrRuleContent.Equal(err) || errs.ErrHexDecodingString.Equal(err) {
 			h.rd.JSON(w, http.StatusBadRequest, err.Error())
@@ -465,12 +483,14 @@ func (h *ruleHandler) SetPlacementRules(w http.ResponseWriter, r *http.Request) 
 // @Produce  json
 // @Success  200  {object}  placement.GroupBundle
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/placement-rule/{group} [get]
 func (h *ruleHandler) GetPlacementRuleByGroup(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
-	g := mux.Vars(r)["group"]
-	group := manager.GetGroupBundle(g)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
+	group := cluster.GetRuleManager().GetGroupBundle(mux.Vars(r)["group"])
 	h.rd.JSON(w, http.StatusOK, group)
 }
 
@@ -482,19 +502,21 @@ func (h *ruleHandler) GetPlacementRuleByGroup(w http.ResponseWriter, r *http.Req
 // @Success  200  {string}  string  "Delete group and rules successfully."
 // @Failure  400  {string}  string  "Bad request."
 // @Failure  412  {string}  string  "Placement rules feature is disabled."
-// @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/placement-rule [delete]
 func (h *ruleHandler) DeletePlacementRuleByGroup(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	group := mux.Vars(r)["group"]
-	var err error
-	group, err = url.PathUnescape(group)
+	group, err := url.PathUnescape(group)
 	if err != nil {
 		h.rd.JSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	_, regex := r.URL.Query()["regexp"]
-	if err := manager.DeleteGroupBundle(group, regex); err != nil {
+	if err := cluster.GetRuleManager().DeleteGroupBundle(group, regex); err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -510,7 +532,11 @@ func (h *ruleHandler) DeletePlacementRuleByGroup(w http.ResponseWriter, r *http.
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /config/placement-rule/{group} [post]
 func (h *ruleHandler) SetPlacementRuleByGroup(w http.ResponseWriter, r *http.Request) {
-	manager := getRuleManager(r)
+	cluster := getCluster(r)
+	if !cluster.GetOpts().IsPlacementRulesEnabled() {
+		h.rd.JSON(w, http.StatusPreconditionFailed, errPlacementDisabled.Error())
+		return
+	}
 	groupID := mux.Vars(r)["group"]
 	var group placement.GroupBundle
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &group); err != nil {
@@ -523,7 +549,7 @@ func (h *ruleHandler) SetPlacementRuleByGroup(w http.ResponseWriter, r *http.Req
 		h.rd.JSON(w, http.StatusBadRequest, fmt.Sprintf("group id %s does not match request URI %s", group.ID, groupID))
 		return
 	}
-	if err := manager.SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
+	if err := cluster.GetRuleManager().SetKeyType(h.svr.GetConfig().PDServerCfg.KeyType).
 		SetGroupBundle(group); err != nil {
 		if errs.ErrRuleContent.Equal(err) || errs.ErrHexDecodingString.Equal(err) {
 			h.rd.JSON(w, http.StatusBadRequest, err.Error())

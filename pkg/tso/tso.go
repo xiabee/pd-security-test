@@ -27,12 +27,11 @@ import (
 	"github.com/tikv/pd/pkg/election"
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/storage/endpoint"
-	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/pkg/utils/tsoutil"
 	"github.com/tikv/pd/pkg/utils/typeutil"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
 
@@ -153,11 +152,11 @@ func (t *timestampOracle) calibrateLogical(rawLogical int64, suffixBits int) int
 
 // GetTimestampPath returns the timestamp path in etcd.
 func (t *timestampOracle) GetTimestampPath() string {
-	return keypath.TimestampPath(t.tsPath)
+	return endpoint.TimestampPath(t.tsPath)
 }
 
 // SyncTimestamp is used to synchronize the timestamp.
-func (t *timestampOracle) SyncTimestamp() error {
+func (t *timestampOracle) SyncTimestamp(leadership *election.Leadership) error {
 	log.Info("start to sync timestamp", logutil.CondUint32("keyspace-group-id", t.keyspaceGroupID, t.keyspaceGroupID > 0))
 	t.metrics.syncEvent.Inc()
 
@@ -312,7 +311,7 @@ func (t *timestampOracle) resetUserTimestampInner(leadership *election.Leadershi
 //
 // NOTICE: this function should be called after the TSO in memory has been initialized
 // and should not be called when the TSO in memory has been reset anymore.
-func (t *timestampOracle) UpdateTimestamp() error {
+func (t *timestampOracle) UpdateTimestamp(leadership *election.Leadership) error {
 	if !t.isInitialized() {
 		return errs.ErrUpdateTimestamp.FastGenByArgs("timestamp in memory has not been initialized")
 	}

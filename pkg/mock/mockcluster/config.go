@@ -154,8 +154,8 @@ func (mc *Cluster) SetMaxReplicasWithLabel(enablePlacementRules bool, num int, l
 	}
 	if enablePlacementRules {
 		rule := &placement.Rule{
-			GroupID:        placement.DefaultGroupID,
-			ID:             placement.DefaultRuleID,
+			GroupID:        "pd",
+			ID:             "default",
 			Index:          1,
 			StartKey:       []byte(""),
 			EndKey:         []byte(""),

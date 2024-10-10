@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"runtime/trace"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,13 +27,11 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tikv/pd/pkg/election"
 	"github.com/tikv/pd/pkg/errs"
 	mcsutils "github.com/tikv/pd/pkg/mcs/utils"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/member"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/utils/keypath"
+	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/tsoutil"
 	"github.com/tikv/pd/pkg/utils/typeutil"
@@ -81,10 +78,8 @@ type GlobalTSOAllocator struct {
 	// for global TSO synchronization
 	am *AllocatorManager
 	// for election use
-	member ElectionMember
-	// expectedPrimaryLease is used to store the expected primary lease.
-	expectedPrimaryLease atomic.Value // store as *election.LeaderLease
-	timestampOracle      *timestampOracle
+	member          ElectionMember
+	timestampOracle *timestampOracle
 	// syncRTT is the RTT duration a SyncMaxTS RPC call will cost,
 	// which is used to estimate the MaxTS in a Global TSO generation
 	// to reduce the gRPC network IO latency.
@@ -121,7 +116,7 @@ func newGlobalTimestampOracle(am *AllocatorManager) *timestampOracle {
 	oracle := &timestampOracle{
 		client:                 am.member.GetLeadership().GetClient(),
 		keyspaceGroupID:        am.kgID,
-		tsPath:                 keypath.KeyspaceGroupGlobalTSPath(am.kgID),
+		tsPath:                 endpoint.KeyspaceGroupGlobalTSPath(am.kgID),
 		storage:                am.storage,
 		saveInterval:           am.saveInterval,
 		updatePhysicalInterval: am.updatePhysicalInterval,
@@ -192,7 +187,7 @@ func (gta *GlobalTSOAllocator) Initialize(int) error {
 	gta.tsoAllocatorRoleGauge.Set(1)
 	// The suffix of a Global TSO should always be 0.
 	gta.timestampOracle.suffix = 0
-	return gta.timestampOracle.SyncTimestamp()
+	return gta.timestampOracle.SyncTimestamp(gta.member.GetLeadership())
 }
 
 // IsInitialize is used to indicates whether this allocator is initialized.
@@ -202,7 +197,7 @@ func (gta *GlobalTSOAllocator) IsInitialize() bool {
 
 // UpdateTSO is used to update the TSO in memory and the time window in etcd.
 func (gta *GlobalTSOAllocator) UpdateTSO() error {
-	return gta.timestampOracle.UpdateTimestamp()
+	return gta.timestampOracle.UpdateTimestamp(gta.member.GetLeadership())
 }
 
 // SetTSO sets the physical part with given TSO.
@@ -565,20 +560,6 @@ func (gta *GlobalTSOAllocator) primaryElectionLoop() {
 				logutil.CondUint32("keyspace-group-id", gta.getGroupID(), gta.getGroupID() > 0))
 		}
 
-		// To make sure the expected primary(if existed) and new primary are on the same server.
-		expectedPrimary := mcsutils.GetExpectedPrimaryFlag(gta.member.Client(), gta.member.GetLeaderPath())
-		// skip campaign the primary if the expected primary is not empty and not equal to the current memberValue.
-		// expected primary ONLY SET BY `{service}/primary/transfer` API.
-		if len(expectedPrimary) > 0 && !strings.Contains(gta.member.MemberValue(), expectedPrimary) {
-			log.Info("skip campaigning of tso primary and check later",
-				zap.String("server-name", gta.member.Name()),
-				zap.String("expected-primary-id", expectedPrimary),
-				zap.Uint64("member-id", gta.member.ID()),
-				zap.String("cur-memberValue", gta.member.MemberValue()))
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-
 		gta.campaignLeader()
 	}
 }
@@ -615,7 +596,7 @@ func (gta *GlobalTSOAllocator) campaignLeader() {
 		gta.member.ResetLeader()
 	})
 
-	// maintain the leadership, after this, TSO can be service.
+	// maintain the the leadership, after this, TSO can be service.
 	gta.member.KeepLeader(ctx)
 	log.Info("campaign tso primary ok",
 		logutil.CondUint32("keyspace-group-id", gta.getGroupID(), gta.getGroupID() > 0),
@@ -636,21 +617,11 @@ func (gta *GlobalTSOAllocator) campaignLeader() {
 		return
 	}
 	defer func() {
-		gta.am.ResetAllocatorGroup(GlobalDCLocation, false)
+		gta.am.ResetAllocatorGroup(GlobalDCLocation)
 	}()
 
-	// check expected primary and watch the primary.
-	exitPrimary := make(chan struct{})
-	lease, err := mcsutils.KeepExpectedPrimaryAlive(ctx, gta.member.Client(), exitPrimary,
-		gta.am.leaderLease, gta.member.GetLeaderPath(), gta.member.MemberValue(), constant.TSOServiceName)
-	if err != nil {
-		log.Error("prepare tso primary watch error", errs.ZapError(err))
-		return
-	}
-	gta.expectedPrimaryLease.Store(lease)
-	gta.member.EnableLeader()
-
 	tsoLabel := fmt.Sprintf("TSO Service Group %d", gta.getGroupID())
+	gta.member.EnableLeader()
 	member.ServiceMemberGauge.WithLabelValues(tsoLabel).Set(1)
 	defer resetLeaderOnce.Do(func() {
 		cancel()
@@ -664,7 +635,7 @@ func (gta *GlobalTSOAllocator) campaignLeader() {
 		logutil.CondUint32("keyspace-group-id", gta.getGroupID(), gta.getGroupID() > 0),
 		zap.String("tso-primary-name", gta.member.Name()))
 
-	leaderTicker := time.NewTicker(constant.LeaderTickInterval)
+	leaderTicker := time.NewTicker(mcsutils.LeaderTickInterval)
 	defer leaderTicker.Stop()
 
 	for {
@@ -680,20 +651,8 @@ func (gta *GlobalTSOAllocator) campaignLeader() {
 			log.Info("exit leader campaign",
 				logutil.CondUint32("keyspace-group-id", gta.getGroupID(), gta.getGroupID() > 0))
 			return
-		case <-exitPrimary:
-			log.Info("no longer be primary because primary have been updated, the TSO primary will step down")
-			return
 		}
 	}
-}
-
-// GetExpectedPrimaryLease returns the expected primary lease.
-func (gta *GlobalTSOAllocator) GetExpectedPrimaryLease() *election.Lease {
-	l := gta.expectedPrimaryLease.Load()
-	if l == nil {
-		return nil
-	}
-	return l.(*election.Lease)
 }
 
 func (gta *GlobalTSOAllocator) getMetrics() *tsoMetrics {

@@ -23,7 +23,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
+	mcsutils "github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 )
 
@@ -192,7 +192,7 @@ func splitKeyspaceGroupCommandFunc(cmd *cobra.Command, args []string) {
 		}
 		keyspaces = append(keyspaces, uint32(id))
 	}
-	postJSON(cmd, fmt.Sprintf("%s/%s/split", keyspaceGroupsPrefix, args[0]), map[string]any{
+	postJSON(cmd, fmt.Sprintf("%s/%s/split", keyspaceGroupsPrefix, args[0]), map[string]interface{}{
 		"new-id":    uint32(newID),
 		"keyspaces": keyspaces,
 	})
@@ -223,7 +223,7 @@ func splitRangeKeyspaceGroupCommandFunc(cmd *cobra.Command, args []string) {
 		cmd.Printf("Failed to parse the end keyspace ID: %s\n", err)
 		return
 	}
-	postJSON(cmd, fmt.Sprintf("%s/%s/split", keyspaceGroupsPrefix, args[0]), map[string]any{
+	postJSON(cmd, fmt.Sprintf("%s/%s/split", keyspaceGroupsPrefix, args[0]), map[string]interface{}{
 		"new-id":            uint32(newID),
 		"start-keyspace-id": uint32(startKeyspaceID),
 		"end-keyspace-id":   uint32(endKeyspaceID),
@@ -251,7 +251,7 @@ func finishSplitKeyspaceGroupCommandFunc(cmd *cobra.Command, args []string) {
 func mergeKeyspaceGroupCommandFunc(cmd *cobra.Command, args []string) {
 	var (
 		targetGroupID uint32
-		params        = map[string]any{}
+		params        = map[string]interface{}{}
 		argNum        = len(args)
 	)
 	mergeAll, err := cmd.Flags().GetBool("all")
@@ -266,7 +266,7 @@ func mergeKeyspaceGroupCommandFunc(cmd *cobra.Command, args []string) {
 			return
 		}
 		targetGroupID = uint32(target)
-		if targetGroupID != constant.DefaultKeyspaceGroupID {
+		if targetGroupID != mcsutils.DefaultKeyspaceGroupID {
 			cmd.Println("Unable to merge all keyspace groups into a non-default keyspace group")
 			return
 		}
@@ -334,7 +334,7 @@ func setNodesKeyspaceGroupCommandFunc(cmd *cobra.Command, args []string) {
 		}
 		nodes = append(nodes, arg)
 	}
-	patchJSON(cmd, fmt.Sprintf("%s/%s", keyspaceGroupsPrefix, args[0]), map[string]any{
+	patchJSON(cmd, fmt.Sprintf("%s/%s", keyspaceGroupsPrefix, args[0]), map[string]interface{}{
 		"Nodes": nodes,
 	})
 }
@@ -369,7 +369,7 @@ func setPriorityKeyspaceGroupCommandFunc(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	patchJSON(cmd, fmt.Sprintf("%s/%s/%s", keyspaceGroupsPrefix, args[0], node), map[string]any{
+	patchJSON(cmd, fmt.Sprintf("%s/%s/%s", keyspaceGroupsPrefix, args[0], node), map[string]interface{}{
 		"Priority": priority,
 	})
 }

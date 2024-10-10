@@ -34,7 +34,7 @@ import (
 	"github.com/tikv/pd/pkg/id"
 	"github.com/tikv/pd/pkg/keyspace"
 	scheduling "github.com/tikv/pd/pkg/mcs/scheduling/server"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
 	"github.com/tikv/pd/pkg/swaggerserver"
 	"github.com/tikv/pd/pkg/tso"
@@ -47,7 +47,7 @@ import (
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/join"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
 )
 
 // TestServer states.
@@ -84,12 +84,10 @@ func NewTestServer(ctx context.Context, cfg *config.Config) (*TestServer, error)
 
 // NewTestAPIServer creates a new TestServer.
 func NewTestAPIServer(ctx context.Context, cfg *config.Config) (*TestServer, error) {
-	return createTestServer(ctx, cfg, []string{constant.APIServiceName})
+	return createTestServer(ctx, cfg, []string{utils.APIServiceName})
 }
 
 func createTestServer(ctx context.Context, cfg *config.Config, services []string) (*TestServer, error) {
-	//  disable the heartbeat async runner in test
-	cfg.Schedule.EnableHeartbeatConcurrentRunner = false
 	err := logutil.SetupLogger(cfg.Log, &cfg.Logger, &cfg.LogProps, cfg.Security.RedactInfoLog)
 	if err != nil {
 		return nil, err
@@ -553,7 +551,7 @@ func restartTestCluster(
 	}
 	wg.Wait()
 
-	errorMap.Range(func(key, value any) bool {
+	errorMap.Range(func(key, value interface{}) bool {
 		if value != nil {
 			err = value.(error)
 			return false
@@ -572,17 +570,17 @@ func restartTestCluster(
 }
 
 // RunServer starts to run TestServer.
-func RunServer(server *TestServer) <-chan error {
+func (c *TestCluster) RunServer(server *TestServer) <-chan error {
 	resC := make(chan error)
 	go func() { resC <- server.Run() }()
 	return resC
 }
 
 // RunServers starts to run multiple TestServer.
-func RunServers(servers []*TestServer) error {
+func (c *TestCluster) RunServers(servers []*TestServer) error {
 	res := make([]<-chan error, len(servers))
 	for i, s := range servers {
-		res[i] = RunServer(s)
+		res[i] = c.RunServer(s)
 	}
 	for _, c := range res {
 		if err := <-c; err != nil {
@@ -598,7 +596,7 @@ func (c *TestCluster) RunInitialServers() error {
 	for _, conf := range c.config.InitialServers {
 		servers = append(servers, c.GetServer(conf.Name))
 	}
-	return RunServers(servers)
+	return c.RunServers(servers)
 }
 
 // StopAll is used to stop all servers.
@@ -609,11 +607,6 @@ func (c *TestCluster) StopAll() error {
 		}
 	}
 	return nil
-}
-
-// DeleteServer is used to delete a server.
-func (c *TestCluster) DeleteServer(name string) {
-	delete(c.servers, name)
 }
 
 // GetServer returns a server with a given name.
@@ -815,7 +808,7 @@ func (c *TestCluster) HandleReportBuckets(b *metapb.Buckets) error {
 
 // Join is used to add a new TestServer into the cluster.
 func (c *TestCluster) Join(ctx context.Context, opts ...ConfigOption) (*TestServer, error) {
-	conf, err := c.config.join().Generate(opts...)
+	conf, err := c.config.Join().Generate(opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -829,7 +822,7 @@ func (c *TestCluster) Join(ctx context.Context, opts ...ConfigOption) (*TestServ
 
 // JoinAPIServer is used to add a new TestAPIServer into the cluster.
 func (c *TestCluster) JoinAPIServer(ctx context.Context, opts ...ConfigOption) (*TestServer, error) {
-	conf, err := c.config.join().Generate(opts...)
+	conf, err := c.config.Join().Generate(opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -859,8 +852,8 @@ func (c *TestCluster) CheckClusterDCLocation() {
 	wg := sync.WaitGroup{}
 	for _, server := range c.GetServers() {
 		wg.Add(1)
-		go func(s *TestServer) {
-			s.GetTSOAllocatorManager().ClusterDCLocationChecker()
+		go func(ser *TestServer) {
+			ser.GetTSOAllocatorManager().ClusterDCLocationChecker()
 			wg.Done()
 		}(server)
 	}

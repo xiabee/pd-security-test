@@ -15,10 +15,19 @@
 package memory
 
 import (
-	atomic "sync/atomic"
+	"time"
+
+	atomicutil "go.uber.org/atomic"
 )
 
 // Process global variables for memory limit.
 var (
-	ServerMemoryLimit atomic.Uint64
+	ServerMemoryLimitOriginText  = atomicutil.NewString("0")
+	ServerMemoryLimit            = atomicutil.NewUint64(0)
+	ServerMemoryLimitSessMinSize = atomicutil.NewUint64(128 << 20)
+
+	QueryForceDisk       = atomicutil.NewInt64(0)
+	TriggerMemoryLimitGC = atomicutil.NewBool(false)
+	MemoryLimitGCLast    = atomicutil.NewTime(time.Time{})
+	MemoryLimitGCTotal   = atomicutil.NewInt64(0)
 )

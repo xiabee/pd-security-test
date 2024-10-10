@@ -24,15 +24,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/utils/tempurl"
 	"github.com/tikv/pd/pkg/utils/testutil"
-	"go.etcd.io/etcd/api/v3/etcdserverpb"
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/server/v3/embed"
+	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/embed"
+	"go.etcd.io/etcd/etcdserver/etcdserverpb"
 )
 
-// NewTestSingleConfig is used to create a etcd config for the unit test purpose.
-func NewTestSingleConfig() *embed.Config {
+// newTestSingleConfig is used to create a etcd config for the unit test purpose.
+func newTestSingleConfig(t *testing.T) *embed.Config {
 	cfg := embed.NewConfig()
 	cfg.Name = genRandName()
+	cfg.Dir = t.TempDir()
 	cfg.WalDir = ""
 	cfg.Logger = "zap"
 	cfg.LogOutputs = []string{"stdout"}
@@ -51,7 +52,7 @@ func NewTestSingleConfig() *embed.Config {
 }
 
 func genRandName() string {
-	return "pd" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	return "test_etcd_" + strconv.FormatInt(time.Now().UnixNano()%10000, 10)
 }
 
 // NewTestEtcdCluster is used to create a etcd cluster for the unit test purpose.
@@ -59,8 +60,7 @@ func NewTestEtcdCluster(t *testing.T, count int) (servers []*embed.Etcd, etcdCli
 	re := require.New(t)
 	servers = make([]*embed.Etcd, 0, count)
 
-	cfg := NewTestSingleConfig()
-	cfg.Dir = t.TempDir()
+	cfg := newTestSingleConfig(t)
 	etcd, err := embed.StartEtcd(cfg)
 	re.NoError(err)
 	etcdClient, err = CreateEtcdClient(nil, cfg.ListenClientUrls)
@@ -86,14 +86,7 @@ func NewTestEtcdCluster(t *testing.T, count int) (servers []*embed.Etcd, etcdCli
 	clean = func() {
 		etcdClient.Close()
 		for _, server := range servers {
-			if server.Server != nil {
-				select {
-				case _, ok := <-server.Err():
-					if !ok {
-						return
-					}
-				default:
-				}
+			if server != nil {
 				server.Close()
 			}
 		}
@@ -105,8 +98,7 @@ func NewTestEtcdCluster(t *testing.T, count int) (servers []*embed.Etcd, etcdCli
 // MustAddEtcdMember is used to add a new etcd member to the cluster for test.
 func MustAddEtcdMember(t *testing.T, cfg1 *embed.Config, client *clientv3.Client) *embed.Etcd {
 	re := require.New(t)
-	cfg2 := NewTestSingleConfig()
-	cfg2.Dir = t.TempDir()
+	cfg2 := newTestSingleConfig(t)
 	cfg2.Name = genRandName()
 	cfg2.InitialCluster = cfg1.InitialCluster + fmt.Sprintf(",%s=%s", cfg2.Name, &cfg2.ListenPeerUrls[0])
 	cfg2.ClusterState = embed.ClusterStateFlagExisting
@@ -129,27 +121,18 @@ func MustAddEtcdMember(t *testing.T, cfg1 *embed.Config, client *clientv3.Client
 
 func checkMembers(re *require.Assertions, client *clientv3.Client, etcds []*embed.Etcd) {
 	// Check the client can get the new member.
-	testutil.Eventually(re, func() bool {
-		listResp, err := ListEtcdMembers(client.Ctx(), client)
-		if err != nil {
-			return false
-		}
-		if len(etcds) != len(listResp.Members) {
-			return false
-		}
-		inList := func(m *etcdserverpb.Member) bool {
-			for _, etcd := range etcds {
-				if m.ID == uint64(etcd.Server.ID()) {
-					return true
-				}
-			}
-			return false
-		}
-		for _, m := range listResp.Members {
-			if !inList(m) {
-				return false
+	listResp, err := ListEtcdMembers(client.Ctx(), client)
+	re.NoError(err)
+	re.Len(listResp.Members, len(etcds))
+	inList := func(m *etcdserverpb.Member) bool {
+		for _, etcd := range etcds {
+			if m.ID == uint64(etcd.Server.ID()) {
+				return true
 			}
 		}
-		return true
-	})
+		return false
+	}
+	for _, m := range listResp.Members {
+		re.True(inList(m))
+	}
 }

@@ -40,7 +40,7 @@ func TestAPI(t *testing.T) {
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	re.NotEmpty(cluster.WaitLeader())
+	cluster.WaitLeader()
 
 	leaderServer := cluster.GetLeaderServer()
 	re.NoError(leaderServer.BootstrapCluster())

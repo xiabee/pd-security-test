@@ -20,21 +20,21 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/storelimit"
 	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/schedule"
 	sc "github.com/tikv/pd/pkg/schedule/config"
 	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/handler"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
-	"github.com/tikv/pd/pkg/schedule/types"
 	"github.com/tikv/pd/pkg/statistics"
 	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/storage"
@@ -53,7 +53,6 @@ type server struct {
 	*Server
 }
 
-// GetCoordinator returns the coordinator.
 func (s *server) GetCoordinator() *schedule.Coordinator {
 	c := s.GetRaftCluster()
 	if c == nil {
@@ -62,7 +61,6 @@ func (s *server) GetCoordinator() *schedule.Coordinator {
 	return c.GetCoordinator()
 }
 
-// GetCluster returns RaftCluster.
 func (s *server) GetCluster() sche.SchedulerCluster {
 	return s.GetRaftCluster()
 }
@@ -187,41 +185,41 @@ func (h *Handler) GetAllRequestHistoryHotRegion(request *HistoryHotRegionsReques
 }
 
 // AddScheduler adds a scheduler.
-func (h *Handler) AddScheduler(tp types.CheckerSchedulerType, args ...string) error {
+func (h *Handler) AddScheduler(name string, args ...string) error {
 	c, err := h.GetRaftCluster()
 	if err != nil {
 		return err
 	}
 
 	var removeSchedulerCb func(string) error
-	if c.IsServiceIndependent(constant.SchedulingServiceName) {
+	if h.s.IsAPIServiceMode() {
 		removeSchedulerCb = c.GetCoordinator().GetSchedulersController().RemoveSchedulerHandler
 	} else {
 		removeSchedulerCb = c.GetCoordinator().GetSchedulersController().RemoveScheduler
 	}
-	s, err := schedulers.CreateScheduler(tp, c.GetOperatorController(), h.s.storage, schedulers.ConfigSliceDecoder(tp, args), removeSchedulerCb)
+	s, err := schedulers.CreateScheduler(name, c.GetOperatorController(), h.s.storage, schedulers.ConfigSliceDecoder(name, args), removeSchedulerCb)
 	if err != nil {
 		return err
 	}
 	log.Info("create scheduler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", args))
-	if c.IsServiceIndependent(constant.SchedulingServiceName) {
+	if h.s.IsAPIServiceMode() {
 		if err = c.AddSchedulerHandler(s, args...); err != nil {
 			log.Error("can not add scheduler handler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", args), errs.ZapError(err))
 			return err
 		}
-		log.Info("add scheduler handler successfully", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", args))
+		log.Info("add scheduler handler successfully", zap.String("scheduler-name", name), zap.Strings("scheduler-args", args))
 	} else {
 		if err = c.AddScheduler(s, args...); err != nil {
 			log.Error("can not add scheduler", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", args), errs.ZapError(err))
 			return err
 		}
-		log.Info("add scheduler successfully", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", args))
+		log.Info("add scheduler successfully", zap.String("scheduler-name", name), zap.Strings("scheduler-args", args))
 	}
 	if err = h.opt.Persist(c.GetStorage()); err != nil {
 		log.Error("can not persist scheduler config", errs.ZapError(err))
 		return err
 	}
-	log.Info("persist scheduler config successfully", zap.String("scheduler-name", s.GetName()), zap.Strings("scheduler-args", args))
+	log.Info("persist scheduler config successfully", zap.String("scheduler-name", name), zap.Strings("scheduler-args", args))
 	return nil
 }
 
@@ -231,7 +229,7 @@ func (h *Handler) RemoveScheduler(name string) error {
 	if err != nil {
 		return err
 	}
-	if c.IsServiceIndependent(constant.SchedulingServiceName) {
+	if h.s.IsAPIServiceMode() {
 		if err = c.RemoveSchedulerHandler(name); err != nil {
 			log.Error("can not remove scheduler handler", zap.String("scheduler-name", name), errs.ZapError(err))
 		} else {
@@ -245,6 +243,91 @@ func (h *Handler) RemoveScheduler(name string) error {
 		}
 	}
 	return err
+}
+
+// AddBalanceLeaderScheduler adds a balance-leader-scheduler.
+func (h *Handler) AddBalanceLeaderScheduler() error {
+	return h.AddScheduler(schedulers.BalanceLeaderType)
+}
+
+// AddBalanceWitnessScheduler adds a balance-witness-scheduler.
+func (h *Handler) AddBalanceWitnessScheduler() error {
+	return h.AddScheduler(schedulers.BalanceWitnessType)
+}
+
+// AddTransferWitnessLeaderScheduler adds a transfer-witness-leader-scheduler.
+func (h *Handler) AddTransferWitnessLeaderScheduler() error {
+	return h.AddScheduler(schedulers.TransferWitnessLeaderType)
+}
+
+// AddBalanceRegionScheduler adds a balance-region-scheduler.
+func (h *Handler) AddBalanceRegionScheduler() error {
+	return h.AddScheduler(schedulers.BalanceRegionType)
+}
+
+// AddBalanceHotRegionScheduler adds a balance-hot-region-scheduler.
+func (h *Handler) AddBalanceHotRegionScheduler() error {
+	return h.AddScheduler(schedulers.HotRegionType)
+}
+
+// AddEvictSlowTrendScheduler adds a evict-slow-trend-scheduler.
+func (h *Handler) AddEvictSlowTrendScheduler() error {
+	return h.AddScheduler(schedulers.EvictSlowTrendType)
+}
+
+// AddLabelScheduler adds a label-scheduler.
+func (h *Handler) AddLabelScheduler() error {
+	return h.AddScheduler(schedulers.LabelType)
+}
+
+// AddScatterRangeScheduler adds a balance-range-leader-scheduler
+func (h *Handler) AddScatterRangeScheduler(args ...string) error {
+	return h.AddScheduler(schedulers.ScatterRangeType, args...)
+}
+
+// AddGrantLeaderScheduler adds a grant-leader-scheduler.
+func (h *Handler) AddGrantLeaderScheduler(storeID uint64) error {
+	return h.AddScheduler(schedulers.GrantLeaderType, strconv.FormatUint(storeID, 10))
+}
+
+// AddEvictLeaderScheduler adds an evict-leader-scheduler.
+func (h *Handler) AddEvictLeaderScheduler(storeID uint64) error {
+	return h.AddScheduler(schedulers.EvictLeaderType, strconv.FormatUint(storeID, 10))
+}
+
+// AddShuffleLeaderScheduler adds a shuffle-leader-scheduler.
+func (h *Handler) AddShuffleLeaderScheduler() error {
+	return h.AddScheduler(schedulers.ShuffleLeaderType)
+}
+
+// AddShuffleRegionScheduler adds a shuffle-region-scheduler.
+func (h *Handler) AddShuffleRegionScheduler() error {
+	return h.AddScheduler(schedulers.ShuffleRegionType)
+}
+
+// AddShuffleHotRegionScheduler adds a shuffle-hot-region-scheduler.
+func (h *Handler) AddShuffleHotRegionScheduler(limit uint64) error {
+	return h.AddScheduler(schedulers.ShuffleHotRegionType, strconv.FormatUint(limit, 10))
+}
+
+// AddEvictSlowStoreScheduler adds a evict-slow-store-scheduler.
+func (h *Handler) AddEvictSlowStoreScheduler() error {
+	return h.AddScheduler(schedulers.EvictSlowStoreType)
+}
+
+// AddSplitBucketScheduler adds a split-bucket-scheduler.
+func (h *Handler) AddSplitBucketScheduler() error {
+	return h.AddScheduler(schedulers.SplitBucketType)
+}
+
+// AddRandomMergeScheduler adds a random-merge-scheduler.
+func (h *Handler) AddRandomMergeScheduler() error {
+	return h.AddScheduler(schedulers.RandomMergeType)
+}
+
+// AddGrantHotRegionScheduler adds a grant-hot-region-scheduler
+func (h *Handler) AddGrantHotRegionScheduler(leaderID, peers string) error {
+	return h.AddScheduler(schedulers.GrantHotRegionType, leaderID, peers)
 }
 
 // SetAllStoresLimit is used to set limit of all stores.
@@ -262,7 +345,8 @@ func (h *Handler) SetAllStoresLimitTTL(ratePerMin float64, limitType storelimit.
 	if err != nil {
 		return err
 	}
-	return c.SetAllStoresLimitTTL(limitType, ratePerMin, ttl)
+	c.SetAllStoresLimitTTL(limitType, ratePerMin, ttl)
+	return nil
 }
 
 // SetLabelStoresLimit is used to set limit of label stores.
@@ -282,6 +366,15 @@ func (h *Handler) SetLabelStoresLimit(ratePerMin float64, limitType storelimit.T
 		}
 	}
 	return nil
+}
+
+// GetAllStoresLimit is used to get limit of all stores.
+func (h *Handler) GetAllStoresLimit(limitType storelimit.Type) (map[uint64]sc.StoreLimitConfig, error) {
+	c, err := h.GetRaftCluster()
+	if err != nil {
+		return nil, err
+	}
+	return c.GetAllStoresLimit(), nil
 }
 
 // SetStoreLimit is used to set the limit of a store.
@@ -401,7 +494,7 @@ func (h *Handler) GetAddr() string {
 
 // SetStoreLimitTTL set storeLimit with ttl
 func (h *Handler) SetStoreLimitTTL(data string, value float64, ttl time.Duration) error {
-	return h.s.SaveTTLConfig(map[string]any{
+	return h.s.SaveTTLConfig(map[string]interface{}{
 		data: value,
 	}, ttl)
 }
@@ -473,8 +566,8 @@ func (h *Handler) GetHistoryHotRegionIter(
 }
 
 // RedirectSchedulerUpdate update scheduler config. Export this func to help handle damaged store.
-func (h *Handler) RedirectSchedulerUpdate(name string, storeID float64) error {
-	input := make(map[string]any)
+func (h *Handler) redirectSchedulerUpdate(name string, storeID float64) error {
+	input := make(map[string]interface{})
 	input["name"] = name
 	input["store_id"] = storeID
 	updateURL, err := url.JoinPath(h.GetAddr(), "pd", SchedulerConfigHandlerPath, name, "config")
@@ -486,4 +579,28 @@ func (h *Handler) RedirectSchedulerUpdate(name string, storeID float64) error {
 		return err
 	}
 	return apiutil.PostJSONIgnoreResp(h.s.GetHTTPClient(), updateURL, body)
+}
+
+// AddEvictOrGrant add evict leader scheduler or grant leader scheduler.
+func (h *Handler) AddEvictOrGrant(storeID float64, name string) error {
+	if exist, err := h.IsSchedulerExisted(name); !exist {
+		if err != nil && !errors.ErrorEqual(err, errs.ErrSchedulerNotFound.FastGenByArgs()) {
+			return err
+		}
+		switch name {
+		case schedulers.EvictLeaderName:
+			err = h.AddEvictLeaderScheduler(uint64(storeID))
+		case schedulers.GrantLeaderName:
+			err = h.AddGrantLeaderScheduler(uint64(storeID))
+		}
+		if err != nil {
+			return err
+		}
+	} else {
+		if err := h.redirectSchedulerUpdate(name, storeID); err != nil {
+			return err
+		}
+		log.Info("update scheduler", zap.String("scheduler-name", name), zap.Uint64("store-id", uint64(storeID)))
+	}
+	return nil
 }

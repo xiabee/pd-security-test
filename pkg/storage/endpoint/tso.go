@@ -22,9 +22,8 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/storage/kv"
-	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/typeutil"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
 
@@ -53,7 +52,7 @@ func (se *StorageEndpoint) LoadTimestamp(prefix string) (time.Time, error) {
 	maxTSWindow := typeutil.ZeroTime
 	for i, key := range keys {
 		key := strings.TrimSpace(key)
-		if !strings.HasSuffix(key, keypath.TimestampKey) {
+		if !strings.HasSuffix(key, TimestampKey) {
 			continue
 		}
 		tsWindow, err := typeutil.ParseTimestamp([]byte(values[i]))

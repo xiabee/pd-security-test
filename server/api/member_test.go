@@ -15,8 +15,9 @@
 package api
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
@@ -30,7 +31,6 @@ import (
 	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
-	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 type memberTestSuite struct {
@@ -67,16 +67,17 @@ func relaxEqualStings(re *require.Assertions, a, b []string) {
 	re.Equal(sortedStringB, sortedStringA)
 }
 
-func checkListResponse(re *require.Assertions, body []byte, cfgs []*config.Config) {
+func (suite *memberTestSuite) checkListResponse(body []byte, cfgs []*config.Config) {
 	got := make(map[string][]*pdpb.Member)
 	json.Unmarshal(body, &got)
-	re.Len(cfgs, len(got["members"]))
+	suite.Len(cfgs, len(got["members"]))
+	re := suite.Require()
 	for _, member := range got["members"] {
 		for _, cfg := range cfgs {
 			if member.GetName() != cfg.Name {
 				continue
 			}
-			re.Equal("dc-1", member.DcLocation)
+			suite.Equal("dc-1", member.DcLocation)
 			relaxEqualStings(re, member.ClientUrls, strings.Split(cfg.ClientUrls, ","))
 			relaxEqualStings(re, member.PeerUrls, strings.Split(cfg.PeerUrls, ","))
 		}
@@ -84,83 +85,100 @@ func checkListResponse(re *require.Assertions, body []byte, cfgs []*config.Confi
 }
 
 func (suite *memberTestSuite) TestMemberList() {
-	re := suite.Require()
 	for _, cfg := range suite.cfgs {
 		addr := cfg.ClientUrls + apiPrefix + "/api/v1/members"
 		resp, err := testDialClient.Get(addr)
-		re.NoError(err)
+		suite.NoError(err)
 		buf, err := io.ReadAll(resp.Body)
-		re.NoError(err)
+		suite.NoError(err)
 		resp.Body.Close()
-		checkListResponse(re, buf, suite.cfgs)
+		suite.checkListResponse(buf, suite.cfgs)
 	}
 }
 
 func (suite *memberTestSuite) TestMemberLeader() {
-	re := suite.Require()
 	leader := suite.servers[0].GetLeader()
 	addr := suite.cfgs[rand.Intn(len(suite.cfgs))].ClientUrls + apiPrefix + "/api/v1/leader"
 	resp, err := testDialClient.Get(addr)
-	re.NoError(err)
+	suite.NoError(err)
 	defer resp.Body.Close()
 	buf, err := io.ReadAll(resp.Body)
-	re.NoError(err)
+	suite.NoError(err)
 
 	var got pdpb.Member
-	re.NoError(json.Unmarshal(buf, &got))
-	re.Equal(leader.GetClientUrls(), got.GetClientUrls())
-	re.Equal(leader.GetMemberId(), got.GetMemberId())
+	suite.NoError(json.Unmarshal(buf, &got))
+	suite.Equal(leader.GetClientUrls(), got.GetClientUrls())
+	suite.Equal(leader.GetMemberId(), got.GetMemberId())
 }
 
 func (suite *memberTestSuite) TestChangeLeaderPeerUrls() {
-	re := suite.Require()
 	leader := suite.servers[0].GetLeader()
 	addr := suite.cfgs[rand.Intn(len(suite.cfgs))].ClientUrls + apiPrefix + "/api/v1/leader"
 	resp, err := testDialClient.Get(addr)
-	re.NoError(err)
+	suite.NoError(err)
 	defer resp.Body.Close()
 	buf, err := io.ReadAll(resp.Body)
-	re.NoError(err)
+	suite.NoError(err)
 
 	var got pdpb.Member
-	re.NoError(json.Unmarshal(buf, &got))
+	suite.NoError(json.Unmarshal(buf, &got))
+	id := got.GetMemberId()
 	peerUrls := got.GetPeerUrls()
 
 	newPeerUrls := []string{"http://127.0.0.1:1111"}
-	suite.changeLeaderPeerUrls(leader, newPeerUrls)
+	suite.changeLeaderPeerUrls(leader, id, newPeerUrls)
 	addr = suite.cfgs[rand.Intn(len(suite.cfgs))].ClientUrls + apiPrefix + "/api/v1/members"
 	resp, err = testDialClient.Get(addr)
-	re.NoError(err)
+	suite.NoError(err)
 	buf, err = io.ReadAll(resp.Body)
-	re.NoError(err)
+	suite.NoError(err)
 	resp.Body.Close()
 	got1 := make(map[string]*pdpb.Member)
 	json.Unmarshal(buf, &got1)
-	re.Equal(newPeerUrls, got1["leader"].GetPeerUrls())
-	re.Equal(newPeerUrls, got1["etcd_leader"].GetPeerUrls())
+	suite.Equal(newPeerUrls, got1["leader"].GetPeerUrls())
+	suite.Equal(newPeerUrls, got1["etcd_leader"].GetPeerUrls())
 
 	// reset
-	suite.changeLeaderPeerUrls(leader, peerUrls)
+	suite.changeLeaderPeerUrls(leader, id, peerUrls)
 }
 
-func (suite *memberTestSuite) changeLeaderPeerUrls(leader *pdpb.Member, urls []string) {
-	re := suite.Require()
-
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints: leader.GetClientUrls(),
-	})
-	re.NoError(err)
-	_, err = cli.MemberUpdate(context.Background(), leader.GetMemberId(), urls)
-	re.NoError(err)
-	cli.Close()
+func (suite *memberTestSuite) changeLeaderPeerUrls(leader *pdpb.Member, id uint64, urls []string) {
+	data := map[string][]string{"peerURLs": urls}
+	postData, err := json.Marshal(data)
+	suite.NoError(err)
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/v2/members/%s", leader.GetClientUrls()[0], fmt.Sprintf("%x", id)), bytes.NewBuffer(postData))
+	suite.NoError(err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := testDialClient.Do(req)
+	suite.NoError(err)
+	suite.Equal(204, resp.StatusCode)
+	resp.Body.Close()
 }
 
-func (suite *memberTestSuite) TestResignMyself() {
-	re := suite.Require()
+type resignTestSuite struct {
+	suite.Suite
+	cfgs    []*config.Config
+	servers []*server.Server
+	clean   testutil.CleanupFunc
+}
+
+func TestResignTestSuite(t *testing.T) {
+	suite.Run(t, new(resignTestSuite))
+}
+
+func (suite *resignTestSuite) SetupSuite() {
+	suite.cfgs, suite.servers, suite.clean = mustNewCluster(suite.Require(), 1)
+}
+
+func (suite *resignTestSuite) TearDownSuite() {
+	suite.clean()
+}
+
+func (suite *resignTestSuite) TestResignMyself() {
 	addr := suite.cfgs[0].ClientUrls + apiPrefix + "/api/v1/leader/resign"
 	resp, err := testDialClient.Post(addr, "", nil)
-	re.NoError(err)
-	re.Equal(http.StatusOK, resp.StatusCode)
+	suite.NoError(err)
+	suite.Equal(http.StatusOK, resp.StatusCode)
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 }

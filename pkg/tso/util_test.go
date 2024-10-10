@@ -18,13 +18,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/utils/keypath"
+	"github.com/tikv/pd/pkg/storage/endpoint"
 )
 
 func TestExtractKeyspaceGroupIDFromKeyspaceGroupMembershipPath(t *testing.T) {
 	re := require.New(t)
 
-	compiledRegexp := keypath.GetCompiledKeyspaceGroupIDRegexp()
+	compiledRegexp := endpoint.GetCompiledKeyspaceGroupIDRegexp()
 
 	rightCases := []struct {
 		path string
@@ -74,7 +74,7 @@ func TestExtractKeyspaceGroupIDFromKeyspaceGroupMembershipPath(t *testing.T) {
 func TestExtractKeyspaceGroupIDFromKeyspaceGroupPrimaryPath(t *testing.T) {
 	re := require.New(t)
 
-	compiledRegexp := keypath.GetCompiledNonDefaultIDRegexp(uint64(111))
+	compiledRegexp := endpoint.GetCompiledNonDefaultIDRegexp(uint64(111))
 
 	rightCases := []struct {
 		path string

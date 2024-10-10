@@ -36,7 +36,7 @@ func newPrepareChecker() *prepareChecker {
 }
 
 // Before starting up the scheduler, we need to take the proportion of the regions on each store into consideration.
-func (checker *prepareChecker) check(c *core.BasicCluster, collectWaitTime ...time.Duration) bool {
+func (checker *prepareChecker) check(c *core.BasicCluster) bool {
 	checker.Lock()
 	defer checker.Unlock()
 	if checker.prepared {
@@ -46,13 +46,10 @@ func (checker *prepareChecker) check(c *core.BasicCluster, collectWaitTime ...ti
 		checker.prepared = true
 		return true
 	}
-	if len(collectWaitTime) > 0 && time.Since(checker.start) < collectWaitTime[0] {
-		return false
-	}
 	notLoadedFromRegionsCnt := c.GetClusterNotFromStorageRegionsCnt()
 	totalRegionsCnt := c.GetTotalRegionCount()
-	// The number of active regions should be more than total region of all stores * core.CollectFactor
-	if float64(totalRegionsCnt)*core.CollectFactor > float64(notLoadedFromRegionsCnt) {
+	// The number of active regions should be more than total region of all stores * collectFactor
+	if float64(totalRegionsCnt)*collectFactor > float64(notLoadedFromRegionsCnt) {
 		return false
 	}
 	for _, store := range c.GetStores() {
@@ -60,11 +57,8 @@ func (checker *prepareChecker) check(c *core.BasicCluster, collectWaitTime ...ti
 			continue
 		}
 		storeID := store.GetID()
-		// It is used to avoid sudden scheduling when scheduling service is just started.
-		if len(collectWaitTime) > 0 && (float64(store.GetStoreStats().GetRegionCount())*core.CollectFactor > float64(c.GetNotFromStorageRegionsCntByStore(storeID))) {
-			return false
-		}
-		if !c.IsStorePrepared(storeID) {
+		// For each store, the number of active regions should be more than total region of the store * collectFactor
+		if float64(c.GetStoreRegionCount(storeID))*collectFactor > float64(c.GetNotFromStorageRegionsCntByStore(storeID)) {
 			return false
 		}
 	}
@@ -73,14 +67,13 @@ func (checker *prepareChecker) check(c *core.BasicCluster, collectWaitTime ...ti
 	return true
 }
 
-// IsPrepared returns whether the coordinator is prepared.
 func (checker *prepareChecker) IsPrepared() bool {
 	checker.RLock()
 	defer checker.RUnlock()
 	return checker.prepared
 }
 
-// SetPrepared is for test purpose
+// for test purpose
 func (checker *prepareChecker) SetPrepared() {
 	checker.Lock()
 	defer checker.Unlock()

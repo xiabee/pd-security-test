@@ -34,7 +34,6 @@ import (
 	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
 	"go.uber.org/zap"
 )
 
@@ -107,7 +106,7 @@ const (
 type cluster interface {
 	core.StoreSetInformer
 
-	ResetRegionCache()
+	DropCacheAllRegion()
 	AllocID() (uint64, error)
 	BuryStore(storeID uint64, forceBury bool) error
 	GetSchedulerConfig() sc.SchedulerConfigProvider
@@ -544,7 +543,7 @@ func (u *Controller) changeStage(stage stage) {
 	case Finished:
 		if u.step > 1 {
 			// == 1 means no operation has done, no need to invalid cache
-			u.cluster.ResetRegionCache()
+			u.cluster.DropCacheAllRegion()
 		}
 		output.Info = "Unsafe recovery Finished"
 		output.Details = u.getAffectedTableDigest()
@@ -751,40 +750,34 @@ type regionItem struct {
 
 // Less returns true if the region start key is less than the other.
 func (r *regionItem) Less(other *regionItem) bool {
-	left := r.region().GetStartKey()
-	right := other.region().GetStartKey()
+	left := r.Region().GetStartKey()
+	right := other.Region().GetStartKey()
 	return bytes.Compare(left, right) < 0
 }
 
-func (r *regionItem) contains(key []byte) bool {
-	start, end := r.region().GetStartKey(), r.region().GetEndKey()
+func (r *regionItem) Contains(key []byte) bool {
+	start, end := r.Region().GetStartKey(), r.Region().GetEndKey()
 	return bytes.Compare(key, start) >= 0 && (len(end) == 0 || bytes.Compare(key, end) < 0)
 }
 
-func (r *regionItem) region() *metapb.Region {
+func (r *regionItem) Region() *metapb.Region {
 	return r.report.GetRegionState().GetRegion()
 }
 
-func (r *regionItem) isInitialized() bool {
-	return len(r.region().Peers) != 0
+func (r *regionItem) IsInitialized() bool {
+	return len(r.Region().Peers) != 0
 }
 
-func (r *regionItem) isEpochStale(other *regionItem) bool {
-	re := r.region().GetRegionEpoch()
-	oe := other.region().GetRegionEpoch()
+func (r *regionItem) IsEpochStale(other *regionItem) bool {
+	re := r.Region().GetRegionEpoch()
+	oe := other.Region().GetRegionEpoch()
 	return re.GetVersion() < oe.GetVersion() || (re.GetVersion() == oe.GetVersion() && re.GetConfVer() < oe.GetConfVer())
 }
 
-func (r *regionItem) isRaftStale(origin *regionItem, u *Controller) bool {
+func (r *regionItem) IsRaftStale(origin *regionItem, u *Controller) bool {
 	cmps := []func(a, b *regionItem) int{
 		func(a, b *regionItem) int {
 			return int(a.report.GetRaftState().GetHardState().GetTerm()) - int(b.report.GetRaftState().GetHardState().GetTerm())
-		},
-		// choose the peer has maximum applied index or last index.
-		func(a, b *regionItem) int {
-			maxIdxA := typeutil.MaxUint64(a.report.GetRaftState().GetLastIndex(), a.report.AppliedIndex)
-			maxIdxB := typeutil.MaxUint64(b.report.GetRaftState().GetLastIndex(), b.report.AppliedIndex)
-			return int(maxIdxA - maxIdxB)
 		},
 		func(a, b *regionItem) int {
 			return int(a.report.GetRaftState().GetLastIndex()) - int(b.report.GetRaftState().GetLastIndex())
@@ -800,7 +793,7 @@ func (r *regionItem) isRaftStale(origin *regionItem, u *Controller) bool {
 				return 1
 			}
 			// better use voter rather than learner
-			for _, peer := range a.region().GetPeers() {
+			for _, peer := range a.Region().GetPeers() {
 				if peer.StoreId == a.storeID {
 					if peer.Role == metapb.PeerRole_DemotingVoter || peer.Role == metapb.PeerRole_Learner {
 						return -1
@@ -857,11 +850,11 @@ func (t *regionTree) getOverlaps(item *regionItem) []*regionItem {
 		result = item
 	}
 
-	end := item.region().GetEndKey()
+	end := item.Region().GetEndKey()
 	var overlaps []*regionItem
 	t.tree.AscendGreaterOrEqual(result, func(i *regionItem) bool {
 		over := i
-		if len(end) > 0 && bytes.Compare(end, over.region().GetStartKey()) <= 0 {
+		if len(end) > 0 && bytes.Compare(end, over.Region().GetStartKey()) <= 0 {
 			return false
 		}
 		overlaps = append(overlaps, over)
@@ -878,7 +871,7 @@ func (t *regionTree) find(item *regionItem) *regionItem {
 		return false
 	})
 
-	if result == nil || !result.contains(item.region().GetStartKey()) {
+	if result == nil || !result.Contains(item.Region().GetStartKey()) {
 		return nil
 	}
 
@@ -891,15 +884,15 @@ func (t *regionTree) find(item *regionItem) *regionItem {
 func (t *regionTree) insert(item *regionItem) (bool, error) {
 	overlaps := t.getOverlaps(item)
 
-	if t.contains(item.region().GetId()) {
+	if t.contains(item.Region().GetId()) {
 		// it's ensured by the `buildUpFromReports` that only insert the latest peer of one region.
-		return false, errors.Errorf("region %v shouldn't be updated twice", item.region().GetId())
+		return false, errors.Errorf("region %v shouldn't be updated twice", item.Region().GetId())
 	}
 
 	for _, newer := range overlaps {
-		log.Info("unsafe recovery found overlap regions", logutil.ZapRedactStringer("newer-region-meta", core.RegionToHexMeta(newer.region())), logutil.ZapRedactStringer("older-region-meta", core.RegionToHexMeta(item.region())))
+		log.Info("unsafe recovery found overlap regions", logutil.ZapRedactStringer("newer-region-meta", core.RegionToHexMeta(newer.Region())), logutil.ZapRedactStringer("older-region-meta", core.RegionToHexMeta(item.Region())))
 		// it's ensured by the `buildUpFromReports` that peers are inserted in epoch descending order.
-		if newer.isEpochStale(item) {
+		if newer.IsEpochStale(item) {
 			return false, errors.Errorf("region %v's epoch shouldn't be staler than old ones %v", item, newer)
 		}
 	}
@@ -907,7 +900,7 @@ func (t *regionTree) insert(item *regionItem) (bool, error) {
 		return false, nil
 	}
 
-	t.regions[item.region().GetId()] = item
+	t.regions[item.Region().GetId()] = item
 	t.tree.ReplaceOrInsert(item)
 	return true, nil
 }
@@ -925,7 +918,7 @@ func (u *Controller) buildUpFromReports() (*regionTree, map[uint64][]*regionItem
 	for storeID, storeReport := range u.storeReports {
 		for _, peerReport := range storeReport.PeerReports {
 			item := &regionItem{report: peerReport, storeID: storeID}
-			peersMap[item.region().GetId()] = append(peersMap[item.region().GetId()], item)
+			peersMap[item.Region().GetId()] = append(peersMap[item.Region().GetId()], item)
 		}
 	}
 
@@ -934,11 +927,11 @@ func (u *Controller) buildUpFromReports() (*regionTree, map[uint64][]*regionItem
 	for _, peers := range peersMap {
 		var latest *regionItem
 		for _, peer := range peers {
-			if latest == nil || latest.isEpochStale(peer) {
+			if latest == nil || latest.IsEpochStale(peer) {
 				latest = peer
 			}
 		}
-		if !latest.isInitialized() {
+		if !latest.IsInitialized() {
 			// ignore the uninitialized peer
 			continue
 		}
@@ -947,7 +940,7 @@ func (u *Controller) buildUpFromReports() (*regionTree, map[uint64][]*regionItem
 
 	// sort in descending order of epoch
 	sort.SliceStable(newestPeerReports, func(i, j int) bool {
-		return newestPeerReports[j].isEpochStale(newestPeerReports[i])
+		return newestPeerReports[j].IsEpochStale(newestPeerReports[i])
 	})
 
 	newestRegionTree := newRegionTree()
@@ -963,7 +956,7 @@ func (u *Controller) buildUpFromReports() (*regionTree, map[uint64][]*regionItem
 func (u *Controller) selectLeader(peersMap map[uint64][]*regionItem, region *metapb.Region) *regionItem {
 	var leader *regionItem
 	for _, peer := range peersMap[region.GetId()] {
-		if leader == nil || leader.isRaftStale(peer, u) {
+		if leader == nil || leader.IsRaftStale(peer, u) {
 			leader = peer
 		}
 	}
@@ -978,7 +971,7 @@ func (u *Controller) generateTombstoneTiFlashLearnerPlan(newestRegionTree *regio
 
 	var err error
 	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
-		region := item.region()
+		region := item.Region()
 		if !u.canElectLeader(region, false) {
 			leader := u.selectLeader(peersMap, region)
 			if leader == nil {
@@ -1019,7 +1012,7 @@ func (u *Controller) generateForceLeaderPlan(newestRegionTree *regionTree, peers
 	// considering the Failed stores
 	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
 		report := item.report
-		region := item.region()
+		region := item.Region()
 		if !u.canElectLeader(region, false) {
 			if hasForceLeader(region) {
 				// already is a force leader, skip
@@ -1050,7 +1043,7 @@ func (u *Controller) generateForceLeaderPlan(newestRegionTree *regionTree, peers
 			}
 			if u.autoDetect {
 				// For auto detect, the failedStores is empty. So need to add the detected Failed store to the list
-				for _, peer := range u.getFailedPeers(leader.region()) {
+				for _, peer := range u.getFailedPeers(leader.Region()) {
 					found := false
 					for _, store := range storeRecoveryPlan.ForceLeader.FailedStores {
 						if store == peer.StoreId {
@@ -1064,7 +1057,7 @@ func (u *Controller) generateForceLeaderPlan(newestRegionTree *regionTree, peers
 				}
 			}
 			storeRecoveryPlan.ForceLeader.EnterForceLeaders = append(storeRecoveryPlan.ForceLeader.EnterForceLeaders, region.GetId())
-			u.recordAffectedRegion(leader.region())
+			u.recordAffectedRegion(leader.Region())
 			hasPlan = true
 		}
 		return true
@@ -1104,7 +1097,7 @@ func (u *Controller) generateDemoteFailedVoterPlan(newestRegionTree *regionTree,
 	// Check the regions in newest Region Tree to see if it can still elect leader
 	// considering the Failed stores
 	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
-		region := item.region()
+		region := item.Region()
 		if !u.canElectLeader(region, false) {
 			leader := findForceLeader(peersMap, region)
 			if leader == nil {
@@ -1115,10 +1108,10 @@ func (u *Controller) generateDemoteFailedVoterPlan(newestRegionTree *regionTree,
 			storeRecoveryPlan.Demotes = append(storeRecoveryPlan.Demotes,
 				&pdpb.DemoteFailedVoters{
 					RegionId:     region.GetId(),
-					FailedVoters: u.getFailedPeers(leader.region()),
+					FailedVoters: u.getFailedPeers(leader.Region()),
 				},
 			)
-			u.recordAffectedRegion(leader.region())
+			u.recordAffectedRegion(leader.Region())
 			hasPlan = true
 		}
 		return true
@@ -1181,7 +1174,7 @@ func (u *Controller) generateCreateEmptyRegionPlan(newestRegionTree *regionTree,
 	lastEnd := []byte("")
 	var lastStoreID uint64
 	newestRegionTree.tree.Ascend(func(item *regionItem) bool {
-		region := item.region()
+		region := item.Region()
 		storeID := item.storeID
 		if !bytes.Equal(region.StartKey, lastEnd) {
 			if u.cluster.GetStore(storeID).IsTiFlash() {
@@ -1200,16 +1193,16 @@ func (u *Controller) generateCreateEmptyRegionPlan(newestRegionTree *regionTree,
 			// paranoid check: shouldn't overlap with any of the peers
 			for _, peers := range peersMap {
 				for _, peer := range peers {
-					if !peer.isInitialized() {
+					if !peer.IsInitialized() {
 						continue
 					}
-					if (bytes.Compare(newRegion.StartKey, peer.region().StartKey) <= 0 &&
-						(len(newRegion.EndKey) == 0 || bytes.Compare(peer.region().StartKey, newRegion.EndKey) < 0)) ||
-						((len(peer.region().EndKey) == 0 || bytes.Compare(newRegion.StartKey, peer.region().EndKey) < 0) &&
-							(len(newRegion.EndKey) == 0 || (len(peer.region().EndKey) != 0 && bytes.Compare(peer.region().EndKey, newRegion.EndKey) <= 0))) {
+					if (bytes.Compare(newRegion.StartKey, peer.Region().StartKey) <= 0 &&
+						(len(newRegion.EndKey) == 0 || bytes.Compare(peer.Region().StartKey, newRegion.EndKey) < 0)) ||
+						((len(peer.Region().EndKey) == 0 || bytes.Compare(newRegion.StartKey, peer.Region().EndKey) < 0) &&
+							(len(newRegion.EndKey) == 0 || (len(peer.Region().EndKey) != 0 && bytes.Compare(peer.Region().EndKey, newRegion.EndKey) <= 0))) {
 						err = errors.Errorf(
 							"Find overlap peer %v with newly created empty region %v",
-							logutil.RedactStringer(core.RegionToHexMeta(peer.region())),
+							logutil.RedactStringer(core.RegionToHexMeta(peer.Region())),
 							logutil.RedactStringer(core.RegionToHexMeta(newRegion)),
 						)
 						return false

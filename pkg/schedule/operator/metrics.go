@@ -14,10 +14,7 @@
 
 package operator
 
-import (
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tikv/pd/pkg/schedule/types"
-)
+import "github.com/prometheus/client_golang/prometheus"
 
 var (
 	operatorStepDuration = prometheus.NewHistogramVec(
@@ -29,7 +26,8 @@ var (
 			Buckets:   []float64{0.5, 1, 2, 4, 8, 16, 20, 40, 60, 90, 120, 180, 240, 300, 480, 600, 720, 900, 1200, 1800, 3600},
 		}, []string{"type"})
 
-	operatorLimitCounter = prometheus.NewCounterVec(
+	// OperatorLimitCounter exposes the counter when meeting limit.
+	OperatorLimitCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "pd",
 			Subsystem: "schedule",
@@ -84,15 +82,10 @@ var (
 
 func init() {
 	prometheus.MustRegister(operatorStepDuration)
-	prometheus.MustRegister(operatorLimitCounter)
+	prometheus.MustRegister(OperatorLimitCounter)
 	prometheus.MustRegister(OperatorExceededStoreLimitCounter)
 	prometheus.MustRegister(operatorCounter)
 	prometheus.MustRegister(operatorDuration)
 	prometheus.MustRegister(operatorSizeHist)
 	prometheus.MustRegister(storeLimitCostCounter)
-}
-
-// IncOperatorLimitCounter increases the counter of operator meeting limit.
-func IncOperatorLimitCounter(typ types.CheckerSchedulerType, kind OpKind) {
-	operatorLimitCounter.WithLabelValues(typ.String(), kind.String()).Inc()
 }

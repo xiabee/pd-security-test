@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/core/storelimit"
-	"github.com/tikv/pd/pkg/schedule/types"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 )
 
@@ -33,13 +32,13 @@ const RejectLeader = "reject-leader"
 var schedulerMap sync.Map
 
 // RegisterScheduler registers the scheduler type.
-func RegisterScheduler(typ types.CheckerSchedulerType) {
+func RegisterScheduler(typ string) {
 	schedulerMap.Store(typ, struct{}{})
 }
 
 // IsSchedulerRegistered checks if the named scheduler type is registered.
-func IsSchedulerRegistered(typ types.CheckerSchedulerType) bool {
-	_, ok := schedulerMap.Load(typ)
+func IsSchedulerRegistered(name string) bool {
+	_, ok := schedulerMap.Load(name)
 	return ok
 }
 
@@ -50,9 +49,9 @@ type SchedulerConfigProvider interface {
 	SetSchedulingAllowanceStatus(bool, string)
 	GetStoresLimit() map[uint64]StoreLimitConfig
 
-	IsSchedulerDisabled(types.CheckerSchedulerType) bool
-	AddSchedulerCfg(types.CheckerSchedulerType, []string)
-	RemoveSchedulerCfg(types.CheckerSchedulerType)
+	IsSchedulerDisabled(string) bool
+	AddSchedulerCfg(string, []string)
+	RemoveSchedulerCfg(string)
 	Persist(endpoint.ConfigStorage) error
 
 	GetRegionScheduleLimit() uint64

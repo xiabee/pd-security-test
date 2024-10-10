@@ -16,7 +16,6 @@ package schedulers
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -29,7 +28,6 @@ import (
 	"github.com/tikv/pd/pkg/schedule/labeler"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
-	"github.com/tikv/pd/pkg/schedule/types"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
@@ -49,7 +47,7 @@ type Controller struct {
 	ctx     context.Context
 	cluster sche.SchedulerCluster
 	storage endpoint.ConfigStorage
-	// schedulers are used to manage all schedulers, which will only be initialized
+	// schedulers is used to manage all schedulers, which will only be initialized
 	// and used in the PD leader service mode now.
 	schedulers map[string]*ScheduleController
 	// schedulerHandlers is used to manage the HTTP handlers of schedulers,
@@ -149,17 +147,12 @@ func (c *Controller) AddSchedulerHandler(scheduler Scheduler, args ...string) er
 	}
 
 	c.schedulerHandlers[name] = scheduler
-	if err := scheduler.SetDisable(false); err != nil {
-		log.Error("can not update scheduler status", zap.String("scheduler-name", name),
-			errs.ZapError(err))
-		// No need to return here, we still use the scheduler config to control the `disable` now.
-	}
 	if err := SaveSchedulerConfig(c.storage, scheduler); err != nil {
 		log.Error("can not save HTTP scheduler config", zap.String("scheduler-name", scheduler.GetName()), errs.ZapError(err))
 		return err
 	}
 	c.cluster.GetSchedulerConfig().AddSchedulerCfg(scheduler.GetType(), args)
-	return scheduler.PrepareConfig(c.cluster)
+	return nil
 }
 
 // RemoveSchedulerHandler removes the HTTP handler for a scheduler.
@@ -181,18 +174,13 @@ func (c *Controller) RemoveSchedulerHandler(name string) error {
 		return err
 	}
 
-	// nolint:errcheck
-	// SetDisable will not work now, because the config is removed. We can't
-	// remove the config in the future, if we want to use `Disable` of independent
-	// config.
-	_ = s.(Scheduler).SetDisable(true)
 	if err := c.storage.RemoveSchedulerConfig(name); err != nil {
 		log.Error("can not remove the scheduler config", errs.ZapError(err))
 		return err
 	}
 
-	s.(Scheduler).CleanConfig(c.cluster)
 	delete(c.schedulerHandlers, name)
+
 	return nil
 }
 
@@ -201,24 +189,18 @@ func (c *Controller) AddScheduler(scheduler Scheduler, args ...string) error {
 	c.Lock()
 	defer c.Unlock()
 
-	name := scheduler.GetName()
-	if _, ok := c.schedulers[name]; ok {
+	if _, ok := c.schedulers[scheduler.GetName()]; ok {
 		return errs.ErrSchedulerExisted.FastGenByArgs()
 	}
 
 	s := NewScheduleController(c.ctx, c.cluster, c.opController, scheduler)
-	if err := s.Scheduler.PrepareConfig(c.cluster); err != nil {
+	if err := s.Scheduler.Prepare(c.cluster); err != nil {
 		return err
 	}
 
 	c.wg.Add(1)
 	go c.runScheduler(s)
 	c.schedulers[s.Scheduler.GetName()] = s
-	if err := scheduler.SetDisable(false); err != nil {
-		log.Error("can not update scheduler status", zap.String("scheduler-name", name),
-			errs.ZapError(err))
-		// No need to return here, we still use the scheduler config to control the `disable` now.
-	}
 	if err := SaveSchedulerConfig(c.storage, scheduler); err != nil {
 		log.Error("can not save scheduler config", zap.String("scheduler-name", scheduler.GetName()), errs.ZapError(err))
 		return err
@@ -246,11 +228,6 @@ func (c *Controller) RemoveScheduler(name string) error {
 		return err
 	}
 
-	// nolint:errcheck
-	// SetDisable will not work now, because the config is removed. We can't
-	// remove the config in the future, if we want to use `Disable` of independent
-	// config.
-	_ = s.SetDisable(true)
 	if err := c.storage.RemoveSchedulerConfig(name); err != nil {
 		log.Error("can not remove the scheduler config", errs.ZapError(err))
 		return err
@@ -259,6 +236,7 @@ func (c *Controller) RemoveScheduler(name string) error {
 	s.Stop()
 	schedulerStatusGauge.DeleteLabelValues(name, "allow")
 	delete(c.schedulers, name)
+
 	return nil
 }
 
@@ -296,7 +274,7 @@ func (c *Controller) PauseOrResumeScheduler(name string, t int64) error {
 // ReloadSchedulerConfig reloads a scheduler's config if it exists.
 func (c *Controller) ReloadSchedulerConfig(name string) error {
 	if exist, _ := c.IsSchedulerExisted(name); !exist {
-		return fmt.Errorf("scheduler %s is not existed", name)
+		return nil
 	}
 	return c.GetScheduler(name).ReloadConfig()
 }
@@ -361,7 +339,7 @@ func (c *Controller) IsSchedulerExisted(name string) (bool, error) {
 func (c *Controller) runScheduler(s *ScheduleController) {
 	defer logutil.LogPanic()
 	defer c.wg.Done()
-	defer s.Scheduler.CleanConfig(c.cluster)
+	defer s.Scheduler.Cleanup(c.cluster)
 
 	ticker := time.NewTicker(s.GetInterval())
 	defer ticker.Stop()
@@ -419,7 +397,7 @@ func (c *Controller) GetPausedSchedulerDelayUntil(name string) (int64, error) {
 func (c *Controller) CheckTransferWitnessLeader(region *core.RegionInfo) {
 	if core.NeedTransferWitnessLeader(region) {
 		c.RLock()
-		s, ok := c.schedulers[types.TransferWitnessLeaderScheduler.String()]
+		s, ok := c.schedulers[TransferWitnessLeaderName]
 		c.RUnlock()
 		if ok {
 			select {
@@ -429,11 +407,6 @@ func (c *Controller) CheckTransferWitnessLeader(region *core.RegionInfo) {
 			}
 		}
 	}
-}
-
-// GetAllSchedulerConfigs returns all scheduler configs.
-func (c *Controller) GetAllSchedulerConfigs() ([]string, []string, error) {
-	return c.storage.LoadAllSchedulerConfigs()
 }
 
 // ScheduleController is used to manage a scheduler.
@@ -459,7 +432,7 @@ func NewScheduleController(ctx context.Context, cluster sche.SchedulerCluster, o
 		nextInterval:       s.GetMinInterval(),
 		ctx:                ctx,
 		cancel:             cancel,
-		diagnosticRecorder: NewDiagnosticRecorder(s.GetType(), cluster.GetSchedulerConfig()),
+		diagnosticRecorder: NewDiagnosticRecorder(s.GetName(), cluster.GetSchedulerConfig()),
 	}
 }
 
@@ -475,8 +448,6 @@ func (s *ScheduleController) Stop() {
 
 // Schedule tries to create some operators.
 func (s *ScheduleController) Schedule(diagnosable bool) []*operator.Operator {
-	_, isEvictLeaderScheduler := s.Scheduler.(*evictLeaderScheduler)
-retry:
 	for i := 0; i < maxScheduleRetries; i++ {
 		// no need to retry if schedule should stop to speed exit
 		select {
@@ -491,34 +462,29 @@ retry:
 		if diagnosable {
 			s.diagnosticRecorder.SetResultFromPlans(ops, plans)
 		}
-		if len(ops) == 0 {
-			continue
-		}
-
-		// If we have schedule, reset interval to the minimal interval.
-		s.nextInterval = s.Scheduler.GetMinInterval()
-		for i := 0; i < len(ops); i++ {
-			region := s.cluster.GetRegion(ops[i].RegionID())
-			if region == nil {
-				continue retry
+		foundDisabled := false
+		for _, op := range ops {
+			if labelMgr := s.cluster.GetRegionLabeler(); labelMgr != nil {
+				region := s.cluster.GetRegion(op.RegionID())
+				if region == nil {
+					continue
+				}
+				if labelMgr.ScheduleDisabled(region) {
+					denySchedulersByLabelerCounter.Inc()
+					foundDisabled = true
+					break
+				}
 			}
-			labelMgr := s.cluster.GetRegionLabeler()
-			if labelMgr == nil {
+		}
+		if len(ops) > 0 {
+			// If we have schedule, reset interval to the minimal interval.
+			s.nextInterval = s.Scheduler.GetMinInterval()
+			// try regenerating operators
+			if foundDisabled {
 				continue
 			}
-
-			// If the evict-leader-scheduler is disabled, it will obstruct the restart operation of tikv by the operator.
-			// Refer: https://docs.pingcap.com/tidb-in-kubernetes/stable/restart-a-tidb-cluster#perform-a-graceful-restart-to-a-single-tikv-pod
-			if labelMgr.ScheduleDisabled(region) && !isEvictLeaderScheduler {
-				denySchedulersByLabelerCounter.Inc()
-				ops = append(ops[:i], ops[i+1:]...)
-				i--
-			}
+			return ops
 		}
-		if len(ops) == 0 {
-			continue
-		}
-		return ops
 	}
 	s.nextInterval = s.Scheduler.GetNextInterval(s.nextInterval)
 	return nil

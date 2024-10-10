@@ -47,7 +47,7 @@ type storeStatistics struct {
 	LeaderCount     int
 	LearnerCount    int
 	WitnessCount    int
-	LabelCounter    map[string][]uint64
+	LabelCounter    map[string]int
 	Preparing       int
 	Serving         int
 	Removing        int
@@ -57,11 +57,11 @@ type storeStatistics struct {
 func newStoreStatistics(opt config.ConfProvider) *storeStatistics {
 	return &storeStatistics{
 		opt:          opt,
-		LabelCounter: make(map[string][]uint64),
+		LabelCounter: make(map[string]int),
 	}
 }
 
-func (s *storeStatistics) observe(store *core.StoreInfo) {
+func (s *storeStatistics) Observe(store *core.StoreInfo) {
 	for _, k := range s.opt.GetLocationLabels() {
 		v := store.GetLabelValue(k)
 		if v == "" {
@@ -70,7 +70,7 @@ func (s *storeStatistics) observe(store *core.StoreInfo) {
 		key := fmt.Sprintf("%s:%s", k, v)
 		// exclude tombstone
 		if !store.IsRemoved() {
-			s.LabelCounter[key] = append(s.LabelCounter[key], store.GetID())
+			s.LabelCounter[key]++
 		}
 	}
 	storeAddress := store.GetAddress()
@@ -147,8 +147,7 @@ func (s *storeStatistics) observe(store *core.StoreInfo) {
 	}
 }
 
-// ObserveHotStat records the hot region metrics for the store.
-func ObserveHotStat(store *core.StoreInfo, stats *StoresStats) {
+func (s *storeStatistics) ObserveHotStat(store *core.StoreInfo, stats *StoresStats) {
 	// Store flows.
 	storeAddress := store.GetAddress()
 	id := strconv.FormatUint(store.GetID(), 10)
@@ -179,7 +178,7 @@ func ObserveHotStat(store *core.StoreInfo, stats *StoresStats) {
 	storeStatusGauge.WithLabelValues(storeAddress, id, "store_regions_write_rate_keys_instant").Set(storeFlowStats.GetInstantLoad(utils.StoreRegionsWriteKeys))
 }
 
-func (s *storeStatistics) collect() {
+func (s *storeStatistics) Collect() {
 	placementStatusGauge.Reset()
 
 	metrics := make(map[string]float64)
@@ -250,10 +249,8 @@ func (s *storeStatistics) collect() {
 		configStatusGauge.WithLabelValues(typ).Set(value)
 	}
 
-	for name, stores := range s.LabelCounter {
-		for _, storeID := range stores {
-			placementStatusGauge.WithLabelValues(labelType, name, strconv.FormatUint(storeID, 10)).Set(1)
-		}
+	for name, value := range s.LabelCounter {
+		placementStatusGauge.WithLabelValues(labelType, name).Set(float64(value))
 	}
 
 	for storeID, limit := range s.opt.GetStoresLimit() {
@@ -308,14 +305,16 @@ func NewStoreStatisticsMap(opt config.ConfProvider) *storeStatisticsMap {
 	}
 }
 
-// Observe observes the store.
 func (m *storeStatisticsMap) Observe(store *core.StoreInfo) {
-	m.stats.observe(store)
+	m.stats.Observe(store)
 }
 
-// Collect collects the metrics.
+func (m *storeStatisticsMap) ObserveHotStat(store *core.StoreInfo, stats *StoresStats) {
+	m.stats.ObserveHotStat(store, stats)
+}
+
 func (m *storeStatisticsMap) Collect() {
-	m.stats.collect()
+	m.stats.Collect()
 }
 
 // Reset resets the metrics.
@@ -323,7 +322,4 @@ func Reset() {
 	storeStatusGauge.Reset()
 	clusterStatusGauge.Reset()
 	placementStatusGauge.Reset()
-	ResetRegionStatsMetrics()
-	ResetLabelStatsMetrics()
-	ResetHotCacheStatusMetrics()
 }

@@ -23,7 +23,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server/apiv2/handlers"
 	"github.com/tikv/pd/tests"
@@ -46,24 +46,22 @@ func TestKeyspaceTestSuite(t *testing.T) {
 }
 
 func (suite *keyspaceTestSuite) SetupTest() {
-	re := suite.Require()
 	ctx, cancel := context.WithCancel(context.Background())
 	suite.cleanup = cancel
 	cluster, err := tests.NewTestCluster(ctx, 1)
 	suite.cluster = cluster
-	re.NoError(err)
-	re.NoError(cluster.RunInitialServers())
-	re.NotEmpty(cluster.WaitLeader())
+	suite.NoError(err)
+	suite.NoError(cluster.RunInitialServers())
+	suite.NotEmpty(cluster.WaitLeader())
 	suite.server = cluster.GetLeaderServer()
-	re.NoError(suite.server.BootstrapCluster())
-	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion", "return(true)"))
+	suite.NoError(suite.server.BootstrapCluster())
+	suite.NoError(failpoint.Enable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion", "return(true)"))
 }
 
 func (suite *keyspaceTestSuite) TearDownTest() {
-	re := suite.Require()
 	suite.cleanup()
 	suite.cluster.Destroy()
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion"))
+	suite.NoError(failpoint.Disable("github.com/tikv/pd/pkg/keyspace/skipSplitRegion"))
 }
 
 func (suite *keyspaceTestSuite) TestCreateLoadKeyspace() {
@@ -73,8 +71,8 @@ func (suite *keyspaceTestSuite) TestCreateLoadKeyspace() {
 		loaded := mustLoadKeyspaces(re, suite.server, created.Name)
 		re.Equal(created, loaded)
 	}
-	defaultKeyspace := mustLoadKeyspaces(re, suite.server, constant.DefaultKeyspaceName)
-	re.Equal(constant.DefaultKeyspaceName, defaultKeyspace.Name)
+	defaultKeyspace := mustLoadKeyspaces(re, suite.server, utils.DefaultKeyspaceName)
+	re.Equal(utils.DefaultKeyspaceName, defaultKeyspace.Name)
 	re.Equal(keyspacepb.KeyspaceState_ENABLED, defaultKeyspace.State)
 }
 
@@ -109,7 +107,7 @@ func (suite *keyspaceTestSuite) TestUpdateKeyspaceState() {
 		success, disabledAgain := sendUpdateStateRequest(re, suite.server, created.Name, &handlers.UpdateStateParam{State: "disabled"})
 		re.True(success)
 		re.Equal(disabled, disabledAgain)
-		// Tombstone a DISABLED keyspace should not be allowed.
+		// Tombstoning a DISABLED keyspace should not be allowed.
 		success, _ = sendUpdateStateRequest(re, suite.server, created.Name, &handlers.UpdateStateParam{State: "tombstone"})
 		re.False(success)
 		// Archiving a DISABLED keyspace should be allowed.
@@ -119,13 +117,13 @@ func (suite *keyspaceTestSuite) TestUpdateKeyspaceState() {
 		// Enabling an ARCHIVED keyspace is not allowed.
 		success, _ = sendUpdateStateRequest(re, suite.server, created.Name, &handlers.UpdateStateParam{State: "enabled"})
 		re.False(success)
-		// Tombstone an ARCHIVED keyspace is allowed.
+		// Tombstoning an ARCHIVED keyspace is allowed.
 		success, tombstone := sendUpdateStateRequest(re, suite.server, created.Name, &handlers.UpdateStateParam{State: "tombstone"})
 		re.True(success)
 		re.Equal(keyspacepb.KeyspaceState_TOMBSTONE, tombstone.State)
 	}
 	// Changing default keyspace's state is NOT allowed.
-	success, _ := sendUpdateStateRequest(re, suite.server, constant.DefaultKeyspaceName, &handlers.UpdateStateParam{State: "disabled"})
+	success, _ := sendUpdateStateRequest(re, suite.server, utils.DefaultKeyspaceName, &handlers.UpdateStateParam{State: "disabled"})
 	re.False(success)
 }
 
@@ -135,11 +133,11 @@ func (suite *keyspaceTestSuite) TestLoadRangeKeyspace() {
 	loadResponse := sendLoadRangeRequest(re, suite.server, "", "")
 	re.Empty(loadResponse.NextPageToken) // Load response should contain no more pages.
 	// Load response should contain all created keyspace and a default.
-	re.Len(loadResponse.Keyspaces, len(keyspaces)+1)
+	re.Equal(len(keyspaces)+1, len(loadResponse.Keyspaces))
 	for i, created := range keyspaces {
 		re.Equal(created, loadResponse.Keyspaces[i+1].KeyspaceMeta)
 	}
-	re.Equal(constant.DefaultKeyspaceName, loadResponse.Keyspaces[0].Name)
+	re.Equal(utils.DefaultKeyspaceName, loadResponse.Keyspaces[0].Name)
 	re.Equal(keyspacepb.KeyspaceState_ENABLED, loadResponse.Keyspaces[0].State)
 }
 

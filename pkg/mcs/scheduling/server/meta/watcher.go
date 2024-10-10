@@ -16,18 +16,16 @@ package meta
 
 import (
 	"context"
-	"strconv"
 	"sync"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/statistics"
+	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/keypath"
-	"go.etcd.io/etcd/api/v3/mvccpb"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/mvcc/mvccpb"
 	"go.uber.org/zap"
 )
 
@@ -59,7 +57,7 @@ func NewWatcher(
 		ctx:             ctx,
 		cancel:          cancel,
 		clusterID:       clusterID,
-		storePathPrefix: keypath.StorePathPrefix(clusterID),
+		storePathPrefix: endpoint.StorePathPrefix(clusterID),
 		etcdClient:      etcdClient,
 		basicCluster:    basicCluster,
 	}
@@ -78,42 +76,35 @@ func (w *Watcher) initializeStoreWatcher() error {
 				zap.String("event-kv-key", string(kv.Key)), zap.Error(err))
 			return err
 		}
-		log.Debug("update store meta", zap.Stringer("store", store))
 		origin := w.basicCluster.GetStore(store.GetId())
 		if origin == nil {
 			w.basicCluster.PutStore(core.NewStoreInfo(store))
-		} else {
-			w.basicCluster.PutStore(origin.Clone(core.SetStoreMeta(store)))
+			return nil
 		}
-
-		if store.GetNodeState() == metapb.NodeState_Removed {
-			statistics.ResetStoreStatistics(store.GetAddress(), strconv.FormatUint(store.GetId(), 10))
-			// TODO: remove hot stats
-		}
-
+		w.basicCluster.PutStore(origin.Clone(core.SetStoreState(store.GetState(), store.GetPhysicallyDestroyed())))
 		return nil
 	}
 	deleteFn := func(kv *mvccpb.KeyValue) error {
 		key := string(kv.Key)
-		storeID, err := keypath.ExtractStoreIDFromPath(w.clusterID, key)
+		storeID, err := endpoint.ExtractStoreIDFromPath(w.clusterID, key)
 		if err != nil {
 			return err
 		}
 		origin := w.basicCluster.GetStore(storeID)
 		if origin != nil {
 			w.basicCluster.DeleteStore(origin)
-			log.Info("delete store meta", zap.Uint64("store-id", storeID))
 		}
+		return nil
+	}
+	postEventFn := func() error {
 		return nil
 	}
 	w.storeWatcher = etcdutil.NewLoopWatcher(
 		w.ctx, &w.wg,
 		w.etcdClient,
 		"scheduling-store-watcher", w.storePathPrefix,
-		func([]*clientv3.Event) error { return nil },
-		putFn, deleteFn,
-		func([]*clientv3.Event) error { return nil },
-		true, /* withPrefix */
+		putFn, deleteFn, postEventFn,
+		clientv3.WithPrefix(),
 	)
 	w.storeWatcher.StartWatchLoop()
 	return w.storeWatcher.WaitLoad()

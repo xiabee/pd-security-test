@@ -26,11 +26,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/pd/pkg/election"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/keypath"
+	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/tsoutil"
 	"github.com/tikv/pd/pkg/utils/typeutil"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
 
@@ -72,7 +72,7 @@ func newLocalTimestampOracle(am *AllocatorManager, leadership *election.Leadersh
 	oracle := &timestampOracle{
 		client:                 leadership.GetClient(),
 		keyspaceGroupID:        am.kgID,
-		tsPath:                 keypath.KeyspaceGroupLocalTSPath(localTSOAllocatorEtcdPrefix, am.kgID, dcLocation),
+		tsPath:                 endpoint.KeyspaceGroupLocalTSPath(localTSOAllocatorEtcdPrefix, am.kgID, dcLocation),
 		storage:                am.storage,
 		saveInterval:           am.saveInterval,
 		updatePhysicalInterval: am.updatePhysicalInterval,
@@ -101,7 +101,7 @@ func (lta *LocalTSOAllocator) GetDCLocation() string {
 func (lta *LocalTSOAllocator) Initialize(suffix int) error {
 	lta.tsoAllocatorRoleGauge.Set(1)
 	lta.timestampOracle.suffix = suffix
-	return lta.timestampOracle.SyncTimestamp()
+	return lta.timestampOracle.SyncTimestamp(lta.leadership)
 }
 
 // IsInitialize is used to indicates whether this allocator is initialized.
@@ -112,7 +112,7 @@ func (lta *LocalTSOAllocator) IsInitialize() bool {
 // UpdateTSO is used to update the TSO in memory and the time window in etcd
 // for all local TSO allocators this PD server hold.
 func (lta *LocalTSOAllocator) UpdateTSO() error {
-	return lta.timestampOracle.UpdateTimestamp()
+	return lta.timestampOracle.UpdateTimestamp(lta.leadership)
 }
 
 // SetTSO sets the physical part with given TSO.
@@ -139,7 +139,7 @@ func (lta *LocalTSOAllocator) Reset() {
 }
 
 // setAllocatorLeader sets the current Local TSO Allocator leader.
-func (lta *LocalTSOAllocator) setAllocatorLeader(member any) {
+func (lta *LocalTSOAllocator) setAllocatorLeader(member interface{}) {
 	lta.allocatorLeader.Store(member)
 }
 

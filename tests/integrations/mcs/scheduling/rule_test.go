@@ -19,9 +19,15 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"github.com/tikv/pd/pkg/keyspace"
+	"github.com/tikv/pd/pkg/mcs/scheduling/server/rule"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/schedule/labeler"
 	"github.com/tikv/pd/pkg/schedule/placement"
+	"github.com/tikv/pd/pkg/storage/endpoint"
+	"github.com/tikv/pd/pkg/storage/kv"
 	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/tests"
 )
@@ -35,8 +41,7 @@ type ruleTestSuite struct {
 	// The PD cluster.
 	cluster *tests.TestCluster
 	// pdLeaderServer is the leader server of the PD cluster.
-	pdLeaderServer  *tests.TestServer
-	backendEndpoint string
+	pdLeaderServer *tests.TestServer
 }
 
 func TestRule(t *testing.T) {
@@ -53,9 +58,7 @@ func (suite *ruleTestSuite) SetupSuite() {
 	err = suite.cluster.RunInitialServers()
 	re.NoError(err)
 	leaderName := suite.cluster.WaitLeader()
-	re.NotEmpty(leaderName)
 	suite.pdLeaderServer = suite.cluster.GetServer(leaderName)
-	suite.backendEndpoint = suite.pdLeaderServer.GetAddr()
 	re.NoError(suite.pdLeaderServer.BootstrapCluster())
 }
 
@@ -64,45 +67,76 @@ func (suite *ruleTestSuite) TearDownSuite() {
 	suite.cluster.Destroy()
 }
 
+func loadRules(re *require.Assertions, ruleStorage endpoint.RuleStorage) (rules []*placement.Rule) {
+	err := ruleStorage.LoadRules(func(_, v string) {
+		r, err := placement.NewRuleFromJSON([]byte(v))
+		re.NoError(err)
+		rules = append(rules, r)
+	})
+	re.NoError(err)
+	return
+}
+
+func loadRuleGroups(re *require.Assertions, ruleStorage endpoint.RuleStorage) (groups []*placement.RuleGroup) {
+	err := ruleStorage.LoadRuleGroups(func(_, v string) {
+		rg, err := placement.NewRuleGroupFromJSON([]byte(v))
+		re.NoError(err)
+		groups = append(groups, rg)
+	})
+	re.NoError(err)
+	return
+}
+
+func loadRegionRules(re *require.Assertions, ruleStorage endpoint.RuleStorage) (rules []*labeler.LabelRule) {
+	err := ruleStorage.LoadRegionRules(func(_, v string) {
+		lr, err := labeler.NewLabelRuleFromJSON([]byte(v))
+		re.NoError(err)
+		rules = append(rules, lr)
+	})
+	re.NoError(err)
+	return
+}
+
 func (suite *ruleTestSuite) TestRuleWatch() {
 	re := suite.Require()
 
-	tc, err := tests.NewTestSchedulingCluster(suite.ctx, 1, suite.backendEndpoint)
+	ruleStorage := endpoint.NewStorageEndpoint(kv.NewMemoryKV(), nil)
+	// Create a rule watcher.
+	_, err := rule.NewWatcher(
+		suite.ctx,
+		suite.pdLeaderServer.GetEtcdClient(),
+		suite.cluster.GetCluster().GetId(),
+		ruleStorage,
+	)
 	re.NoError(err)
-	defer tc.Destroy()
-
-	tc.WaitForPrimaryServing(re)
-	cluster := tc.GetPrimaryServer().GetCluster()
-	ruleManager := cluster.GetRuleManager()
-	// Check the default rule and rule group.
-	rules := ruleManager.GetAllRules()
+	// Check the default rule.
+	rules := loadRules(re, ruleStorage)
 	re.Len(rules, 1)
-	re.Equal(placement.DefaultGroupID, rules[0].GroupID)
-	re.Equal(placement.DefaultRuleID, rules[0].ID)
+	re.Equal("pd", rules[0].GroupID)
+	re.Equal("default", rules[0].ID)
 	re.Equal(0, rules[0].Index)
 	re.Empty(rules[0].StartKey)
 	re.Empty(rules[0].EndKey)
 	re.Equal(placement.Voter, rules[0].Role)
 	re.Empty(rules[0].LocationLabels)
-	ruleGroups := ruleManager.GetRuleGroups()
-	re.Len(ruleGroups, 1)
-	re.Equal(placement.DefaultGroupID, ruleGroups[0].ID)
-	re.Equal(0, ruleGroups[0].Index)
-	re.False(ruleGroups[0].Override)
+	// Check the empty rule group.
+	ruleGroups := loadRuleGroups(re, ruleStorage)
+	re.NoError(err)
+	re.Empty(ruleGroups)
 	// Set a new rule via the PD API server.
-	apiRuleManager := suite.pdLeaderServer.GetRaftCluster().GetRuleManager()
+	ruleManager := suite.pdLeaderServer.GetRaftCluster().GetRuleManager()
 	rule := &placement.Rule{
 		GroupID:     "2",
 		ID:          "3",
-		Role:        placement.Voter,
+		Role:        "voter",
 		Count:       1,
 		StartKeyHex: "22",
 		EndKeyHex:   "dd",
 	}
-	err = apiRuleManager.SetRule(rule)
+	err = ruleManager.SetRule(rule)
 	re.NoError(err)
 	testutil.Eventually(re, func() bool {
-		rules = ruleManager.GetAllRules()
+		rules = loadRules(re, ruleStorage)
 		return len(rules) == 2
 	})
 	sort.Slice(rules, func(i, j int) bool {
@@ -116,49 +150,44 @@ func (suite *ruleTestSuite) TestRuleWatch() {
 	re.Equal(rule.StartKeyHex, rules[1].StartKeyHex)
 	re.Equal(rule.EndKeyHex, rules[1].EndKeyHex)
 	// Delete the rule.
-	err = apiRuleManager.DeleteRule(rule.GroupID, rule.ID)
+	err = ruleManager.DeleteRule(rule.GroupID, rule.ID)
 	re.NoError(err)
 	testutil.Eventually(re, func() bool {
-		rules = ruleManager.GetAllRules()
+		rules = loadRules(re, ruleStorage)
 		return len(rules) == 1
 	})
 	re.Len(rules, 1)
-	re.Equal(placement.DefaultGroupID, rules[0].GroupID)
+	re.Equal("pd", rules[0].GroupID)
 	// Create a new rule group.
 	ruleGroup := &placement.RuleGroup{
 		ID:       "2",
 		Index:    100,
 		Override: true,
 	}
-	err = apiRuleManager.SetRuleGroup(ruleGroup)
+	err = ruleManager.SetRuleGroup(ruleGroup)
 	re.NoError(err)
 	testutil.Eventually(re, func() bool {
-		ruleGroups = ruleManager.GetRuleGroups()
-		return len(ruleGroups) == 2
-	})
-	re.Len(ruleGroups, 2)
-	re.Equal(ruleGroup.ID, ruleGroups[1].ID)
-	re.Equal(ruleGroup.Index, ruleGroups[1].Index)
-	re.Equal(ruleGroup.Override, ruleGroups[1].Override)
-	// Delete the rule group.
-	err = apiRuleManager.DeleteRuleGroup(ruleGroup.ID)
-	re.NoError(err)
-	testutil.Eventually(re, func() bool {
-		ruleGroups = ruleManager.GetRuleGroups()
+		ruleGroups = loadRuleGroups(re, ruleStorage)
 		return len(ruleGroups) == 1
 	})
 	re.Len(ruleGroups, 1)
+	re.Equal(ruleGroup.ID, ruleGroups[0].ID)
+	re.Equal(ruleGroup.Index, ruleGroups[0].Index)
+	re.Equal(ruleGroup.Override, ruleGroups[0].Override)
+	// Delete the rule group.
+	err = ruleManager.DeleteRuleGroup(ruleGroup.ID)
+	re.NoError(err)
+	testutil.Eventually(re, func() bool {
+		ruleGroups = loadRuleGroups(re, ruleStorage)
+		return len(ruleGroups) == 0
+	})
+	re.Empty(ruleGroups)
 
 	// Test the region label rule watch.
-	regionLabeler := cluster.GetRegionLabeler()
-	labelRules := regionLabeler.GetAllLabelRules()
-	apiRegionLabeler := suite.pdLeaderServer.GetRaftCluster().GetRegionLabeler()
-	apiLabelRules := apiRegionLabeler.GetAllLabelRules()
-	re.Len(labelRules, len(apiLabelRules))
-	re.Equal(apiLabelRules[0].ID, labelRules[0].ID)
-	re.Equal(apiLabelRules[0].Index, labelRules[0].Index)
-	re.Equal(apiLabelRules[0].Labels, labelRules[0].Labels)
-	re.Equal(apiLabelRules[0].RuleType, labelRules[0].RuleType)
+	labelRules := loadRegionRules(re, ruleStorage)
+	re.Len(labelRules, 1)
+	defaultKeyspaceRule := keyspace.MakeLabelRule(utils.DefaultKeyspaceID)
+	re.Equal(defaultKeyspaceRule, labelRules[0])
 	// Set a new region label rule.
 	labelRule := &labeler.LabelRule{
 		ID:       "rule1",
@@ -166,10 +195,11 @@ func (suite *ruleTestSuite) TestRuleWatch() {
 		RuleType: "key-range",
 		Data:     labeler.MakeKeyRanges("1234", "5678"),
 	}
-	err = apiRegionLabeler.SetLabelRule(labelRule)
+	regionLabeler := suite.pdLeaderServer.GetRaftCluster().GetRegionLabeler()
+	err = regionLabeler.SetLabelRule(labelRule)
 	re.NoError(err)
 	testutil.Eventually(re, func() bool {
-		labelRules = regionLabeler.GetAllLabelRules()
+		labelRules = loadRegionRules(re, ruleStorage)
 		return len(labelRules) == 2
 	})
 	sort.Slice(labelRules, func(i, j int) bool {
@@ -190,16 +220,17 @@ func (suite *ruleTestSuite) TestRuleWatch() {
 		SetRules:    []*labeler.LabelRule{labelRule},
 		DeleteRules: []string{"rule1"},
 	}
-	err = apiRegionLabeler.Patch(patch)
+	err = regionLabeler.Patch(patch)
 	re.NoError(err)
 	testutil.Eventually(re, func() bool {
-		labelRules = regionLabeler.GetAllLabelRules()
+		labelRules = loadRegionRules(re, ruleStorage)
 		return len(labelRules) == 2
 	})
 	sort.Slice(labelRules, func(i, j int) bool {
 		return labelRules[i].ID < labelRules[j].ID
 	})
 	re.Len(labelRules, 2)
+	re.Equal(defaultKeyspaceRule, labelRules[0])
 	re.Equal(labelRule.ID, labelRules[1].ID)
 	re.Equal(labelRule.Labels, labelRules[1].Labels)
 	re.Equal(labelRule.RuleType, labelRules[1].RuleType)

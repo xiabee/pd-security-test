@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	tu "github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/tests"
@@ -28,28 +27,18 @@ import (
 
 type checkerTestSuite struct {
 	suite.Suite
-	env *tests.SchedulingTestEnvironment
 }
 
 func TestCheckerTestSuite(t *testing.T) {
 	suite.Run(t, new(checkerTestSuite))
 }
-
-func (suite *checkerTestSuite) SetupSuite() {
-	suite.env = tests.NewSchedulingTestEnvironment(suite.T())
-}
-
-func (suite *checkerTestSuite) TearDownSuite() {
-	suite.env.Cleanup()
-}
-
 func (suite *checkerTestSuite) TestAPI() {
-	suite.env.RunTestBasedOnMode(suite.checkAPI)
+	env := tests.NewSchedulingTestEnvironment(suite.T())
+	env.RunTestInTwoModes(suite.checkAPI)
 }
 
 func (suite *checkerTestSuite) checkAPI(cluster *tests.TestCluster) {
-	re := suite.Require()
-	testErrCases(re, cluster)
+	suite.testErrCases(cluster)
 
 	testCases := []struct {
 		name string
@@ -62,109 +51,112 @@ func (suite *checkerTestSuite) checkAPI(cluster *tests.TestCluster) {
 		{name: "joint-state"},
 	}
 	for _, testCase := range testCases {
-		testGetStatus(re, cluster, testCase.name)
-		testPauseOrResume(re, cluster, testCase.name)
+		suite.testGetStatus(cluster, testCase.name)
+		suite.testPauseOrResume(cluster, testCase.name)
 	}
 }
 
-func testErrCases(re *require.Assertions, cluster *tests.TestCluster) {
+func (suite *checkerTestSuite) testErrCases(cluster *tests.TestCluster) {
 	urlPrefix := fmt.Sprintf("%s/pd/api/v1/checker", cluster.GetLeaderServer().GetAddr())
 	// missing args
-	input := make(map[string]any)
+	input := make(map[string]interface{})
 	pauseArgs, err := json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/merge", pauseArgs, tu.StatusNotOK(re))
-	re.NoError(err)
+	suite.NoError(err)
+	re := suite.Require()
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/merge", pauseArgs, tu.StatusNotOK(re))
+	suite.NoError(err)
 
 	// negative delay
 	input["delay"] = -10
 	pauseArgs, err = json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/merge", pauseArgs, tu.StatusNotOK(re))
-	re.NoError(err)
+	suite.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/merge", pauseArgs, tu.StatusNotOK(re))
+	suite.NoError(err)
 
 	// wrong name
 	name := "dummy"
 	input["delay"] = 30
 	pauseArgs, err = json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusNotOK(re))
-	re.NoError(err)
+	suite.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusNotOK(re))
+	suite.NoError(err)
 	input["delay"] = 0
 	pauseArgs, err = json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusNotOK(re))
-	re.NoError(err)
+	suite.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusNotOK(re))
+	suite.NoError(err)
 }
 
-func testGetStatus(re *require.Assertions, cluster *tests.TestCluster, name string) {
-	input := make(map[string]any)
+func (suite *checkerTestSuite) testGetStatus(cluster *tests.TestCluster, name string) {
+	input := make(map[string]interface{})
 	urlPrefix := fmt.Sprintf("%s/pd/api/v1/checker", cluster.GetLeaderServer().GetAddr())
 	// normal run
-	resp := make(map[string]any)
-	err := tu.ReadGetJSON(re, tests.TestDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
-	re.NoError(err)
-	re.False(resp["paused"].(bool))
+	resp := make(map[string]interface{})
+	re := suite.Require()
+	err := tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
+	suite.NoError(err)
+	suite.False(resp["paused"].(bool))
 	// paused
 	input["delay"] = 30
 	pauseArgs, err := json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	re.NoError(err)
-	resp = make(map[string]any)
-	err = tu.ReadGetJSON(re, tests.TestDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
-	re.NoError(err)
-	re.True(resp["paused"].(bool))
+	suite.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
+	suite.NoError(err)
+	resp = make(map[string]interface{})
+	err = tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
+	suite.NoError(err)
+	suite.True(resp["paused"].(bool))
 	// resumed
 	input["delay"] = 0
 	pauseArgs, err = json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	re.NoError(err)
+	suite.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
+	suite.NoError(err)
 	time.Sleep(time.Second)
-	resp = make(map[string]any)
-	err = tu.ReadGetJSON(re, tests.TestDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
-	re.NoError(err)
-	re.False(resp["paused"].(bool))
+	resp = make(map[string]interface{})
+	err = tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
+	suite.NoError(err)
+	suite.False(resp["paused"].(bool))
 }
 
-func testPauseOrResume(re *require.Assertions, cluster *tests.TestCluster, name string) {
-	input := make(map[string]any)
+func (suite *checkerTestSuite) testPauseOrResume(cluster *tests.TestCluster, name string) {
+	input := make(map[string]interface{})
 	urlPrefix := fmt.Sprintf("%s/pd/api/v1/checker", cluster.GetLeaderServer().GetAddr())
-	resp := make(map[string]any)
+	resp := make(map[string]interface{})
 
 	// test pause.
 	input["delay"] = 30
 	pauseArgs, err := json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	re.NoError(err)
-	err = tu.ReadGetJSON(re, tests.TestDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
-	re.NoError(err)
-	re.True(resp["paused"].(bool))
+	suite.NoError(err)
+	re := suite.Require()
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
+	suite.NoError(err)
+	err = tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
+	suite.NoError(err)
+	suite.True(resp["paused"].(bool))
 	input["delay"] = 1
 	pauseArgs, err = json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	re.NoError(err)
+	suite.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
+	suite.NoError(err)
 	time.Sleep(time.Second)
-	err = tu.ReadGetJSON(re, tests.TestDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
-	re.NoError(err)
-	re.False(resp["paused"].(bool))
+	err = tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
+	suite.NoError(err)
+	suite.False(resp["paused"].(bool))
 
 	// test resume.
-	input = make(map[string]any)
+	input = make(map[string]interface{})
 	input["delay"] = 30
 	pauseArgs, err = json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	re.NoError(err)
+	suite.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
+	suite.NoError(err)
 	input["delay"] = 0
 	pauseArgs, err = json.Marshal(input)
-	re.NoError(err)
-	err = tu.CheckPostJSON(tests.TestDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
-	re.NoError(err)
-	err = tu.ReadGetJSON(re, tests.TestDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
-	re.NoError(err)
-	re.False(resp["paused"].(bool))
+	suite.NoError(err)
+	err = tu.CheckPostJSON(testDialClient, urlPrefix+"/"+name, pauseArgs, tu.StatusOK(re))
+	suite.NoError(err)
+	err = tu.ReadGetJSON(re, testDialClient, fmt.Sprintf("%s/%s", urlPrefix, name), &resp)
+	suite.NoError(err)
+	suite.False(resp["paused"].(bool))
 }

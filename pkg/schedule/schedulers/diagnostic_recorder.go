@@ -23,7 +23,6 @@ import (
 	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
-	"github.com/tikv/pd/pkg/schedule/types"
 )
 
 const (
@@ -47,27 +46,27 @@ const (
 
 // DiagnosableSummaryFunc includes all implementations of plan.Summary.
 // And it also includes all schedulers which pd support to diagnose.
-var DiagnosableSummaryFunc = map[types.CheckerSchedulerType]plan.Summary{
-	types.BalanceRegionScheduler: plan.BalancePlanSummary,
-	types.BalanceLeaderScheduler: plan.BalancePlanSummary,
+var DiagnosableSummaryFunc = map[string]plan.Summary{
+	BalanceRegionName: plan.BalancePlanSummary,
+	BalanceLeaderName: plan.BalancePlanSummary,
 }
 
 // DiagnosticRecorder is used to manage diagnostic for one scheduler.
 type DiagnosticRecorder struct {
-	schedulerType types.CheckerSchedulerType
+	schedulerName string
 	config        sc.SchedulerConfigProvider
 	summaryFunc   plan.Summary
 	results       *cache.FIFO
 }
 
 // NewDiagnosticRecorder creates a new DiagnosticRecorder.
-func NewDiagnosticRecorder(tp types.CheckerSchedulerType, config sc.SchedulerConfigProvider) *DiagnosticRecorder {
-	summaryFunc, ok := DiagnosableSummaryFunc[tp]
+func NewDiagnosticRecorder(name string, config sc.SchedulerConfigProvider) *DiagnosticRecorder {
+	summaryFunc, ok := DiagnosableSummaryFunc[name]
 	if !ok {
 		return nil
 	}
 	return &DiagnosticRecorder{
-		schedulerType: tp,
+		schedulerName: name,
 		config:        config,
 		summaryFunc:   summaryFunc,
 		results:       cache.NewFIFO(maxDiagnosticResultNum),
@@ -87,7 +86,7 @@ func (d *DiagnosticRecorder) GetLastResult() *DiagnosticResult {
 	if d.results.Len() == 0 {
 		return nil
 	}
-	items := d.results.FromLastSameElems(func(i any) (bool, string) {
+	items := d.results.FromLastSameElems(func(i interface{}) (bool, string) {
 		result, ok := i.(*DiagnosticResult)
 		if result == nil {
 			return ok, ""
@@ -132,11 +131,11 @@ func (d *DiagnosticRecorder) GetLastResult() *DiagnosticResult {
 			}
 		} else if firstStatus == Pending {
 			// This is used to handle pending status because of reach limit in `IsScheduleAllowed`
-			resStr = fmt.Sprintf("%v reach limit", d.schedulerType)
+			resStr = fmt.Sprintf("%s reach limit", d.schedulerName)
 		}
 	}
 	return &DiagnosticResult{
-		Name:      d.schedulerType.String(),
+		Name:      d.schedulerName,
 		Status:    firstStatus,
 		Summary:   resStr,
 		Timestamp: uint64(time.Now().Unix()),
@@ -148,11 +147,7 @@ func (d *DiagnosticRecorder) SetResultFromStatus(status string) {
 	if d == nil {
 		return
 	}
-	result := &DiagnosticResult{
-		Name:      d.schedulerType.String(),
-		Timestamp: uint64(time.Now().Unix()),
-		Status:    status,
-	}
+	result := &DiagnosticResult{Name: d.schedulerName, Timestamp: uint64(time.Now().Unix()), Status: status}
 	d.results.Put(result.Timestamp, result)
 }
 
@@ -166,14 +161,11 @@ func (d *DiagnosticRecorder) SetResultFromPlans(ops []*operator.Operator, plans 
 }
 
 func (d *DiagnosticRecorder) analyze(ops []*operator.Operator, plans []plan.Plan, ts uint64) *DiagnosticResult {
-	res := &DiagnosticResult{
-		Name:      d.schedulerType.String(),
-		Timestamp: ts,
-		Status:    Normal,
-	}
+	res := &DiagnosticResult{Name: d.schedulerName, Timestamp: ts, Status: Normal}
+	name := d.schedulerName
 	// TODO: support more schedulers and checkers
-	switch d.schedulerType {
-	case types.BalanceRegionScheduler, types.BalanceLeaderScheduler:
+	switch name {
+	case BalanceRegionName, BalanceLeaderName:
 		if len(ops) != 0 {
 			res.Status = Scheduling
 			return res

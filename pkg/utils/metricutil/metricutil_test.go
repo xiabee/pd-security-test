@@ -23,6 +23,7 @@ import (
 )
 
 func TestCamelCaseToSnakeCase(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	inputs := []struct {
 		name    string
@@ -55,7 +56,7 @@ func TestCamelCaseToSnakeCase(t *testing.T) {
 	}
 }
 
-func TestCoverage(_ *testing.T) {
+func TestCoverage(t *testing.T) {
 	cfgs := []*MetricConfig{
 		{
 			PushJob:     "j1",

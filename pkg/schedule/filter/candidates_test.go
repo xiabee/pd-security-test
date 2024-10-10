@@ -15,9 +15,7 @@
 package filter
 
 import (
-	"math/rand"
 	"testing"
-	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/require"
@@ -50,9 +48,9 @@ func idComparer2(a, b *core.StoreInfo) int {
 
 type idFilter func(uint64) bool
 
-func (idFilter) Scope() string    { return "idFilter" }
-func (idFilter) Type() filterType { return filterType(0) }
-func (f idFilter) Source(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
+func (f idFilter) Scope() string    { return "idFilter" }
+func (f idFilter) Type() filterType { return filterType(0) }
+func (f idFilter) Source(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if f(store.GetID()) {
 		return statusOK
 	}
@@ -60,7 +58,7 @@ func (f idFilter) Source(_ config.SharedConfigProvider, store *core.StoreInfo) *
 	return statusStoreScoreDisallowed
 }
 
-func (f idFilter) Target(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
+func (f idFilter) Target(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if f(store.GetID()) {
 		return statusOK
 	}
@@ -97,7 +95,7 @@ func TestCandidates(t *testing.T) {
 	cs.Sort(idComparer)
 	check(re, cs, 1, 2, 3, 4, 5, 6, 7)
 	store = cs.RandomPick()
-	re.Positive(store.GetID())
+	re.Greater(store.GetID(), uint64(0))
 	re.Less(store.GetID(), uint64(8))
 
 	cs = newTestCandidates(10, 15, 23, 20, 33, 32, 31)
@@ -114,7 +112,7 @@ func newTestCandidates(ids ...uint64) *StoreCandidates {
 	for _, id := range ids {
 		stores = append(stores, core.NewStoreInfo(&metapb.Store{Id: id}))
 	}
-	return NewCandidates(rand.New(rand.NewSource(time.Now().UnixNano())), stores)
+	return NewCandidates(stores)
 }
 
 func check(re *require.Assertions, candidates *StoreCandidates, ids ...uint64) {

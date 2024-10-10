@@ -22,6 +22,7 @@ import (
 )
 
 func TestSlice(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	testCases := []struct {
 		a      []int
@@ -44,6 +45,7 @@ func TestSlice(t *testing.T) {
 }
 
 func TestSliceContains(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	ss := []string{"a", "b", "c"}
 	re.True(slice.Contains(ss, "a"))
@@ -59,6 +61,7 @@ func TestSliceContains(t *testing.T) {
 }
 
 func TestSliceRemoveGenericTypes(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	ss := []string{"a", "b", "c"}
 	ss = slice.Remove(ss, "a")
@@ -74,6 +77,7 @@ func TestSliceRemoveGenericTypes(t *testing.T) {
 }
 
 func TestSliceRemove(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 
 	is := []int64{}

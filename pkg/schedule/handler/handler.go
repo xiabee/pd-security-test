@@ -16,15 +16,12 @@ package handler
 
 import (
 	"bytes"
-	"context"
 	"encoding/hex"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
@@ -33,22 +30,15 @@ import (
 	"github.com/tikv/pd/pkg/schedule"
 	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/filter"
-	"github.com/tikv/pd/pkg/schedule/labeler"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/placement"
 	"github.com/tikv/pd/pkg/schedule/scatter"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
-	"github.com/tikv/pd/pkg/schedule/types"
 	"github.com/tikv/pd/pkg/statistics"
 	"github.com/tikv/pd/pkg/statistics/buckets"
 	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 	"go.uber.org/zap"
-)
-
-const (
-	defaultRegionLimit = 16
-	maxRegionLimit     = 10240
 )
 
 // Server is the interface for handler about schedule.
@@ -131,17 +121,6 @@ func (h *Handler) RemoveOperator(regionID uint64) error {
 	}
 
 	_ = c.RemoveOperator(op, operator.AdminStop)
-	return nil
-}
-
-// RemoveOperators removes the all operators.
-func (h *Handler) RemoveOperators() error {
-	c, err := h.GetOperatorController()
-	if err != nil {
-		return err
-	}
-
-	c.RemoveOperators(operator.AdminStop)
 	return nil
 }
 
@@ -241,7 +220,7 @@ func (h *Handler) GetRecords(from time.Time) ([]*operator.OpRecord, error) {
 // HandleOperatorCreation processes the request and creates an operator based on the provided input.
 // It supports various types of operators such as transfer-leader, transfer-region, add-peer, remove-peer, merge-region, split-region, scatter-region, and scatter-regions.
 // The function validates the input, performs the corresponding operation, and returns the HTTP status code, response body, and any error encountered during the process.
-func (h *Handler) HandleOperatorCreation(input map[string]any) (int, any, error) {
+func (h *Handler) HandleOperatorCreation(input map[string]interface{}) (int, interface{}, error) {
 	name, ok := input["name"].(string)
 	if !ok {
 		return http.StatusBadRequest, nil, errors.Errorf("missing operator name")
@@ -349,7 +328,7 @@ func (h *Handler) HandleOperatorCreation(input map[string]any) (int, any, error)
 		}
 		var keys []string
 		if ks, ok := input["keys"]; ok {
-			for _, k := range ks.([]any) {
+			for _, k := range ks.([]interface{}) {
 				key, ok := k.(string)
 				if !ok {
 					return http.StatusBadRequest, nil, errors.Errorf("bad format keys")
@@ -418,7 +397,7 @@ func (h *Handler) AddTransferLeaderOperator(regionID uint64, storeID uint64) err
 		return errors.Errorf("region has no voter in store %v", storeID)
 	}
 
-	op, err := operator.CreateTransferLeaderOperator("admin-transfer-leader", c, region, newLeader.GetStoreId(), []uint64{}, operator.OpAdmin)
+	op, err := operator.CreateTransferLeaderOperator("admin-transfer-leader", c, region, region.GetLeader().GetStoreId(), newLeader.GetStoreId(), []uint64{}, operator.OpAdmin)
 	if err != nil {
 		log.Debug("fail to create transfer leader operator", errs.ZapError(err))
 		return err
@@ -741,8 +720,8 @@ func checkStoreState(c sche.SharedCluster, storeID uint64) error {
 	return nil
 }
 
-func parseStoreIDsAndPeerRole(ids any, roles any) (map[uint64]placement.PeerRoleType, bool) {
-	items, ok := ids.([]any)
+func parseStoreIDsAndPeerRole(ids interface{}, roles interface{}) (map[uint64]placement.PeerRoleType, bool) {
+	items, ok := ids.([]interface{})
 	if !ok {
 		return nil, false
 	}
@@ -757,7 +736,7 @@ func parseStoreIDsAndPeerRole(ids any, roles any) (map[uint64]placement.PeerRole
 		storeIDToPeerRole[uint64(id)] = ""
 	}
 
-	peerRoles, ok := roles.([]any)
+	peerRoles, ok := roles.([]interface{})
 	// only consider roles having the same length with ids as the valid case
 	if ok && len(peerRoles) == len(storeIDs) {
 		for i, v := range storeIDs {
@@ -786,22 +765,13 @@ func (h *Handler) GetCheckerStatus(name string) (map[string]bool, error) {
 	}, nil
 }
 
-// GetSchedulersController returns controller of schedulers.
-func (h *Handler) GetSchedulersController() (*schedulers.Controller, error) {
+// GetSchedulerNames returns all names of schedulers.
+func (h *Handler) GetSchedulerNames() ([]string, error) {
 	co := h.GetCoordinator()
 	if co == nil {
 		return nil, errs.ErrNotBootstrapped.GenWithStackByArgs()
 	}
-	return co.GetSchedulersController(), nil
-}
-
-// GetSchedulerNames returns all names of schedulers.
-func (h *Handler) GetSchedulerNames() ([]string, error) {
-	sc, err := h.GetSchedulersController()
-	if err != nil {
-		return nil, err
-	}
-	return sc.GetSchedulerNames(), nil
+	return co.GetSchedulersController().GetSchedulerNames(), nil
 }
 
 type schedulerPausedPeriod struct {
@@ -811,15 +781,16 @@ type schedulerPausedPeriod struct {
 }
 
 // GetSchedulerByStatus returns all names of schedulers by status.
-func (h *Handler) GetSchedulerByStatus(status string, needTS bool) (any, error) {
-	sc, err := h.GetSchedulersController()
-	if err != nil {
-		return nil, err
+func (h *Handler) GetSchedulerByStatus(status string, needTS bool) (interface{}, error) {
+	co := h.GetCoordinator()
+	if co == nil {
+		return nil, errs.ErrNotBootstrapped.GenWithStackByArgs()
 	}
+	sc := co.GetSchedulersController()
 	schedulers := sc.GetSchedulerNames()
 	switch status {
 	case "paused":
-		pausedSchedulers := make([]string, 0, len(schedulers))
+		var pausedSchedulers []string
 		pausedPeriods := []schedulerPausedPeriod{}
 		for _, scheduler := range schedulers {
 			paused, err := sc.IsSchedulerPaused(scheduler)
@@ -854,7 +825,7 @@ func (h *Handler) GetSchedulerByStatus(status string, needTS bool) (any, error) 
 		}
 		return pausedSchedulers, nil
 	case "disabled":
-		disabledSchedulers := make([]string, 0, len(schedulers))
+		var disabledSchedulers []string
 		for _, scheduler := range schedulers {
 			disabled, err := sc.IsSchedulerDisabled(scheduler)
 			if err != nil {
@@ -866,27 +837,13 @@ func (h *Handler) GetSchedulerByStatus(status string, needTS bool) (any, error) 
 		}
 		return disabledSchedulers, nil
 	default:
-		// The default scheduler could not be deleted in scheduling server,
-		// so schedulers could only be disabled.
-		// We should not return the disabled schedulers here.
-		enabledSchedulers := make([]string, 0, len(schedulers))
-		for _, scheduler := range schedulers {
-			disabled, err := sc.IsSchedulerDisabled(scheduler)
-			if err != nil {
-				return nil, err
-			}
-			if !disabled {
-				enabledSchedulers = append(enabledSchedulers, scheduler)
-			}
-		}
-		return enabledSchedulers, nil
+		return schedulers, nil
 	}
 }
 
 // GetDiagnosticResult returns the diagnostic results of the specified scheduler.
 func (h *Handler) GetDiagnosticResult(name string) (*schedulers.DiagnosticResult, error) {
-	tp := types.StringToSchedulerType[name]
-	if _, ok := schedulers.DiagnosableSummaryFunc[tp]; !ok {
+	if _, ok := schedulers.DiagnosableSummaryFunc[name]; !ok {
 		return nil, errs.ErrSchedulerUndiagnosable.FastGenByArgs(name)
 	}
 	co := h.GetCoordinator()
@@ -904,11 +861,11 @@ func (h *Handler) GetDiagnosticResult(name string) (*schedulers.DiagnosticResult
 // t == 0 : resume scheduler.
 // t > 0 : scheduler delays t seconds.
 func (h *Handler) PauseOrResumeScheduler(name string, t int64) (err error) {
-	sc, err := h.GetSchedulersController()
-	if err != nil {
-		return err
+	co := h.GetCoordinator()
+	if co == nil {
+		return errs.ErrNotBootstrapped.GenWithStackByArgs()
 	}
-	if err = sc.PauseOrResumeScheduler(name, t); err != nil {
+	if err = co.GetSchedulersController().PauseOrResumeScheduler(name, t); err != nil {
 		if t == 0 {
 			log.Error("can not resume scheduler", zap.String("scheduler-name", name), errs.ZapError(err))
 		} else {
@@ -1082,263 +1039,4 @@ func (h *Handler) GetHotBuckets(regionIDs ...uint64) (HotBucketsResponse, error)
 		}
 	}
 	return ret, nil
-}
-
-// GetRegion returns the region labeler.
-func (h *Handler) GetRegion(id uint64) (*core.RegionInfo, error) {
-	c := h.GetCluster()
-	if c == nil {
-		return nil, errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	return c.GetRegion(id), nil
-}
-
-// GetRegionLabeler returns the region labeler.
-func (h *Handler) GetRegionLabeler() (*labeler.RegionLabeler, error) {
-	c := h.GetCluster()
-	if c == nil || c.GetRegionLabeler() == nil {
-		return nil, errs.ErrNotBootstrapped
-	}
-	return c.GetRegionLabeler(), nil
-}
-
-// AccelerateRegionsScheduleInRange accelerates regions scheduling in a given range.
-func (h *Handler) AccelerateRegionsScheduleInRange(rawStartKey, rawEndKey string, limit int) error {
-	startKey, err := hex.DecodeString(rawStartKey)
-	if err != nil {
-		return err
-	}
-	endKey, err := hex.DecodeString(rawEndKey)
-	if err != nil {
-		return err
-	}
-	c := h.GetCluster()
-	if c == nil {
-		return errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	co := h.GetCoordinator()
-	if co == nil {
-		return errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	regions := c.ScanRegions(startKey, endKey, limit)
-	if len(regions) > 0 {
-		regionsIDList := make([]uint64, 0, len(regions))
-		for _, region := range regions {
-			regionsIDList = append(regionsIDList, region.GetID())
-		}
-		co.GetCheckerController().AddPendingProcessedRegions(false, regionsIDList...)
-	}
-	return nil
-}
-
-// AccelerateRegionsScheduleInRanges accelerates regions scheduling in given ranges.
-func (h *Handler) AccelerateRegionsScheduleInRanges(startKeys [][]byte, endKeys [][]byte, limit int) error {
-	c := h.GetCluster()
-	if c == nil {
-		return errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	co := h.GetCoordinator()
-	if co == nil {
-		return errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	if len(startKeys) != len(endKeys) {
-		return errors.New("startKeys and endKeys should have the same length")
-	}
-	var regions []*core.RegionInfo
-	for i := range startKeys {
-		regions = append(regions, c.ScanRegions(startKeys[i], endKeys[i], limit)...)
-	}
-	if len(regions) > 0 {
-		regionsIDList := make([]uint64, 0, len(regions))
-		for _, region := range regions {
-			regionsIDList = append(regionsIDList, region.GetID())
-		}
-		co.GetCheckerController().AddPendingProcessedRegions(false, regionsIDList...)
-	}
-	return nil
-}
-
-// AdjustLimit adjusts the limit of regions to schedule.
-func (*Handler) AdjustLimit(limitStr string, defaultLimits ...int) (int, error) {
-	limit := defaultRegionLimit
-	if len(defaultLimits) > 0 {
-		limit = defaultLimits[0]
-	}
-	if limitStr != "" {
-		var err error
-		limit, err = strconv.Atoi(limitStr)
-		if err != nil {
-			return 0, err
-		}
-	}
-	if limit > maxRegionLimit {
-		limit = maxRegionLimit
-	}
-	return limit, nil
-}
-
-// ScatterRegionsResponse is the response for scatter regions.
-type ScatterRegionsResponse struct {
-	ProcessedPercentage int `json:"processed-percentage"`
-}
-
-// BuildScatterRegionsResp builds ScatterRegionsResponse.
-func (*Handler) BuildScatterRegionsResp(opsCount int, failures map[uint64]error) *ScatterRegionsResponse {
-	// If there existed any operator failed to be added into Operator Controller, add its regions into unProcessedRegions
-	percentage := 100
-	if len(failures) > 0 {
-		percentage = 100 - 100*len(failures)/(opsCount+len(failures))
-		log.Debug("scatter regions", zap.Errors("failures", func() []error {
-			r := make([]error, 0, len(failures))
-			for _, err := range failures {
-				r = append(r, err)
-			}
-			return r
-		}()))
-	}
-	return &ScatterRegionsResponse{
-		ProcessedPercentage: percentage,
-	}
-}
-
-// ScatterRegionsByRange scatters regions by range.
-func (h *Handler) ScatterRegionsByRange(rawStartKey, rawEndKey string, group string, retryLimit int) (int, map[uint64]error, error) {
-	startKey, err := hex.DecodeString(rawStartKey)
-	if err != nil {
-		return 0, nil, err
-	}
-	endKey, err := hex.DecodeString(rawEndKey)
-	if err != nil {
-		return 0, nil, err
-	}
-	co := h.GetCoordinator()
-	if co == nil {
-		return 0, nil, errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	return co.GetRegionScatterer().ScatterRegionsByRange(startKey, endKey, group, retryLimit)
-}
-
-// ScatterRegionsByID scatters regions by id.
-func (h *Handler) ScatterRegionsByID(ids []uint64, group string, retryLimit int) (int, map[uint64]error, error) {
-	co := h.GetCoordinator()
-	if co == nil {
-		return 0, nil, errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	return co.GetRegionScatterer().ScatterRegionsByID(ids, group, retryLimit, false)
-}
-
-// SplitRegionsResponse is the response for split regions.
-type SplitRegionsResponse struct {
-	ProcessedPercentage int      `json:"processed-percentage"`
-	NewRegionsID        []uint64 `json:"regions-id"`
-}
-
-// SplitRegions splits regions by split keys.
-func (h *Handler) SplitRegions(ctx context.Context, rawSplitKeys []any, retryLimit int) (*SplitRegionsResponse, error) {
-	co := h.GetCoordinator()
-	if co == nil {
-		return nil, errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	splitKeys := make([][]byte, 0, len(rawSplitKeys))
-	for _, rawKey := range rawSplitKeys {
-		key, err := hex.DecodeString(rawKey.(string))
-		if err != nil {
-			return nil, err
-		}
-		splitKeys = append(splitKeys, key)
-	}
-
-	percentage, newRegionsID := co.GetRegionSplitter().SplitRegions(ctx, splitKeys, retryLimit)
-	s := &SplitRegionsResponse{
-		ProcessedPercentage: percentage,
-		NewRegionsID:        newRegionsID,
-	}
-	failpoint.Inject("splitResponses", func(val failpoint.Value) {
-		rawID, ok := val.(int)
-		if ok {
-			s.ProcessedPercentage = 100
-			s.NewRegionsID = []uint64{uint64(rawID)}
-		}
-	})
-	return s, nil
-}
-
-// CheckRegionsReplicated checks if regions are replicated.
-func (h *Handler) CheckRegionsReplicated(rawStartKey, rawEndKey string) (string, error) {
-	startKey, err := hex.DecodeString(rawStartKey)
-	if err != nil {
-		return "", err
-	}
-	endKey, err := hex.DecodeString(rawEndKey)
-	if err != nil {
-		return "", err
-	}
-	c := h.GetCluster()
-	if c == nil {
-		return "", errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	co := h.GetCoordinator()
-	if co == nil {
-		return "", errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	regions := c.ScanRegions(startKey, endKey, -1)
-	state := "REPLICATED"
-	for _, region := range regions {
-		if !filter.IsRegionReplicated(c, region) {
-			state = "INPROGRESS"
-			if co.IsPendingRegion(region.GetID()) {
-				state = "PENDING"
-				break
-			}
-		}
-	}
-	failpoint.Inject("mockPending", func(val failpoint.Value) {
-		aok, ok := val.(bool)
-		if ok && aok {
-			state = "PENDING"
-		}
-	})
-	return state, nil
-}
-
-// GetRuleManager returns the rule manager.
-func (h *Handler) GetRuleManager() (*placement.RuleManager, error) {
-	c := h.GetCluster()
-	if c == nil {
-		return nil, errs.ErrNotBootstrapped
-	}
-	if !c.GetSharedConfig().IsPlacementRulesEnabled() {
-		return nil, errs.ErrPlacementDisabled
-	}
-	return c.GetRuleManager(), nil
-}
-
-// PreCheckForRegion checks if the region is valid.
-func (h *Handler) PreCheckForRegion(regionStr string) (*core.RegionInfo, int, error) {
-	c := h.GetCluster()
-	if c == nil {
-		return nil, http.StatusInternalServerError, errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	regionID, err := strconv.ParseUint(regionStr, 10, 64)
-	if err != nil {
-		return nil, http.StatusBadRequest, errs.ErrRegionInvalidID.FastGenByArgs()
-	}
-	region := c.GetRegion(regionID)
-	if region == nil {
-		return nil, http.StatusNotFound, errs.ErrRegionNotFound.FastGenByArgs(regionID)
-	}
-	return region, http.StatusOK, nil
-}
-
-// CheckRegionPlacementRule checks if the region matches the placement rules.
-func (h *Handler) CheckRegionPlacementRule(region *core.RegionInfo) (*placement.RegionFit, error) {
-	c := h.GetCluster()
-	if c == nil {
-		return nil, errs.ErrNotBootstrapped.GenWithStackByArgs()
-	}
-	manager, err := h.GetRuleManager()
-	if err != nil {
-		return nil, err
-	}
-	return manager.FitRegion(c, region), nil
 }

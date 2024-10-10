@@ -25,7 +25,7 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/spf13/cobra"
-	"github.com/tikv/pd/pkg/response"
+	"github.com/tikv/pd/server/api"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )
@@ -275,12 +275,12 @@ func storeLimitSceneCommandFunc(cmd *cobra.Command, args []string) {
 		if len(args) == 3 {
 			prefix = path.Join(prefix, fmt.Sprintf("?type=%s", args[2]))
 		}
-		postJSON(cmd, prefix, map[string]any{scene: rate})
+		postJSON(cmd, prefix, map[string]interface{}{scene: rate})
 	}
 }
 
 func convertToStoreInfo(content string) string {
-	store := &response.StoreInfo{}
+	store := &api.StoreInfo{}
 	err := json.Unmarshal([]byte(content), store)
 	if err != nil {
 		return content
@@ -296,7 +296,7 @@ func convertToStoreInfo(content string) string {
 }
 
 func convertToStoresInfo(content string) string {
-	stores := &response.StoresInfo{}
+	stores := &api.StoresInfo{}
 	err := json.Unmarshal([]byte(content), stores)
 	if err != nil {
 		return content
@@ -531,7 +531,7 @@ func labelStoreCommandFunc(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	labels := make(map[string]any)
+	labels := make(map[string]interface{})
 	// useEqual is used to compatible the old way
 	// TODO: remove old way
 	useEqual := true
@@ -584,7 +584,7 @@ func setStoreWeightCommandFunc(cmd *cobra.Command, args []string) {
 		return
 	}
 	prefix := fmt.Sprintf(path.Join(storePrefix, "weight"), args[0])
-	postJSON(cmd, prefix, map[string]any{
+	postJSON(cmd, prefix, map[string]interface{}{
 		"leader": leader,
 		"region": region,
 	})
@@ -620,7 +620,7 @@ func storeLimitCommandFunc(cmd *cobra.Command, args []string) {
 		} else {
 			prefix = fmt.Sprintf(path.Join(storePrefix, "limit"), args[0])
 		}
-		postInput := map[string]any{
+		postInput := map[string]interface{}{
 			"rate": rate,
 		}
 		if argsCount == 3 {
@@ -631,7 +631,7 @@ func storeLimitCommandFunc(cmd *cobra.Command, args []string) {
 		if args[0] != "all" {
 			cmd.Println("Labels are an option of set all stores limit.")
 		} else {
-			postInput := map[string]any{}
+			postInput := map[string]interface{}{}
 			prefix := storesLimitPrefix
 			ratePos := argsCount - 1
 			if argsCount%2 == 1 {
@@ -648,7 +648,7 @@ func storeLimitCommandFunc(cmd *cobra.Command, args []string) {
 				return
 			}
 			postInput["rate"] = rate
-			labels := make(map[string]any)
+			labels := make(map[string]interface{})
 			for i := 1; i < ratePos; i += 2 {
 				labels[args[i]] = args[i+1]
 			}
@@ -675,7 +675,7 @@ func storeCheckCommandFunc(cmd *cobra.Command, args []string) {
 	cmd.Println(r)
 }
 
-func showStoresCommandFunc(cmd *cobra.Command, _ []string) {
+func showStoresCommandFunc(cmd *cobra.Command, args []string) {
 	prefix := storesPrefix
 	r, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
 	if err != nil {
@@ -707,10 +707,6 @@ func showAllStoresLimitCommandFunc(cmd *cobra.Command, args []string) {
 }
 
 func removeTombStoneCommandFunc(cmd *cobra.Command, args []string) {
-	if len(args) != 0 {
-		cmd.Usage()
-		return
-	}
 	prefix := path.Join(storesPrefix, "remove-tombstone")
 	_, err := doRequest(cmd, prefix, http.MethodDelete, http.Header{})
 	if err != nil {
@@ -732,7 +728,7 @@ func setAllLimitCommandFunc(cmd *cobra.Command, args []string) {
 		return
 	}
 	prefix := storesLimitPrefix
-	input := map[string]any{
+	input := map[string]interface{}{
 		"rate": rate,
 	}
 	if len(args) == 2 {

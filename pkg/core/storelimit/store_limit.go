@@ -17,7 +17,6 @@ package storelimit
 import (
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/ratelimit"
-	"github.com/tikv/pd/pkg/utils/syncutil"
 )
 
 const (
@@ -83,15 +82,15 @@ func NewStoreRateLimit(ratePerSec float64) StoreLimit {
 }
 
 // Ack does nothing.
-func (*StoreRateLimit) Ack(_ int64, _ Type) {}
+func (l *StoreRateLimit) Ack(_ int64, _ Type) {}
 
 // Version returns v1
-func (*StoreRateLimit) Version() string {
+func (l *StoreRateLimit) Version() string {
 	return VersionV1
 }
 
 // Feedback does nothing.
-func (*StoreRateLimit) Feedback(_ float64) {}
+func (l *StoreRateLimit) Feedback(_ float64) {}
 
 // Available returns the number of available tokens.
 // notice that the priority level is not used.
@@ -107,7 +106,7 @@ func (l *StoreRateLimit) Rate(typ Type) float64 {
 	if l.limits[typ] == nil {
 		return 0.0
 	}
-	return l.limits[typ].GetRatePerSec()
+	return l.limits[typ].ratePerSec
 }
 
 // Take takes count tokens from the bucket without blocking.
@@ -129,15 +128,12 @@ func (l *StoreRateLimit) Reset(rate float64, typ Type) {
 
 // limit the operators of a store
 type limit struct {
-	limiter         *ratelimit.RateLimiter
-	ratePerSecMutex syncutil.RWMutex
-	ratePerSec      float64
+	limiter    *ratelimit.RateLimiter
+	ratePerSec float64
 }
 
 // Reset resets the rate limit.
 func (l *limit) Reset(ratePerSec float64) {
-	l.ratePerSecMutex.Lock()
-	defer l.ratePerSecMutex.Unlock()
 	if l.ratePerSec == ratePerSec {
 		return
 	}
@@ -159,8 +155,6 @@ func (l *limit) Reset(ratePerSec float64) {
 // Available returns the number of available tokens
 // It returns true if the rate per second is zero.
 func (l *limit) Available(n int64) bool {
-	l.ratePerSecMutex.RLock()
-	defer l.ratePerSecMutex.RUnlock()
 	if l.ratePerSec == 0 {
 		return true
 	}
@@ -170,17 +164,8 @@ func (l *limit) Available(n int64) bool {
 
 // Take takes count tokens from the bucket without blocking.
 func (l *limit) Take(count int64) bool {
-	l.ratePerSecMutex.RLock()
-	defer l.ratePerSecMutex.RUnlock()
 	if l.ratePerSec == 0 {
 		return true
 	}
 	return l.limiter.AllowN(int(count))
-}
-
-// GetRatePerSec returns the rate per second.
-func (l *limit) GetRatePerSec() float64 {
-	l.ratePerSecMutex.RLock()
-	defer l.ratePerSecMutex.RUnlock()
-	return l.ratePerSec
 }

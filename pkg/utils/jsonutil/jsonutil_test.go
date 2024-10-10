@@ -31,6 +31,7 @@ type testJSONStructLevel2 struct {
 }
 
 func TestJSONUtil(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	father := &testJSONStructLevel1{
 		Name: "father",

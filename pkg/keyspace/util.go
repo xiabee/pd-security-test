@@ -24,7 +24,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/tikv/pd/pkg/codec"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/schedule/labeler"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 )
@@ -88,9 +88,6 @@ var (
 	ErrModifyDefaultKeyspace = errors.New("cannot modify default keyspace's state")
 	errIllegalOperation      = errors.New("unknown operation")
 
-	// ErrUnsupportedOperationInKeyspace is used to indicate this is an unsupported operation.
-	ErrUnsupportedOperationInKeyspace = errors.New("it's a unsupported operation")
-
 	// stateTransitionTable lists all allowed next state for the given current state.
 	// Note that transit from any state to itself is allowed for idempotence.
 	stateTransitionTable = map[keyspacepb.KeyspaceState][]keyspacepb.KeyspaceState{
@@ -113,7 +110,7 @@ func validateID(id uint32) error {
 	if id > spaceIDMax {
 		return errors.Errorf("illegal keyspace id %d, larger than spaceID Max %d", id, spaceIDMax)
 	}
-	if id == constant.DefaultKeyspaceID {
+	if id == utils.DefaultKeyspaceID {
 		return errors.Errorf("illegal keyspace id %d, collides with default keyspace id", id)
 	}
 	return nil
@@ -130,7 +127,7 @@ func validateName(name string) error {
 	if !isValid {
 		return errors.Errorf("illegal keyspace name %s, should contain only alphanumerical and underline", name)
 	}
-	if name == constant.DefaultKeyspaceName {
+	if name == utils.DefaultKeyspaceName {
 		return errors.Errorf("illegal keyspace name %s, collides with default keyspace name", name)
 	}
 	return nil
@@ -178,15 +175,15 @@ func MakeRegionBound(id uint32) *RegionBound {
 	}
 }
 
-// MakeKeyRanges encodes keyspace ID to correct LabelRule data.
-func MakeKeyRanges(id uint32) []any {
+// makeKeyRanges encodes keyspace ID to correct LabelRule data.
+func makeKeyRanges(id uint32) []interface{} {
 	regionBound := MakeRegionBound(id)
-	return []any{
-		map[string]any{
+	return []interface{}{
+		map[string]interface{}{
 			"start_key": hex.EncodeToString(regionBound.RawLeftBound),
 			"end_key":   hex.EncodeToString(regionBound.RawRightBound),
 		},
-		map[string]any{
+		map[string]interface{}{
 			"start_key": hex.EncodeToString(regionBound.TxnLeftBound),
 			"end_key":   hex.EncodeToString(regionBound.TxnRightBound),
 		},
@@ -210,7 +207,7 @@ func MakeLabelRule(id uint32) *labeler.LabelRule {
 			},
 		},
 		RuleType: labeler.KeyRange,
-		Data:     MakeKeyRanges(id),
+		Data:     makeKeyRanges(id),
 	}
 }
 
@@ -249,14 +246,14 @@ func (hp *indexedHeap) Swap(i, j int) {
 }
 
 // Implementing heap.Interface.
-func (hp *indexedHeap) Push(x any) {
+func (hp *indexedHeap) Push(x interface{}) {
 	item := x.(*endpoint.KeyspaceGroup)
 	hp.index[item.ID] = hp.Len()
 	hp.items = append(hp.items, item)
 }
 
 // Implementing heap.Interface.
-func (hp *indexedHeap) Pop() any {
+func (hp *indexedHeap) Pop() interface{} {
 	l := hp.Len()
 	item := hp.items[l-1]
 	hp.items = hp.items[:l-1]

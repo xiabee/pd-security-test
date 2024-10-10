@@ -105,7 +105,7 @@ func scatter(re *require.Assertions, numStores, numRegions uint64, useRules bool
 		// region distributed in same stores.
 		tc.AddLeaderRegion(i, 1, 2, 3)
 	}
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 	noNeedMoveNum := 0
 	for i := uint64(1); i <= numRegions; i++ {
 		region := tc.GetRegion(i)
@@ -185,7 +185,7 @@ func scatterSpecial(re *require.Assertions, numOrdinaryStores, numSpecialStores,
 	}
 	tc.SetEnablePlacementRules(true)
 	re.NoError(tc.RuleManager.SetRule(&placement.Rule{
-		GroupID: placement.DefaultGroupID, ID: "learner", Role: placement.Learner, Count: 3,
+		GroupID: "pd", ID: "learner", Role: placement.Learner, Count: 3,
 		LabelConstraints: []placement.LabelConstraint{{Key: "engine", Op: placement.In, Values: []string{"tiflash"}}}}))
 
 	// Region 1 has the same distribution with the Region 2, which is used to test selectPeerToReplace.
@@ -198,7 +198,7 @@ func scatterSpecial(re *require.Assertions, numOrdinaryStores, numSpecialStores,
 			[]uint64{numOrdinaryStores + 1, numOrdinaryStores + 2, numOrdinaryStores + 3},
 		)
 	}
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 
 	for i := uint64(1); i <= numRegions; i++ {
 		region := tc.GetRegion(i)
@@ -216,7 +216,7 @@ func scatterSpecial(re *require.Assertions, numOrdinaryStores, numSpecialStores,
 		leaderStoreID := region.GetLeader().GetStoreId()
 		for _, peer := range region.GetPeers() {
 			storeID := peer.GetStoreId()
-			store := tc.GetStore(storeID)
+			store := tc.Stores.GetStore(storeID)
 			if store.GetLabelValue("engine") == "tiflash" {
 				countSpecialPeers[storeID]++
 			} else {
@@ -265,7 +265,7 @@ func TestStoreLimit(t *testing.T) {
 		tc.AddLeaderRegion(i, seq.next(), seq.next(), seq.next())
 	}
 
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 
 	for i := uint64(1); i <= 5; i++ {
 		region := tc.GetRegion(i)
@@ -310,16 +310,16 @@ func TestScatterCheck(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Log(testCase.name)
-		scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+		scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 		_, err := scatterer.Scatter(testCase.checkRegion, "", false)
 		if testCase.needFix {
 			re.Error(err)
-			re.True(tc.CheckPendingProcessedRegions(1))
+			re.True(tc.CheckRegionUnderSuspect(1))
 		} else {
 			re.NoError(err)
-			re.False(tc.CheckPendingProcessedRegions(1))
+			re.False(tc.CheckRegionUnderSuspect(1))
 		}
-		tc.ResetPendingProcessedRegions()
+		tc.ResetSuspectRegions()
 	}
 }
 
@@ -350,8 +350,8 @@ func TestSomeStoresFilteredScatterGroupInConcurrency(t *testing.T) {
 		// prevent store from being disconnected
 		tc.SetStoreLastHeartbeatInterval(i, 40*time.Minute)
 	}
-	re.True(tc.GetStore(uint64(6)).IsDisconnected())
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	re.Equal(tc.GetStore(uint64(6)).IsDisconnected(), true)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 	var wg sync.WaitGroup
 	for j := 0; j < 10; j++ {
 		wg.Add(1)
@@ -405,7 +405,7 @@ func TestScatterGroupInConcurrency(t *testing.T) {
 	// We send scatter interweave request for each group to simulate scattering multiple region groups in concurrency.
 	for _, testCase := range testCases {
 		t.Log(testCase.name)
-		scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+		scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 		regionID := 1
 		for i := 0; i < 100; i++ {
 			for j := 0; j < testCase.groupCount; j++ {
@@ -456,7 +456,7 @@ func TestScatterForManyRegion(t *testing.T) {
 		tc.SetStoreLastHeartbeatInterval(i, -10*time.Minute)
 	}
 
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 	regions := make(map[uint64]*core.RegionInfo)
 	for i := 1; i <= 1200; i++ {
 		regions[uint64(i)] = tc.AddLightWeightLeaderRegion(uint64(i), 1, 2, 3)
@@ -466,7 +466,7 @@ func TestScatterForManyRegion(t *testing.T) {
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/schedule/scatter/scatterHbStreamsDrain", `return(true)`))
 	scatterer.scatterRegions(regions, failures, group, 3, false)
 	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/schedule/scatter/scatterHbStreamsDrain"))
-	re.Empty(failures)
+	re.Len(failures, 0)
 }
 
 func TestScattersGroup(t *testing.T) {
@@ -498,7 +498,7 @@ func TestScattersGroup(t *testing.T) {
 	for id, testCase := range testCases {
 		group := fmt.Sprintf("gourp-%d", id)
 		t.Log(testCase.name)
-		scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+		scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 		regions := map[uint64]*core.RegionInfo{}
 		for i := 1; i <= 100; i++ {
 			regions[uint64(i)] = tc.AddLightWeightLeaderRegion(uint64(i), 1, 2, 3)
@@ -575,8 +575,8 @@ func TestRegionHasLearner(t *testing.T) {
 		tc.AddLabelsStore(i, 0, map[string]string{"zone": "z2"})
 	}
 	tc.RuleManager.SetRule(&placement.Rule{
-		GroupID: placement.DefaultGroupID,
-		ID:      placement.DefaultRuleID,
+		GroupID: "pd",
+		ID:      "default",
 		Role:    placement.Voter,
 		Count:   3,
 		LabelConstraints: []placement.LabelConstraint{
@@ -588,7 +588,7 @@ func TestRegionHasLearner(t *testing.T) {
 		},
 	})
 	tc.RuleManager.SetRule(&placement.Rule{
-		GroupID: placement.DefaultGroupID,
+		GroupID: "pd",
 		ID:      "learner",
 		Role:    placement.Learner,
 		Count:   1,
@@ -600,7 +600,7 @@ func TestRegionHasLearner(t *testing.T) {
 			},
 		},
 	})
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 	regionCount := 50
 	for i := 1; i <= regionCount; i++ {
 		_, err := scatterer.Scatter(tc.AddRegionWithLearner(uint64(i), uint64(1), []uint64{uint64(2), uint64(3)}, []uint64{7}), group, false)
@@ -660,7 +660,7 @@ func TestSelectedStoresTooFewPeers(t *testing.T) {
 		tc.SetStoreLastHeartbeatInterval(i, -10*time.Minute)
 	}
 	group := "group"
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 
 	// Put a lot of regions in Store 1/2/3.
 	for i := uint64(1); i < 100; i++ {
@@ -679,7 +679,7 @@ func TestSelectedStoresTooFewPeers(t *testing.T) {
 		re.NoError(err)
 		re.False(isPeerCountChanged(op))
 		if op != nil {
-			re.Equal(group, op.GetAdditionalInfo("group"))
+			re.Equal(group, op.AdditionalInfos["group"])
 		}
 	}
 }
@@ -701,7 +701,7 @@ func TestSelectedStoresTooManyPeers(t *testing.T) {
 		tc.SetStoreLastHeartbeatInterval(i, -10*time.Minute)
 	}
 	group := "group"
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 	// priority 4 > 1 > 5 > 2 == 3
 	for i := 0; i < 1200; i++ {
 		scatterer.ordinaryEngine.selectedPeer.Put(2, group)
@@ -738,7 +738,7 @@ func TestBalanceLeader(t *testing.T) {
 		tc.SetStoreLastHeartbeatInterval(i, -10*time.Minute)
 	}
 	group := "group"
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 	for i := uint64(1001); i <= 1300; i++ {
 		region := tc.AddLeaderRegion(i, 2, 3, 4)
 		op, err := scatterer.scatterRegion(region, group, false)
@@ -769,7 +769,7 @@ func TestBalanceRegion(t *testing.T) {
 		tc.SetStoreLastHeartbeatInterval(i, -10*time.Minute)
 	}
 	group := "group"
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 	for i := uint64(1001); i <= 1300; i++ {
 		region := tc.AddLeaderRegion(i, 2, 4, 6)
 		op, err := scatterer.scatterRegion(region, group, false)
@@ -828,7 +828,7 @@ func TestRemoveStoreLimit(t *testing.T) {
 		tc.AddLeaderRegion(i, seq.next(), seq.next(), seq.next())
 	}
 
-	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddPendingProcessedRegions)
+	scatterer := NewRegionScatterer(ctx, tc, oc, tc.AddSuspectRegions)
 
 	for i := uint64(1); i <= 5; i++ {
 		region := tc.GetRegion(i)

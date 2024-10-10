@@ -22,13 +22,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/mock/mockcluster"
 	"github.com/tikv/pd/pkg/mock/mockconfig"
 	"github.com/tikv/pd/pkg/mock/mockid"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/storage/kv"
-	"github.com/tikv/pd/pkg/utils/etcdutil"
 )
 
 type keyspaceGroupTestSuite struct {
@@ -44,14 +43,13 @@ func TestKeyspaceGroupTestSuite(t *testing.T) {
 }
 
 func (suite *keyspaceGroupTestSuite) SetupTest() {
-	re := suite.Require()
 	suite.ctx, suite.cancel = context.WithCancel(context.Background())
 	store := endpoint.NewStorageEndpoint(kv.NewMemoryKV(), nil)
 	suite.kgm = NewKeyspaceGroupManager(suite.ctx, store, nil, 0)
 	idAllocator := mockid.NewIDAllocator()
 	cluster := mockcluster.NewCluster(suite.ctx, mockconfig.NewTestOptions())
 	suite.kg = NewKeyspaceManager(suite.ctx, store, cluster, idAllocator, &mockConfig{}, suite.kgm)
-	re.NoError(suite.kgm.Bootstrap(suite.ctx))
+	suite.NoError(suite.kgm.Bootstrap(suite.ctx))
 }
 
 func (suite *keyspaceGroupTestSuite) TearDownTest() {
@@ -87,7 +85,7 @@ func (suite *keyspaceGroupTestSuite) TestKeyspaceGroupOperations() {
 	re.NoError(err)
 	re.Len(kgs, 2)
 	// get the default keyspace group
-	kg, err := suite.kgm.GetKeyspaceGroupByID(constant.DefaultKeyspaceGroupID)
+	kg, err := suite.kgm.GetKeyspaceGroupByID(utils.DefaultKeyspaceGroupID)
 	re.NoError(err)
 	re.Equal(uint32(0), kg.ID)
 	re.Equal(endpoint.Basic.String(), kg.UserKind)
@@ -193,7 +191,7 @@ func (suite *keyspaceGroupTestSuite) TestUpdateKeyspace() {
 	re.Len(kg2.Keyspaces, 1)
 	kg3, err := suite.kgm.GetKeyspaceGroupByID(3)
 	re.NoError(err)
-	re.Empty(kg3.Keyspaces)
+	re.Len(kg3.Keyspaces, 0)
 
 	_, err = suite.kg.UpdateKeyspaceConfig("test", []*Mutation{
 		{
@@ -213,7 +211,7 @@ func (suite *keyspaceGroupTestSuite) TestUpdateKeyspace() {
 	re.Len(kg2.Keyspaces, 1)
 	kg3, err = suite.kgm.GetKeyspaceGroupByID(3)
 	re.NoError(err)
-	re.Empty(kg3.Keyspaces)
+	re.Len(kg3.Keyspaces, 0)
 	_, err = suite.kg.UpdateKeyspaceConfig("test", []*Mutation{
 		{
 			Op:    OpPut,
@@ -229,7 +227,7 @@ func (suite *keyspaceGroupTestSuite) TestUpdateKeyspace() {
 	re.NoError(err)
 	kg2, err = suite.kgm.GetKeyspaceGroupByID(2)
 	re.NoError(err)
-	re.Empty(kg2.Keyspaces)
+	re.Len(kg2.Keyspaces, 0)
 	kg3, err = suite.kgm.GetKeyspaceGroupByID(3)
 	re.NoError(err)
 	re.Len(kg3.Keyspaces, 1)
@@ -248,13 +246,13 @@ func (suite *keyspaceGroupTestSuite) TestKeyspaceGroupSplit() {
 			ID:        uint32(2),
 			UserKind:  endpoint.Standard.String(),
 			Keyspaces: []uint32{111, 222, 333},
-			Members:   make([]endpoint.KeyspaceGroupMember, constant.DefaultKeyspaceGroupReplicaCount),
+			Members:   make([]endpoint.KeyspaceGroupMember, utils.DefaultKeyspaceGroupReplicaCount),
 		},
 	}
 	err := suite.kgm.CreateKeyspaceGroups(keyspaceGroups)
 	re.NoError(err)
 	// split the default keyspace
-	err = suite.kgm.SplitKeyspaceGroupByID(0, 4, []uint32{constant.DefaultKeyspaceID})
+	err = suite.kgm.SplitKeyspaceGroupByID(0, 4, []uint32{utils.DefaultKeyspaceID})
 	re.ErrorIs(err, ErrModifyDefaultKeyspace)
 	// split the keyspace group 1 to 4
 	err = suite.kgm.SplitKeyspaceGroupByID(1, 4, []uint32{444})
@@ -341,7 +339,7 @@ func (suite *keyspaceGroupTestSuite) TestKeyspaceGroupSplitRange() {
 			ID:        uint32(2),
 			UserKind:  endpoint.Standard.String(),
 			Keyspaces: []uint32{111, 333, 444, 555, 666},
-			Members:   make([]endpoint.KeyspaceGroupMember, constant.DefaultKeyspaceGroupReplicaCount),
+			Members:   make([]endpoint.KeyspaceGroupMember, utils.DefaultKeyspaceGroupReplicaCount),
 		},
 	}
 	err := suite.kgm.CreateKeyspaceGroups(keyspaceGroups)
@@ -388,7 +386,7 @@ func (suite *keyspaceGroupTestSuite) TestKeyspaceGroupMerge() {
 			ID:        uint32(1),
 			UserKind:  endpoint.Basic.String(),
 			Keyspaces: []uint32{111, 222, 333},
-			Members:   make([]endpoint.KeyspaceGroupMember, constant.DefaultKeyspaceGroupReplicaCount),
+			Members:   make([]endpoint.KeyspaceGroupMember, utils.DefaultKeyspaceGroupReplicaCount),
 		},
 		{
 			ID:        uint32(3),
@@ -450,10 +448,10 @@ func (suite *keyspaceGroupTestSuite) TestKeyspaceGroupMerge() {
 	err = suite.kgm.MergeKeyspaceGroups(4, []uint32{5})
 	re.ErrorContains(err, ErrKeyspaceGroupNotExists(5).Error())
 	// merge with the number of keyspace groups exceeds the limit
-	err = suite.kgm.MergeKeyspaceGroups(1, make([]uint32, etcdutil.MaxEtcdTxnOps/2))
+	err = suite.kgm.MergeKeyspaceGroups(1, make([]uint32, MaxEtcdTxnOps/2))
 	re.ErrorIs(err, ErrExceedMaxEtcdTxnOps)
 	// merge the default keyspace group
-	err = suite.kgm.MergeKeyspaceGroups(1, []uint32{constant.DefaultKeyspaceGroupID})
+	err = suite.kgm.MergeKeyspaceGroups(1, []uint32{utils.DefaultKeyspaceGroupID})
 	re.ErrorIs(err, ErrModifyDefaultKeyspaceGroup)
 }
 

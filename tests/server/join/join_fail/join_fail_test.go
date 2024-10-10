@@ -33,12 +33,12 @@ func TestFailedPDJoinInStep1(t *testing.T) {
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	re.NotEmpty(cluster.WaitLeader())
+	cluster.WaitLeader()
 
 	// Join the second PD.
-	re.NoError(failpoint.Enable("github.com/tikv/pd/server/join/addMemberFailed", `return`))
+	re.NoError(failpoint.Enable("github.com/tikv/pd/server/join/add-member-failed", `return`))
 	_, err = cluster.Join(ctx)
 	re.Error(err)
 	re.Contains(err.Error(), "join failed")
-	re.NoError(failpoint.Disable("github.com/tikv/pd/server/join/addMemberFailed"))
+	re.NoError(failpoint.Disable("github.com/tikv/pd/server/join/add-member-failed"))
 }

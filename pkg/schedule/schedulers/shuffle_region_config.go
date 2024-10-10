@@ -21,6 +21,7 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/schedule/placement"
 	"github.com/tikv/pd/pkg/slice"
+	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/unrolled/render"
@@ -36,50 +37,46 @@ var allRoles = []string{roleLeader, roleFollower, roleLearner}
 
 type shuffleRegionSchedulerConfig struct {
 	syncutil.RWMutex
-	schedulerConfig
+	storage endpoint.ConfigStorage
 
 	Ranges []core.KeyRange `json:"ranges"`
 	Roles  []string        `json:"roles"` // can include `leader`, `follower`, `learner`.
 }
 
-func (conf *shuffleRegionSchedulerConfig) encodeConfig() ([]byte, error) {
+func (conf *shuffleRegionSchedulerConfig) EncodeConfig() ([]byte, error) {
 	conf.RLock()
 	defer conf.RUnlock()
 	return EncodeConfig(conf)
 }
 
-func (conf *shuffleRegionSchedulerConfig) getRoles() []string {
+func (conf *shuffleRegionSchedulerConfig) GetRoles() []string {
 	conf.RLock()
 	defer conf.RUnlock()
 	return conf.Roles
 }
 
-func (conf *shuffleRegionSchedulerConfig) getRanges() []core.KeyRange {
+func (conf *shuffleRegionSchedulerConfig) GetRanges() []core.KeyRange {
 	conf.RLock()
 	defer conf.RUnlock()
-	ranges := make([]core.KeyRange, len(conf.Ranges))
-	copy(ranges, conf.Ranges)
-	return ranges
+	return conf.Ranges
 }
 
-func (conf *shuffleRegionSchedulerConfig) isRoleAllow(role string) bool {
+func (conf *shuffleRegionSchedulerConfig) IsRoleAllow(role string) bool {
 	conf.RLock()
 	defer conf.RUnlock()
 	return slice.AnyOf(conf.Roles, func(i int) bool { return conf.Roles[i] == role })
 }
 
-// ServeHTTP implements the http.Handler interface.
 func (conf *shuffleRegionSchedulerConfig) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	router := mux.NewRouter()
-	router.HandleFunc("/list", conf.handleGetRoles).Methods(http.MethodGet)
 	router.HandleFunc("/roles", conf.handleGetRoles).Methods(http.MethodGet)
 	router.HandleFunc("/roles", conf.handleSetRoles).Methods(http.MethodPost)
 	router.ServeHTTP(w, r)
 }
 
-func (conf *shuffleRegionSchedulerConfig) handleGetRoles(w http.ResponseWriter, _ *http.Request) {
+func (conf *shuffleRegionSchedulerConfig) handleGetRoles(w http.ResponseWriter, r *http.Request) {
 	rd := render.New(render.Options{IndentJSON: true})
-	rd.JSON(w, http.StatusOK, conf.getRoles())
+	rd.JSON(w, http.StatusOK, conf.GetRoles())
 }
 
 func (conf *shuffleRegionSchedulerConfig) handleSetRoles(w http.ResponseWriter, r *http.Request) {
@@ -99,10 +96,18 @@ func (conf *shuffleRegionSchedulerConfig) handleSetRoles(w http.ResponseWriter, 
 	defer conf.Unlock()
 	old := conf.Roles
 	conf.Roles = roles
-	if err := conf.save(); err != nil {
+	if err := conf.persist(); err != nil {
 		conf.Roles = old // revert
 		rd.Text(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	rd.Text(w, http.StatusOK, "Config is updated.")
+}
+
+func (conf *shuffleRegionSchedulerConfig) persist() error {
+	data, err := EncodeConfig(conf)
+	if err != nil {
+		return err
+	}
+	return conf.storage.SaveSchedulerConfig(ShuffleRegionName, data)
 }

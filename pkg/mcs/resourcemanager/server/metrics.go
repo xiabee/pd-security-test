@@ -29,14 +29,17 @@ const (
 	tiflashTypeLabel          = "ap"
 	defaultTypeLabel          = "tp"
 	newResourceGroupNameLabel = "resource_group"
-
-	// Labels for the config.
-	ruPerSecLabel   = "ru_per_sec"
-	ruCapacityLabel = "ru_capacity"
-	priorityLabel   = "priority"
 )
 
 var (
+	// Meta & Server info.
+	serverInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: serverSubsystem,
+			Name:      "info",
+			Help:      "Indicate the resource manager server info, and the value is the start timestamp (s).",
+		}, []string{"version", "hash"})
 	// RU cost metrics.
 	// `sum` is added to the name to maintain compatibility with the previous use of histogram.
 	readRequestUnitCost = prometheus.NewCounterVec(
@@ -121,17 +124,10 @@ var (
 			Name:      "available_ru",
 			Help:      "Counter of the available RU for all resource groups.",
 		}, []string{resourceGroupNameLabel, newResourceGroupNameLabel})
-
-	resourceGroupConfigGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: serverSubsystem,
-			Name:      "group_config",
-			Help:      "Config of the resource group.",
-		}, []string{newResourceGroupNameLabel, typeLabel})
 )
 
 func init() {
+	prometheus.MustRegister(serverInfo)
 	prometheus.MustRegister(readRequestUnitCost)
 	prometheus.MustRegister(writeRequestUnitCost)
 	prometheus.MustRegister(sqlLayerRequestUnitCost)
@@ -143,5 +139,4 @@ func init() {
 	prometheus.MustRegister(availableRUCounter)
 	prometheus.MustRegister(readRequestUnitMaxPerSecCost)
 	prometheus.MustRegister(writeRequestUnitMaxPerSecCost)
-	prometheus.MustRegister(resourceGroupConfigGauge)
 }

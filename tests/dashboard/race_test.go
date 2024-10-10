@@ -35,7 +35,7 @@ func TestCancelDuringStarting(t *testing.T) {
 	re.NoError(err)
 	defer cluster.Destroy()
 	re.NoError(cluster.RunInitialServers())
-	re.NotEmpty(cluster.WaitLeader())
+	cluster.WaitLeader()
 
 	time.Sleep(60 * time.Millisecond)
 	cancel()

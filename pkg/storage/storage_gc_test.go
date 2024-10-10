@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/storage/endpoint"
-	"github.com/tikv/pd/pkg/utils/keypath"
 )
 
 func testGCSafePoints() []*endpoint.GCSafePointV2 {
@@ -94,7 +93,7 @@ func TestLoadMinServiceSafePoint(t *testing.T) {
 	// gc_worker service safepoint will not be removed.
 	ssp, err := storage.LoadMinServiceSafePointV2(testKeyspaceID, currentTime.Add(5000*time.Second))
 	re.NoError(err)
-	re.Equal(keypath.GCWorkerServiceSafePointID, ssp.ServiceID)
+	re.Equal(ssp.ServiceID, endpoint.GCWorkerServiceSafePointID)
 	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/storage/endpoint/removeExpiredKeys"))
 }
 

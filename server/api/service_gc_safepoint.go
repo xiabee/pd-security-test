@@ -16,7 +16,6 @@ package api
 
 import (
 	"net/http"
-	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/tikv/pd/pkg/storage/endpoint"
@@ -36,22 +35,19 @@ func newServiceGCSafepointHandler(svr *server.Server, rd *render.Render) *servic
 	}
 }
 
-// ListServiceGCSafepoint is the response for list service GC safepoint.
 // NOTE: This type is exported by HTTP API. Please pay more attention when modifying it.
-// This type is in sync with `pd/client/http/types.go`.
-type ListServiceGCSafepoint struct {
-	ServiceGCSafepoints   []*endpoint.ServiceSafePoint `json:"service_gc_safe_points"`
-	MinServiceGcSafepoint uint64                       `json:"min_service_gc_safe_point,omitempty"`
-	GCSafePoint           uint64                       `json:"gc_safe_point"`
+type listServiceGCSafepoint struct {
+	ServiceGCSafepoints []*endpoint.ServiceSafePoint `json:"service_gc_safe_points"`
+	GCSafePoint         uint64                       `json:"gc_safe_point"`
 }
 
 // @Tags     service_gc_safepoint
 // @Summary  Get all service GC safepoint.
 // @Produce  json
-// @Success  200  {array}   ListServiceGCSafepoint
+// @Success  200  {array}   listServiceGCSafepoint
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /gc/safepoint [get]
-func (h *serviceGCSafepointHandler) GetGCSafePoint(w http.ResponseWriter, _ *http.Request) {
+func (h *serviceGCSafepointHandler) GetGCSafePoint(w http.ResponseWriter, r *http.Request) {
 	storage := h.svr.GetStorage()
 	gcSafepoint, err := storage.LoadGCSafePoint()
 	if err != nil {
@@ -63,21 +59,9 @@ func (h *serviceGCSafepointHandler) GetGCSafePoint(w http.ResponseWriter, _ *htt
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	var minSSp *endpoint.ServiceSafePoint
-	for _, ssp := range ssps {
-		if (minSSp == nil || minSSp.SafePoint > ssp.SafePoint) &&
-			ssp.ExpiredAt > time.Now().Unix() {
-			minSSp = ssp
-		}
-	}
-	minServiceGcSafepoint := uint64(0)
-	if minSSp != nil {
-		minServiceGcSafepoint = minSSp.SafePoint
-	}
-	list := ListServiceGCSafepoint{
-		GCSafePoint:           gcSafepoint,
-		ServiceGCSafepoints:   ssps,
-		MinServiceGcSafepoint: minServiceGcSafepoint,
+	list := listServiceGCSafepoint{
+		GCSafePoint:         gcSafepoint,
+		ServiceGCSafepoints: ssps,
 	}
 	h.rd.JSON(w, http.StatusOK, list)
 }

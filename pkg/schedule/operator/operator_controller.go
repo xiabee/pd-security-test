@@ -15,10 +15,10 @@
 package operator
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/pingcap/failpoint"
@@ -52,51 +52,20 @@ var (
 	FastOperatorFinishTime = 10 * time.Second
 )
 
-type opCounter struct {
-	syncutil.RWMutex
-	count map[OpKind]uint64
-}
-
-func (c *opCounter) inc(kind OpKind) {
-	c.Lock()
-	defer c.Unlock()
-	c.count[kind]++
-}
-
-func (c *opCounter) dec(kind OpKind) {
-	c.Lock()
-	defer c.Unlock()
-	if c.count[kind] > 0 {
-		c.count[kind]--
-	}
-}
-
-func (c *opCounter) getCountByKind(kind OpKind) uint64 {
-	c.RLock()
-	defer c.RUnlock()
-	return c.count[kind]
-}
-
 // Controller is used to limit the speed of scheduling.
 type Controller struct {
-	operators sync.Map
-	ctx       context.Context
-	config    config.SharedConfigProvider
-	cluster   *core.BasicCluster
-	hbStreams *hbstream.HeartbeatStreams
-
-	// fast path, TTLUint64 is safe for concurrent.
-	fastOperators *cache.TTLUint64
-
-	// opNotifierQueue is a priority queue to notify the operator to be checked.
-	// safe for concurrent.
-	opNotifierQueue *concurrentHeapOpQueue
-
-	// states
-	records   *records // safe for concurrent
-	wop       WaitingOperator
-	wopStatus *waitingOperatorStatus
-	counts    *opCounter
+	syncutil.RWMutex
+	ctx             context.Context
+	config          config.SharedConfigProvider
+	cluster         *core.BasicCluster
+	operators       map[uint64]*Operator
+	hbStreams       *hbstream.HeartbeatStreams
+	fastOperators   *cache.TTLUint64
+	counts          map[OpKind]uint64
+	records         *records
+	wop             WaitingOperator
+	wopStatus       *waitingOperatorStatus
+	opNotifierQueue operatorQueue
 }
 
 // NewController creates a Controller.
@@ -105,14 +74,14 @@ func NewController(ctx context.Context, cluster *core.BasicCluster, config confi
 		ctx:             ctx,
 		cluster:         cluster,
 		config:          config,
+		operators:       make(map[uint64]*Operator),
 		hbStreams:       hbStreams,
 		fastOperators:   cache.NewIDTTL(ctx, time.Minute, FastOperatorFinishTime),
-		opNotifierQueue: newConcurrentHeapOpQueue(),
-		// states
-		records:   newRecords(ctx),
-		wop:       newRandBuckets(),
-		wopStatus: newWaitingOperatorStatus(),
-		counts:    &opCounter{count: make(map[OpKind]uint64)},
+		counts:          make(map[OpKind]uint64),
+		records:         newRecords(ctx),
+		wop:             newRandBuckets(),
+		wopStatus:       newWaitingOperatorStatus(),
+		opNotifierQueue: make(operatorQueue, 0),
 	}
 }
 
@@ -124,6 +93,8 @@ func (oc *Controller) Ctx() context.Context {
 
 // GetCluster exports basic cluster to evict-scheduler for check store status.
 func (oc *Controller) GetCluster() *core.BasicCluster {
+	oc.RLock()
+	defer oc.RUnlock()
 	return oc.cluster
 }
 
@@ -222,7 +193,7 @@ func (oc *Controller) checkStaleOperator(op *Operator, step OpStep, region *core
 	return false
 }
 
-func getNextPushOperatorTime(step OpStep, now time.Time) time.Time {
+func (oc *Controller) getNextPushOperatorTime(step OpStep, now time.Time) time.Time {
 	nextTime := slowNotifyInterval
 	switch step.(type) {
 	case TransferLeader, PromoteLearner, ChangePeerV2Enter, ChangePeerV2Leave:
@@ -235,21 +206,22 @@ func getNextPushOperatorTime(step OpStep, now time.Time) time.Time {
 // "next" is true to indicate that it may exist in next attempt,
 // and false is the end for the poll.
 func (oc *Controller) pollNeedDispatchRegion() (r *core.RegionInfo, next bool) {
-	if oc.opNotifierQueue.len() == 0 {
+	oc.Lock()
+	defer oc.Unlock()
+	if oc.opNotifierQueue.Len() == 0 {
 		return nil, false
 	}
-	item, _ := oc.opNotifierQueue.pop()
+	item := heap.Pop(&oc.opNotifierQueue).(*operatorWithTime)
 	regionID := item.op.RegionID()
-	opi, ok := oc.operators.Load(regionID)
-	if !ok || opi.(*Operator) == nil {
+	op, ok := oc.operators[regionID]
+	if !ok || op == nil {
 		return nil, true
 	}
-	op := opi.(*Operator)
 	// Check the operator lightly. It cant't dispatch the op for some scenario.
 	var reason CancelReasonType
 	r, reason = oc.checkOperatorLightly(op)
 	if len(reason) != 0 {
-		_ = oc.removeOperatorInner(op)
+		_ = oc.removeOperatorLocked(op)
 		if op.Cancel(reason) {
 			log.Warn("remove operator because region disappeared",
 				zap.Uint64("region-id", op.RegionID()),
@@ -265,13 +237,13 @@ func (oc *Controller) pollNeedDispatchRegion() (r *core.RegionInfo, next bool) {
 	}
 	now := time.Now()
 	if now.Before(item.time) {
-		oc.opNotifierQueue.push(item)
+		heap.Push(&oc.opNotifierQueue, item)
 		return nil, false
 	}
 
 	// pushes with new notify time.
-	item.time = getNextPushOperatorTime(step, now)
-	oc.opNotifierQueue.push(item)
+	item.time = oc.getNextPushOperatorTime(step, now)
+	heap.Push(&oc.opNotifierQueue, item)
 	return r, true
 }
 
@@ -292,6 +264,7 @@ func (oc *Controller) PushOperators(recordOpStepWithTTL func(regionID uint64)) {
 
 // AddWaitingOperator adds operators to waiting operators.
 func (oc *Controller) AddWaitingOperator(ops ...*Operator) int {
+	oc.Lock()
 	added := 0
 	needPromoted := 0
 
@@ -303,11 +276,13 @@ func (oc *Controller) AddWaitingOperator(ops ...*Operator) int {
 			if i+1 >= len(ops) {
 				// should not be here forever
 				log.Error("orphan merge operators found", zap.String("desc", desc), errs.ZapError(errs.ErrMergeOperator.FastGenByArgs("orphan operator found")))
+				oc.Unlock()
 				return added
 			}
 			if ops[i+1].Kind()&OpMerge == 0 {
 				log.Error("merge operator should be paired", zap.String("desc",
 					ops[i+1].Desc()), errs.ZapError(errs.ErrMergeOperator.FastGenByArgs("operator should be paired")))
+				oc.Unlock()
 				return added
 			}
 			isMerge = true
@@ -324,22 +299,22 @@ func (oc *Controller) AddWaitingOperator(ops ...*Operator) int {
 			}
 			continue
 		}
-
+		oc.wop.PutOperator(op)
 		if isMerge {
 			// count two merge operators as one, so wopStatus.ops[desc] should
 			// not be updated here
 			// TODO: call checkAddOperator ...
-			oc.wop.PutMergeOperators([]*Operator{op, ops[i+1]})
 			i++
 			added++
-		} else {
-			oc.wop.PutOperator(op)
+			oc.wop.PutOperator(ops[i])
 		}
 		operatorCounter.WithLabelValues(desc, "put").Inc()
-		oc.wopStatus.incCount(desc)
+		oc.wopStatus.ops[desc]++
 		added++
 		needPromoted++
 	}
+
+	oc.Unlock()
 	operatorCounter.WithLabelValues(ops[0].Desc(), "promote-add").Add(float64(needPromoted))
 	for i := 0; i < needPromoted; i++ {
 		oc.PromoteWaitingOperator()
@@ -349,10 +324,13 @@ func (oc *Controller) AddWaitingOperator(ops ...*Operator) int {
 
 // AddOperator adds operators to the running operators.
 func (oc *Controller) AddOperator(ops ...*Operator) bool {
+	oc.Lock()
+	defer oc.Unlock()
+
 	// note: checkAddOperator uses false param for `isPromoting`.
 	// This is used to keep check logic before fixing issue #4946,
 	// but maybe user want to add operator when waiting queue is busy
-	if oc.ExceedStoreLimit(ops...) {
+	if oc.exceedStoreLimitLocked(ops...) {
 		for _, op := range ops {
 			operatorCounter.WithLabelValues(op.Desc(), "exceed-limit").Inc()
 			_ = op.Cancel(ExceedStoreLimit)
@@ -368,7 +346,7 @@ func (oc *Controller) AddOperator(ops ...*Operator) bool {
 		return false
 	}
 	for _, op := range ops {
-		if !oc.addOperatorInner(op) {
+		if !oc.addOperatorLocked(op) {
 			return false
 		}
 	}
@@ -377,22 +355,23 @@ func (oc *Controller) AddOperator(ops ...*Operator) bool {
 
 // PromoteWaitingOperator promotes operators from waiting operators.
 func (oc *Controller) PromoteWaitingOperator() {
+	oc.Lock()
+	defer oc.Unlock()
 	var ops []*Operator
 	for {
 		// GetOperator returns one operator or two merge operators
-		// need write lock
 		ops = oc.wop.GetOperator()
 		if ops == nil {
 			return
 		}
 		operatorCounter.WithLabelValues(ops[0].Desc(), "get").Inc()
-		if oc.ExceedStoreLimit(ops...) {
+		if oc.exceedStoreLimitLocked(ops...) {
 			for _, op := range ops {
 				operatorCounter.WithLabelValues(op.Desc(), "exceed-limit").Inc()
 				_ = op.Cancel(ExceedStoreLimit)
 				oc.buryOperator(op)
 			}
-			oc.wopStatus.decCount(ops[0].Desc())
+			oc.wopStatus.ops[ops[0].Desc()]--
 			continue
 		}
 
@@ -402,15 +381,15 @@ func (oc *Controller) PromoteWaitingOperator() {
 				_ = op.Cancel(reason)
 				oc.buryOperator(op)
 			}
-			oc.wopStatus.decCount(ops[0].Desc())
+			oc.wopStatus.ops[ops[0].Desc()]--
 			continue
 		}
-		oc.wopStatus.decCount(ops[0].Desc())
+		oc.wopStatus.ops[ops[0].Desc()]--
 		break
 	}
 
 	for _, op := range ops {
-		if !oc.addOperatorInner(op) {
+		if !oc.addOperatorLocked(op) {
 			break
 		}
 	}
@@ -441,8 +420,7 @@ func (oc *Controller) checkAddOperator(isPromoting bool, ops ...*Operator) (bool
 			operatorCounter.WithLabelValues(op.Desc(), "epoch-not-match").Inc()
 			return false, EpochNotMatch
 		}
-		if oldi, ok := oc.operators.Load(op.RegionID()); ok && oldi.(*Operator) != nil && !isHigherPriorityOperator(op, oldi.(*Operator)) {
-			old := oldi.(*Operator)
+		if old := oc.operators[op.RegionID()]; old != nil && !isHigherPriorityOperator(op, old) {
 			log.Debug("already have operator, cancel add operator",
 				zap.Uint64("region-id", op.RegionID()),
 				zap.Reflect("old", old))
@@ -460,8 +438,8 @@ func (oc *Controller) checkAddOperator(isPromoting bool, ops ...*Operator) (bool
 			operatorCounter.WithLabelValues(op.Desc(), "unexpected-status").Inc()
 			return false, NotInCreateStatus
 		}
-		if !isPromoting && oc.wopStatus.getCount(op.Desc()) >= oc.config.GetSchedulerMaxWaitingOperator() {
-			log.Debug("exceed max return false", zap.Uint64("waiting", oc.wopStatus.getCount(op.Desc())), zap.String("desc", op.Desc()), zap.Uint64("max", oc.config.GetSchedulerMaxWaitingOperator()))
+		if !isPromoting && oc.wopStatus.ops[op.Desc()] >= oc.config.GetSchedulerMaxWaitingOperator() {
+			log.Debug("exceed max return false", zap.Uint64("waiting", oc.wopStatus.ops[op.Desc()]), zap.String("desc", op.Desc()), zap.Uint64("max", oc.config.GetSchedulerMaxWaitingOperator()))
 			operatorCounter.WithLabelValues(op.Desc(), "exceed-max-waiting").Inc()
 			return false, ExceedWaitLimit
 		}
@@ -505,18 +483,17 @@ func isHigherPriorityOperator(new, old *Operator) bool {
 	return new.GetPriorityLevel() > old.GetPriorityLevel()
 }
 
-func (oc *Controller) addOperatorInner(op *Operator) bool {
+func (oc *Controller) addOperatorLocked(op *Operator) bool {
 	regionID := op.RegionID()
 	log.Info("add operator",
 		zap.Uint64("region-id", regionID),
 		zap.Reflect("operator", op),
-		zap.String("additional-info", op.LogAdditionalInfo()))
+		zap.String("additional-info", op.GetAdditionalInfo()))
 
 	// If there is an old operator, replace it. The priority should be checked
 	// already.
-	if oldi, ok := oc.operators.Load(regionID); ok {
-		old := oldi.(*Operator)
-		_ = oc.removeOperatorInner(old)
+	if old, ok := oc.operators[regionID]; ok {
+		_ = oc.removeOperatorLocked(old)
 		_ = old.Replace()
 		oc.buryOperator(old)
 	}
@@ -532,8 +509,7 @@ func (oc *Controller) addOperatorInner(op *Operator) bool {
 		operatorCounter.WithLabelValues(op.Desc(), "unexpected").Inc()
 		return false
 	}
-	oc.operators.Store(regionID, op)
-	oc.counts.inc(op.SchedulerKind())
+	oc.operators[regionID] = op
 	operatorCounter.WithLabelValues(op.Desc(), "start").Inc()
 	operatorSizeHist.WithLabelValues(op.Desc()).Observe(float64(op.ApproximateSize))
 	opInfluence := NewTotalOpInfluence([]*Operator{op}, oc.cluster)
@@ -553,6 +529,7 @@ func (oc *Controller) addOperatorInner(op *Operator) bool {
 			storeLimitCostCounter.WithLabelValues(strconv.FormatUint(storeID, 10), n).Add(float64(stepCost) / float64(storelimit.RegionInfluence[v]))
 		}
 	}
+	oc.updateCounts(oc.operators)
 
 	var step OpStep
 	if region := oc.cluster.GetRegion(op.RegionID()); region != nil {
@@ -561,7 +538,7 @@ func (oc *Controller) addOperatorInner(op *Operator) bool {
 		}
 	}
 
-	oc.opNotifierQueue.push(&operatorWithTime{op: op, time: getNextPushOperatorTime(step, time.Now())})
+	heap.Push(&oc.opNotifierQueue, &operatorWithTime{op: op, time: oc.getNextPushOperatorTime(step, time.Now())})
 	operatorCounter.WithLabelValues(op.Desc(), "create").Inc()
 	for _, counter := range op.Counters {
 		counter.Inc()
@@ -583,44 +560,11 @@ func (oc *Controller) ack(op *Operator) {
 	}
 }
 
-// RemoveOperators removes all operators from the running operators.
-func (oc *Controller) RemoveOperators(reasons ...CancelReasonType) {
-	removed := oc.removeOperatorsInner()
-	var cancelReason CancelReasonType
-	if len(reasons) > 0 {
-		cancelReason = reasons[0]
-	}
-	for _, op := range removed {
-		if op.Cancel(cancelReason) {
-			log.Info("operator removed",
-				zap.Uint64("region-id", op.RegionID()),
-				zap.Duration("takes", op.RunningTime()),
-				zap.Reflect("operator", op))
-		}
-		oc.buryOperator(op)
-	}
-}
-
-func (oc *Controller) removeOperatorsInner() []*Operator {
-	var removed []*Operator
-	oc.operators.Range(func(regionID, value any) bool {
-		op := value.(*Operator)
-		oc.operators.Delete(regionID)
-		oc.counts.dec(op.SchedulerKind())
-		operatorCounter.WithLabelValues(op.Desc(), "remove").Inc()
-		oc.ack(op)
-		if op.Kind()&OpMerge != 0 {
-			oc.removeRelatedMergeOperator(op)
-		}
-		removed = append(removed, op)
-		return true
-	})
-	return removed
-}
-
 // RemoveOperator removes an operator from the running operators.
 func (oc *Controller) RemoveOperator(op *Operator, reasons ...CancelReasonType) bool {
-	removed := oc.removeOperatorInner(op)
+	oc.Lock()
+	removed := oc.removeOperatorLocked(op)
+	oc.Unlock()
 	var cancelReason CancelReasonType
 	if len(reasons) > 0 {
 		cancelReason = reasons[0]
@@ -638,14 +582,16 @@ func (oc *Controller) RemoveOperator(op *Operator, reasons ...CancelReasonType) 
 }
 
 func (oc *Controller) removeOperatorWithoutBury(op *Operator) bool {
-	return oc.removeOperatorInner(op)
+	oc.Lock()
+	defer oc.Unlock()
+	return oc.removeOperatorLocked(op)
 }
 
-func (oc *Controller) removeOperatorInner(op *Operator) bool {
+func (oc *Controller) removeOperatorLocked(op *Operator) bool {
 	regionID := op.RegionID()
-	if cur, ok := oc.operators.Load(regionID); ok && cur.(*Operator) == op {
-		oc.operators.Delete(regionID)
-		oc.counts.dec(op.SchedulerKind())
+	if cur := oc.operators[regionID]; cur == op {
+		delete(oc.operators, regionID)
+		oc.updateCounts(oc.operators)
 		operatorCounter.WithLabelValues(op.Desc(), "remove").Inc()
 		oc.ack(op)
 		if op.Kind()&OpMerge != 0 {
@@ -657,18 +603,13 @@ func (oc *Controller) removeOperatorInner(op *Operator) bool {
 }
 
 func (oc *Controller) removeRelatedMergeOperator(op *Operator) {
-	relatedID, _ := strconv.ParseUint(op.GetAdditionalInfo(string(RelatedMergeRegion)), 10, 64)
-	relatedOpi, ok := oc.operators.Load(relatedID)
-	if !ok {
-		return
-	}
-	relatedOp := relatedOpi.(*Operator)
-	if relatedOp != nil && relatedOp.Status() != CANCELED {
+	relatedID, _ := strconv.ParseUint(op.AdditionalInfos[string(RelatedMergeRegion)], 10, 64)
+	if relatedOp := oc.operators[relatedID]; relatedOp != nil && relatedOp.Status() != CANCELED {
 		log.Info("operator canceled related merge region",
 			zap.Uint64("region-id", relatedOp.RegionID()),
-			zap.String("additional-info", relatedOp.LogAdditionalInfo()),
+			zap.String("additional-info", relatedOp.GetAdditionalInfo()),
 			zap.Duration("takes", relatedOp.RunningTime()))
-		oc.removeOperatorInner(relatedOp)
+		oc.removeOperatorLocked(relatedOp)
 		relatedOp.Cancel(RelatedMergeRegion)
 		oc.buryOperator(relatedOp)
 	}
@@ -695,7 +636,7 @@ func (oc *Controller) buryOperator(op *Operator) {
 			zap.Uint64("region-id", op.RegionID()),
 			zap.Duration("takes", op.RunningTime()),
 			zap.Reflect("operator", op),
-			zap.String("additional-info", op.LogAdditionalInfo()))
+			zap.String("additional-info", op.GetAdditionalInfo()))
 		operatorCounter.WithLabelValues(op.Desc(), "finish").Inc()
 		operatorDuration.WithLabelValues(op.Desc()).Observe(op.RunningTime().Seconds())
 		for _, counter := range op.FinishedCounters {
@@ -706,7 +647,7 @@ func (oc *Controller) buryOperator(op *Operator) {
 			zap.Uint64("region-id", op.RegionID()),
 			zap.Duration("takes", op.RunningTime()),
 			zap.Reflect("operator", op),
-			zap.String("additional-info", op.LogAdditionalInfo()))
+			zap.String("additional-info", op.GetAdditionalInfo()))
 		operatorCounter.WithLabelValues(op.Desc(), "replace").Inc()
 	case EXPIRED:
 		log.Info("operator expired",
@@ -719,14 +660,14 @@ func (oc *Controller) buryOperator(op *Operator) {
 			zap.Uint64("region-id", op.RegionID()),
 			zap.Duration("takes", op.RunningTime()),
 			zap.Reflect("operator", op),
-			zap.String("additional-info", op.LogAdditionalInfo()))
+			zap.String("additional-info", op.GetAdditionalInfo()))
 		operatorCounter.WithLabelValues(op.Desc(), "timeout").Inc()
 	case CANCELED:
 		log.Info("operator canceled",
 			zap.Uint64("region-id", op.RegionID()),
 			zap.Duration("takes", op.RunningTime()),
 			zap.Reflect("operator", op),
-			zap.String("additional-info", op.LogAdditionalInfo()),
+			zap.String("additional-info", op.GetAdditionalInfo()),
 		)
 		operatorCounter.WithLabelValues(op.Desc(), "cancel").Inc()
 	}
@@ -736,8 +677,9 @@ func (oc *Controller) buryOperator(op *Operator) {
 
 // GetOperatorStatus gets the operator and its status with the specify id.
 func (oc *Controller) GetOperatorStatus(id uint64) *OpWithStatus {
-	if opi, ok := oc.operators.Load(id); ok && opi.(*Operator) != nil {
-		op := opi.(*Operator)
+	oc.Lock()
+	defer oc.Unlock()
+	if op, ok := oc.operators[id]; ok {
 		return NewOpWithStatus(op)
 	}
 	return oc.records.Get(id)
@@ -745,39 +687,43 @@ func (oc *Controller) GetOperatorStatus(id uint64) *OpWithStatus {
 
 // GetOperator gets an operator from the given region.
 func (oc *Controller) GetOperator(regionID uint64) *Operator {
-	if v, ok := oc.operators.Load(regionID); ok {
-		return v.(*Operator)
-	}
-	return nil
+	oc.RLock()
+	defer oc.RUnlock()
+	return oc.operators[regionID]
 }
 
 // GetOperators gets operators from the running operators.
 func (oc *Controller) GetOperators() []*Operator {
-	operators := make([]*Operator, 0, oc.opNotifierQueue.len())
-	oc.operators.Range(
-		func(_, value any) bool {
-			operators = append(operators, value.(*Operator))
-			return true
-		})
+	oc.RLock()
+	defer oc.RUnlock()
+
+	operators := make([]*Operator, 0, len(oc.operators))
+	for _, op := range oc.operators {
+		operators = append(operators, op)
+	}
+
 	return operators
 }
 
 // GetWaitingOperators gets operators from the waiting operators.
 func (oc *Controller) GetWaitingOperators() []*Operator {
+	oc.RLock()
+	defer oc.RUnlock()
 	return oc.wop.ListOperator()
 }
 
 // GetOperatorsOfKind returns the running operators of the kind.
 func (oc *Controller) GetOperatorsOfKind(mask OpKind) []*Operator {
-	operators := make([]*Operator, 0, oc.opNotifierQueue.len())
-	oc.operators.Range(
-		func(_, value any) bool {
-			op := value.(*Operator)
-			if op.Kind()&mask != 0 {
-				operators = append(operators, value.(*Operator))
-			}
-			return true
-		})
+	oc.RLock()
+	defer oc.RUnlock()
+
+	operators := make([]*Operator, 0, len(oc.operators))
+	for _, op := range oc.operators {
+		if op.Kind()&mask != 0 {
+			operators = append(operators, op)
+		}
+	}
+
 	return operators
 }
 
@@ -826,10 +772,22 @@ func (oc *Controller) GetHistory(start time.Time) []OpHistory {
 	return history
 }
 
+// updateCounts updates resource counts using current pending operators.
+func (oc *Controller) updateCounts(operators map[uint64]*Operator) {
+	for k := range oc.counts {
+		delete(oc.counts, k)
+	}
+	for _, op := range operators {
+		oc.counts[op.SchedulerKind()]++
+	}
+}
+
 // OperatorCount gets the count of operators filtered by kind.
 // kind only has one OpKind.
 func (oc *Controller) OperatorCount(kind OpKind) uint64 {
-	return oc.counts.getCountByKind(kind)
+	oc.RLock()
+	defer oc.RUnlock()
+	return oc.counts[kind]
 }
 
 // GetOpInfluence gets OpInfluence.
@@ -837,17 +795,16 @@ func (oc *Controller) GetOpInfluence(cluster *core.BasicCluster) OpInfluence {
 	influence := OpInfluence{
 		StoresInfluence: make(map[uint64]*StoreInfluence),
 	}
-	oc.operators.Range(
-		func(_, value any) bool {
-			op := value.(*Operator)
-			if !op.CheckTimeout() && !op.CheckSuccess() {
-				region := cluster.GetRegion(op.RegionID())
-				if region != nil {
-					op.UnfinishedInfluence(influence, region)
-				}
+	oc.RLock()
+	defer oc.RUnlock()
+	for _, op := range oc.operators {
+		if !op.CheckTimeout() && !op.CheckSuccess() {
+			region := cluster.GetRegion(op.RegionID())
+			if region != nil {
+				op.UnfinishedInfluence(influence, region)
 			}
-			return true
-		})
+		}
+	}
 	return influence
 }
 
@@ -864,12 +821,6 @@ func (oc *Controller) GetFastOpInfluence(cluster *core.BasicCluster, influence O
 		}
 		AddOpInfluence(op, influence, cluster)
 	}
-}
-
-// CleanAllOpRecords removes all operators' records.
-// It is used in tests only.
-func (oc *Controller) CleanAllOpRecords() {
-	oc.records.ttl.Clear()
 }
 
 // AddOpInfluence add operator influence for cluster
@@ -891,8 +842,10 @@ func NewTotalOpInfluence(operators []*Operator, cluster *core.BasicCluster) OpIn
 
 // SetOperator is only used for test.
 func (oc *Controller) SetOperator(op *Operator) {
-	oc.operators.Store(op.RegionID(), op)
-	oc.counts.inc(op.SchedulerKind())
+	oc.Lock()
+	defer oc.Unlock()
+	oc.operators[op.RegionID()] = op
+	oc.updateCounts(oc.operators)
 }
 
 // OpWithStatus records the operator and its status.
@@ -948,6 +901,13 @@ func (o *records) Put(op *Operator) {
 
 // ExceedStoreLimit returns true if the store exceeds the cost limit after adding the  Otherwise, returns false.
 func (oc *Controller) ExceedStoreLimit(ops ...*Operator) bool {
+	oc.Lock()
+	defer oc.Unlock()
+	return oc.exceedStoreLimitLocked(ops...)
+}
+
+// exceedStoreLimitLocked returns true if the store exceeds the cost limit after adding the  Otherwise, returns false.
+func (oc *Controller) exceedStoreLimitLocked(ops ...*Operator) bool {
 	// The operator with Urgent priority, like admin operators, should ignore the store limit check.
 	var desc string
 	if len(ops) != 0 {

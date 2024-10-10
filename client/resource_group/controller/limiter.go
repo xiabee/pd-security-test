@@ -239,7 +239,7 @@ func (lim *Limiter) Reserve(ctx context.Context, waitDuration time.Duration, now
 }
 
 // SetupNotificationThreshold enables the notification at the given threshold.
-func (lim *Limiter) SetupNotificationThreshold(threshold float64) {
+func (lim *Limiter) SetupNotificationThreshold(now time.Time, threshold float64) {
 	lim.mu.Lock()
 	defer lim.mu.Unlock()
 	lim.notifyThreshold = threshold
@@ -335,7 +335,7 @@ func (lim *Limiter) Reconfigure(now time.Time,
 ) {
 	lim.mu.Lock()
 	defer lim.mu.Unlock()
-	logControllerTrace("[resource group controller] before reconfigure", zap.String("name", lim.name), zap.Float64("old-tokens", lim.tokens), zap.Float64("old-rate", float64(lim.limit)), zap.Float64("old-notify-threshold", lim.notifyThreshold), zap.Int64("old-burst", lim.burst))
+	logControllerTrace("[resource group controller] before reconfigure", zap.String("name", lim.name), zap.Float64("old-tokens", lim.tokens), zap.Float64("old-rate", float64(lim.limit)), zap.Float64("old-notify-threshold", args.NotifyThreshold), zap.Int64("old-burst", lim.burst))
 	if args.NewBurst < 0 {
 		lim.last = now
 		lim.tokens = args.NewTokens

@@ -15,6 +15,7 @@
 package statistics
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/tikv/pd/pkg/core"
@@ -150,7 +151,7 @@ func summaryStoresLoadByEngine(
 ) []*StoreLoadDetail {
 	loadDetail := make([]*StoreLoadDetail, 0, len(storeInfos))
 	allStoreLoadSum := make([]float64, utils.DimLen)
-	allStoreHistoryLoadSum := make([][]float64, utils.DimLen) // row: dim, column: time
+	allStoreHistoryLoadSum := make([][]float64, utils.DimLen)
 	allStoreCount := 0
 	allHotPeersCount := 0
 
@@ -158,44 +159,56 @@ func summaryStoresLoadByEngine(
 		store := info.StoreInfo
 		id := store.GetID()
 		storeLoads, ok := storesLoads[id]
-		if !ok || !collector.filter(info, kind) {
+		if !ok || !collector.Filter(info, kind) {
 			continue
 		}
 
 		// Find all hot peers first
 		var hotPeers []*HotPeerStat
 		peerLoadSum := make([]float64, utils.DimLen)
-		// For hot leaders, we need to calculate the sum of the leader's write and read flow rather than the all peers.
+		// TODO: To remove `filterHotPeers`, we need to:
+		// HotLeaders consider `Write{Bytes,Keys}`, so when we schedule `writeLeader`, all peers are leader.
 		for _, peer := range filterHotPeers(kind, storeHotPeers[id]) {
 			for i := range peerLoadSum {
 				peerLoadSum[i] += peer.GetLoad(i)
 			}
 			hotPeers = append(hotPeers, peer.Clone())
 		}
-		currentLoads := collector.getLoads(storeLoads, peerLoadSum, rwTy, kind)
+		{
+			// Metric for debug.
+			// TODO: pre-allocate gauge metrics
+			ty := "byte-rate-" + rwTy.String() + "-" + kind.String()
+			hotPeerSummary.WithLabelValues(ty, fmt.Sprintf("%v", id)).Set(peerLoadSum[utils.ByteDim])
+			ty = "key-rate-" + rwTy.String() + "-" + kind.String()
+			hotPeerSummary.WithLabelValues(ty, fmt.Sprintf("%v", id)).Set(peerLoadSum[utils.KeyDim])
+			ty = "query-rate-" + rwTy.String() + "-" + kind.String()
+			hotPeerSummary.WithLabelValues(ty, fmt.Sprintf("%v", id)).Set(peerLoadSum[utils.QueryDim])
+		}
+		loads := collector.GetLoads(storeLoads, peerLoadSum, rwTy, kind)
 
 		var historyLoads [][]float64
 		if storesHistoryLoads != nil {
-			for i, historyLoads := range storesHistoryLoads.Get(id, rwTy, kind) {
-				if allStoreHistoryLoadSum[i] == nil || len(allStoreHistoryLoadSum[i]) < len(historyLoads) {
-					allStoreHistoryLoadSum[i] = make([]float64, len(historyLoads))
+			historyLoads = storesHistoryLoads.Get(id, rwTy, kind)
+			for i, loads := range historyLoads {
+				if allStoreHistoryLoadSum[i] == nil || len(allStoreHistoryLoadSum[i]) < len(loads) {
+					allStoreHistoryLoadSum[i] = make([]float64, len(loads))
 				}
-				for j, historyLoad := range historyLoads {
-					allStoreHistoryLoadSum[i][j] += historyLoad
+				for j, load := range loads {
+					allStoreHistoryLoadSum[i][j] += load
 				}
 			}
-			storesHistoryLoads.Add(id, rwTy, kind, currentLoads)
+			storesHistoryLoads.Add(id, rwTy, kind, loads)
 		}
 
 		for i := range allStoreLoadSum {
-			allStoreLoadSum[i] += currentLoads[i]
+			allStoreLoadSum[i] += loads[i]
 		}
 		allStoreCount += 1
 		allHotPeersCount += len(hotPeers)
 
 		// Build store load prediction from current load and pending influence.
 		stLoadPred := (&StoreLoad{
-			Loads:        currentLoads,
+			Loads:        loads,
 			Count:        float64(len(hotPeers)),
 			HistoryLoads: historyLoads,
 		}).ToLoadPred(rwTy, info.PendingSum)
@@ -218,8 +231,8 @@ func summaryStoresLoadByEngine(
 		expectLoads[i] = allStoreLoadSum[i] / float64(allStoreCount)
 	}
 
-	// TODO: remove some the max value or min value to avoid the effect of extreme value.
-	expectHistoryLoads := make([][]float64, utils.DimLen) // row: dim, column: time
+	// todo: remove some the max value or min value to avoid the effect of extreme value.
+	expectHistoryLoads := make([][]float64, utils.DimLen)
 	for i := range allStoreHistoryLoadSum {
 		expectHistoryLoads[i] = make([]float64, len(allStoreHistoryLoadSum[i]))
 		for j := range allStoreHistoryLoadSum[i] {
@@ -240,7 +253,7 @@ func summaryStoresLoadByEngine(
 
 	{
 		// Metric for debug.
-		engine := collector.engine()
+		engine := collector.Engine()
 		ty := "exp-byte-rate-" + rwTy.String() + "-" + kind.String()
 		hotPeerSummary.WithLabelValues(ty, engine).Set(expectLoads[utils.ByteDim])
 		ty = "exp-key-rate-" + rwTy.String() + "-" + kind.String()
@@ -272,19 +285,11 @@ func summaryStoresLoadByEngine(
 	return loadDetail
 }
 
-// filterHotPeers filters hot peers according to kind.
-// If kind is RegionKind, all hot peers will be returned.
-// If kind is LeaderKind, only leader hot peers will be returned.
 func filterHotPeers(kind constant.ResourceKind, peers []*HotPeerStat) []*HotPeerStat {
 	ret := make([]*HotPeerStat, 0, len(peers))
 	for _, peer := range peers {
-		switch kind {
-		case constant.RegionKind:
+		if kind != constant.LeaderKind || peer.IsLeader() {
 			ret = append(ret, peer)
-		case constant.LeaderKind:
-			if peer.IsLeader() {
-				ret = append(ret, peer)
-			}
 		}
 	}
 	return ret

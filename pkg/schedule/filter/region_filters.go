@@ -76,8 +76,7 @@ func NewRegionPendingFilter() RegionFilter {
 	return &regionPendingFilter{}
 }
 
-// Select implements the RegionFilter interface.
-func (*regionPendingFilter) Select(region *core.RegionInfo) *plan.Status {
+func (f *regionPendingFilter) Select(region *core.RegionInfo) *plan.Status {
 	if hasPendingPeers(region) {
 		return statusRegionPendingPeer
 	}
@@ -92,8 +91,7 @@ func NewRegionDownFilter() RegionFilter {
 	return &regionDownFilter{}
 }
 
-// Select implements the RegionFilter interface.
-func (*regionDownFilter) Select(region *core.RegionInfo) *plan.Status {
+func (f *regionDownFilter) Select(region *core.RegionInfo) *plan.Status {
 	if hasDownPeers(region) {
 		return statusRegionDownPeer
 	}
@@ -142,7 +140,6 @@ func NewRegionEmptyFilter(cluster sche.SharedCluster) RegionFilter {
 	return &regionEmptyFilter{cluster: cluster}
 }
 
-// Select implements the RegionFilter interface.
 func (f *regionEmptyFilter) Select(region *core.RegionInfo) *plan.Status {
 	if !isEmptyRegionAllowBalance(f.cluster, region) {
 		return statusRegionEmpty
@@ -164,7 +161,6 @@ func NewRegionWitnessFilter(storeID uint64) RegionFilter {
 	return &regionWitnessFilter{storeID: storeID}
 }
 
-// Select implements the RegionFilter interface.
 func (f *regionWitnessFilter) Select(region *core.RegionInfo) *plan.Status {
 	if region.GetStoreWitness(f.storeID) != nil {
 		return statusRegionWitnessPeer

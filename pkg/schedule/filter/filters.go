@@ -65,7 +65,7 @@ func SelectUnavailableTargetStores(stores []*core.StoreInfo, filters []Filter, c
 				cfilter, ok := filters[i].(comparingFilter)
 				sourceID := uint64(0)
 				if ok {
-					sourceID = cfilter.getSourceStoreID()
+					sourceID = cfilter.GetSourceStoreID()
 				}
 				if counter != nil {
 					counter.inc(target, filters[i].Type(), sourceID, s.GetID())
@@ -99,7 +99,7 @@ func SelectTargetStores(stores []*core.StoreInfo, filters []Filter, conf config.
 				cfilter, ok := filter.(comparingFilter)
 				sourceID := uint64(0)
 				if ok {
-					sourceID = cfilter.getSourceStoreID()
+					sourceID = cfilter.GetSourceStoreID()
 				}
 				if counter != nil {
 					counter.inc(target, filter.Type(), sourceID, s.GetID())
@@ -141,8 +141,8 @@ type Filter interface {
 // comparingFilter is an interface to filter target store by comparing source and target stores
 type comparingFilter interface {
 	Filter
-	// getSourceStoreID returns the source store when comparing.
-	getSourceStoreID() uint64
+	// GetSourceStoreID returns the source store when comparing.
+	GetSourceStoreID() uint64
 }
 
 // Target checks if store can pass all Filters as target store.
@@ -156,7 +156,7 @@ func Target(conf config.SharedConfigProvider, store *core.StoreInfo, filters []F
 				targetID := storeID
 				sourceID := ""
 				if ok {
-					sourceID = strconv.FormatUint(cfilter.getSourceStoreID(), 10)
+					sourceID = strconv.FormatUint(cfilter.GetSourceStoreID(), 10)
 				}
 				filterCounter.WithLabelValues(target.String(), filter.Scope(), filter.Type().String(), sourceID, targetID).Inc()
 			}
@@ -181,26 +181,22 @@ func NewExcludedFilter(scope string, sources, targets map[uint64]struct{}) Filte
 	}
 }
 
-// Scope returns the scheduler or the checker which the filter acts on.
 func (f *excludedFilter) Scope() string {
 	return f.scope
 }
 
-// Type returns the type of the filter.
-func (*excludedFilter) Type() filterType {
+func (f *excludedFilter) Type() filterType {
 	return excluded
 }
 
-// Source filters stores when select them as schedule source.
-func (f *excludedFilter) Source(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
+func (f *excludedFilter) Source(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if _, ok := f.sources[store.GetID()]; ok {
 		return statusStoreAlreadyHasPeer
 	}
 	return statusOK
 }
 
-// Target filters stores when select them as schedule target.
-func (f *excludedFilter) Target(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
+func (f *excludedFilter) Target(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if _, ok := f.targets[store.GetID()]; ok {
 		return statusStoreAlreadyHasPeer
 	}
@@ -215,23 +211,19 @@ func NewStorageThresholdFilter(scope string) Filter {
 	return &storageThresholdFilter{scope: scope}
 }
 
-// Scope returns the scheduler or the checker which the filter acts on.
 func (f *storageThresholdFilter) Scope() string {
 	return f.scope
 }
 
-// Type returns the name of the filter.
-func (*storageThresholdFilter) Type() filterType {
+func (f *storageThresholdFilter) Type() filterType {
 	return storageThreshold
 }
 
-// Source filters stores when select them as schedule source.
-func (*storageThresholdFilter) Source(config.SharedConfigProvider, *core.StoreInfo) *plan.Status {
+func (f *storageThresholdFilter) Source(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	return statusOK
 }
 
-// Target filters stores when select them as schedule target.
-func (*storageThresholdFilter) Target(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
+func (f *storageThresholdFilter) Target(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if !store.IsLowSpace(conf.GetLowSpaceRatio()) {
 		return statusOK
 	}
@@ -287,22 +279,18 @@ func newDistinctScoreFilter(scope string, labels []string, stores []*core.StoreI
 	}
 }
 
-// Scope returns the scheduler or the checker which the filter acts on.
 func (f *distinctScoreFilter) Scope() string {
 	return f.scope
 }
 
-// Type returns the type of the filter.
-func (*distinctScoreFilter) Type() filterType {
+func (f *distinctScoreFilter) Type() filterType {
 	return distinctScore
 }
 
-// Source filters stores when select them as schedule source.
-func (*distinctScoreFilter) Source(config.SharedConfigProvider, *core.StoreInfo) *plan.Status {
+func (f *distinctScoreFilter) Source(_ config.SharedConfigProvider, _ *core.StoreInfo) *plan.Status {
 	return statusOK
 }
 
-// Target filters stores when select them as schedule target.
 func (f *distinctScoreFilter) Target(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	score := core.DistinctScore(f.labels, f.stores, store)
 	switch f.policy {
@@ -319,8 +307,8 @@ func (f *distinctScoreFilter) Target(_ config.SharedConfigProvider, store *core.
 	return statusStoreNotMatchIsolation
 }
 
-// getSourceStoreID implements the ComparingFilter
-func (f *distinctScoreFilter) getSourceStoreID() uint64 {
+// GetSourceStoreID implements the ComparingFilter
+func (f *distinctScoreFilter) GetSourceStoreID() uint64 {
 	return f.srcStore
 }
 
@@ -399,7 +387,7 @@ func (f *StoreStateFilter) pauseLeaderTransfer(_ config.SharedConfigProvider, st
 	return statusOK
 }
 
-func (f *StoreStateFilter) slowStoreEvicted(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
+func (f *StoreStateFilter) slowStoreEvicted(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if store.EvictedAsSlowStore() {
 		f.Reason = storeStateSlow
 		return statusStoreRejectLeader
@@ -595,12 +583,12 @@ func (f labelConstraintFilter) Scope() string {
 }
 
 // Type returns the name of the filter.
-func (labelConstraintFilter) Type() filterType {
+func (f labelConstraintFilter) Type() filterType {
 	return labelConstraint
 }
 
 // Source filters stores when select them as schedule source.
-func (f labelConstraintFilter) Source(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
+func (f labelConstraintFilter) Source(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if placement.MatchLabelConstraints(store, f.constraints) {
 		return statusOK
 	}
@@ -642,18 +630,15 @@ func newRuleFitFilter(scope string, cluster *core.BasicCluster, ruleManager *pla
 	}
 }
 
-// Scope returns the scheduler or the checker which the filter acts on.
 func (f *ruleFitFilter) Scope() string {
 	return f.scope
 }
 
-// Type returns the name of the filter.
-func (*ruleFitFilter) Type() filterType {
+func (f *ruleFitFilter) Type() filterType {
 	return ruleFit
 }
 
-// Source filters stores when select them as schedule source.
-func (*ruleFitFilter) Source(config.SharedConfigProvider, *core.StoreInfo) *plan.Status {
+func (f *ruleFitFilter) Source(_ config.SharedConfigProvider, _ *core.StoreInfo) *plan.Status {
 	return statusOK
 }
 
@@ -669,8 +654,8 @@ func (f *ruleFitFilter) Target(_ config.SharedConfigProvider, store *core.StoreI
 	return statusStoreNotMatchRule
 }
 
-// getSourceStoreID implements the ComparingFilter
-func (f *ruleFitFilter) getSourceStoreID() uint64 {
+// GetSourceStoreID implements the ComparingFilter
+func (f *ruleFitFilter) GetSourceStoreID() uint64 {
 	return f.srcStore
 }
 
@@ -698,22 +683,18 @@ func newRuleLeaderFitFilter(scope string, cluster *core.BasicCluster, ruleManage
 	}
 }
 
-// Scope returns the scheduler or the checker which the filter acts on.
 func (f *ruleLeaderFitFilter) Scope() string {
 	return f.scope
 }
 
-// Type returns the name of the filter.
-func (*ruleLeaderFitFilter) Type() filterType {
+func (f *ruleLeaderFitFilter) Type() filterType {
 	return ruleLeader
 }
 
-// Source filters stores when select them as schedule source.
-func (*ruleLeaderFitFilter) Source(config.SharedConfigProvider, *core.StoreInfo) *plan.Status {
+func (f *ruleLeaderFitFilter) Source(_ config.SharedConfigProvider, _ *core.StoreInfo) *plan.Status {
 	return statusOK
 }
 
-// Target filters stores when select them as schedule target.
 func (f *ruleLeaderFitFilter) Target(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	targetStoreID := store.GetID()
 	targetPeer := f.region.GetStorePeer(targetStoreID)
@@ -730,7 +711,7 @@ func (f *ruleLeaderFitFilter) Target(_ config.SharedConfigProvider, store *core.
 	return statusStoreNotMatchRule
 }
 
-func (f *ruleLeaderFitFilter) getSourceStoreID() uint64 {
+func (f *ruleLeaderFitFilter) GetSourceStoreID() uint64 {
 	return f.srcLeaderStoreID
 }
 
@@ -758,22 +739,18 @@ func newRuleWitnessFitFilter(scope string, cluster *core.BasicCluster, ruleManag
 	}
 }
 
-// Scope returns the scheduler or the checker which the filter acts on.
 func (f *ruleWitnessFitFilter) Scope() string {
 	return f.scope
 }
 
-// Type returns the name of the filter.
-func (*ruleWitnessFitFilter) Type() filterType {
+func (f *ruleWitnessFitFilter) Type() filterType {
 	return ruleFit
 }
 
-// Source filters stores when select them as schedule source.
-func (*ruleWitnessFitFilter) Source(config.SharedConfigProvider, *core.StoreInfo) *plan.Status {
+func (f *ruleWitnessFitFilter) Source(_ config.SharedConfigProvider, _ *core.StoreInfo) *plan.Status {
 	return statusOK
 }
 
-// Target filters stores when select them as schedule target.
 func (f *ruleWitnessFitFilter) Target(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	targetStoreID := store.GetID()
 	targetPeer := f.region.GetStorePeer(targetStoreID)
@@ -834,17 +811,14 @@ func NewEngineFilter(scope string, constraint placement.LabelConstraint) Filter 
 	}
 }
 
-// Scope returns the scheduler or the checker which the filter acts on.
 func (f *engineFilter) Scope() string {
 	return f.scope
 }
 
-// Type returns the name of the filter.
-func (*engineFilter) Type() filterType {
+func (f *engineFilter) Type() filterType {
 	return engine
 }
 
-// Source filters stores when select them as schedule source.
 func (f *engineFilter) Source(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if f.constraint.MatchStore(store) {
 		return statusOK
@@ -852,7 +826,6 @@ func (f *engineFilter) Source(_ config.SharedConfigProvider, store *core.StoreIn
 	return statusStoreNotMatchRule
 }
 
-// Target filters stores when select them as schedule target.
 func (f *engineFilter) Target(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if f.constraint.MatchStore(store) {
 		return statusOK
@@ -881,17 +854,14 @@ func NewSpecialUseFilter(scope string, allowUses ...string) Filter {
 	}
 }
 
-// Scope returns the scheduler or the checker which the filter acts on.
 func (f *specialUseFilter) Scope() string {
 	return f.scope
 }
 
-// Type returns the name of the filter.
-func (*specialUseFilter) Type() filterType {
+func (f *specialUseFilter) Type() filterType {
 	return specialUse
 }
 
-// Source filters stores when select them as schedule source.
 func (f *specialUseFilter) Source(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if store.IsLowSpace(conf.GetLowSpaceRatio()) || !f.constraint.MatchStore(store) {
 		return statusOK
@@ -899,8 +869,7 @@ func (f *specialUseFilter) Source(conf config.SharedConfigProvider, store *core.
 	return statusStoreNotMatchRule
 }
 
-// Target filters stores when select them as schedule target.
-func (f *specialUseFilter) Target(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
+func (f *specialUseFilter) Target(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if !f.constraint.MatchStore(store) {
 		return statusOK
 	}
@@ -959,22 +928,18 @@ func NewIsolationFilter(scope, isolationLevel string, locationLabels []string, r
 	return isolationFilter
 }
 
-// Scope returns the scheduler or the checker which the filter acts on.
 func (f *isolationFilter) Scope() string {
 	return f.scope
 }
 
-// Type returns the name of the filter.
-func (*isolationFilter) Type() filterType {
+func (f *isolationFilter) Type() filterType {
 	return isolation
 }
 
-// Source filters stores when select them as schedule source.
-func (*isolationFilter) Source(config.SharedConfigProvider, *core.StoreInfo) *plan.Status {
+func (f *isolationFilter) Source(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	return statusOK
 }
 
-// Target filters stores when select them as schedule target.
 func (f *isolationFilter) Target(_ config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	// No isolation constraint to fit
 	if len(f.constraintSet) == 0 {

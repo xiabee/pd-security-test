@@ -39,15 +39,13 @@ func initAndRegisterMetrics(constLabels prometheus.Labels) {
 }
 
 var (
-	cmdDuration              *prometheus.HistogramVec
-	cmdFailedDuration        *prometheus.HistogramVec
-	requestDuration          *prometheus.HistogramVec
-	tsoBestBatchSize         prometheus.Histogram
-	tsoBatchSize             prometheus.Histogram
-	tsoBatchSendLatency      prometheus.Histogram
-	requestForwarded         *prometheus.GaugeVec
-	ongoingRequestCountGauge *prometheus.GaugeVec
-	estimateTSOLatencyGauge  *prometheus.GaugeVec
+	cmdDuration         *prometheus.HistogramVec
+	cmdFailedDuration   *prometheus.HistogramVec
+	requestDuration     *prometheus.HistogramVec
+	tsoBestBatchSize    prometheus.Histogram
+	tsoBatchSize        prometheus.Histogram
+	tsoBatchSendLatency prometheus.Histogram
+	requestForwarded    *prometheus.GaugeVec
 )
 
 func initMetrics(constLabels prometheus.Labels) {
@@ -107,7 +105,7 @@ func initMetrics(constLabels prometheus.Labels) {
 			Subsystem:   "request",
 			Name:        "tso_batch_send_latency",
 			ConstLabels: constLabels,
-			Buckets:     prometheus.ExponentialBuckets(0.0005, 2, 13),
+			Buckets:     prometheus.ExponentialBuckets(1, 2, 34), // 1ns ~ 8s
 			Help:        "tso batch send latency",
 		})
 
@@ -119,23 +117,6 @@ func initMetrics(constLabels prometheus.Labels) {
 			Help:        "The status to indicate if the request is forwarded",
 			ConstLabels: constLabels,
 		}, []string{"host", "delegate"})
-
-	ongoingRequestCountGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace:   "pd_client",
-			Subsystem:   "request",
-			Name:        "ongoing_requests_count",
-			Help:        "Current count of ongoing batch tso requests",
-			ConstLabels: constLabels,
-		}, []string{"stream"})
-	estimateTSOLatencyGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace:   "pd_client",
-			Subsystem:   "request",
-			Name:        "estimate_tso_latency",
-			Help:        "Estimated latency of an RTT of getting TSO",
-			ConstLabels: constLabels,
-		}, []string{"stream"})
 }
 
 var (
@@ -147,7 +128,6 @@ var (
 	cmdDurationGetPrevRegion            prometheus.Observer
 	cmdDurationGetRegionByID            prometheus.Observer
 	cmdDurationScanRegions              prometheus.Observer
-	cmdDurationBatchScanRegions         prometheus.Observer
 	cmdDurationGetStore                 prometheus.Observer
 	cmdDurationGetAllStores             prometheus.Observer
 	cmdDurationUpdateGCSafePoint        prometheus.Observer
@@ -171,20 +151,17 @@ var (
 	cmdFailDurationGetPrevRegion              prometheus.Observer
 	cmdFailedDurationGetRegionByID            prometheus.Observer
 	cmdFailedDurationScanRegions              prometheus.Observer
-	cmdFailedDurationBatchScanRegions         prometheus.Observer
 	cmdFailedDurationGetStore                 prometheus.Observer
 	cmdFailedDurationGetAllStores             prometheus.Observer
 	cmdFailedDurationUpdateGCSafePoint        prometheus.Observer
 	cmdFailedDurationUpdateServiceGCSafePoint prometheus.Observer
 	cmdFailedDurationLoadKeyspace             prometheus.Observer
 	cmdFailedDurationUpdateKeyspaceState      prometheus.Observer
+	requestDurationTSO                        prometheus.Observer
 	cmdFailedDurationGet                      prometheus.Observer
 	cmdFailedDurationPut                      prometheus.Observer
 	cmdFailedDurationUpdateGCSafePointV2      prometheus.Observer
 	cmdFailedDurationUpdateServiceSafePointV2 prometheus.Observer
-
-	requestDurationTSO       prometheus.Observer
-	requestFailedDurationTSO prometheus.Observer
 )
 
 func initCmdDurations() {
@@ -197,7 +174,6 @@ func initCmdDurations() {
 	cmdDurationGetPrevRegion = cmdDuration.WithLabelValues("get_prev_region")
 	cmdDurationGetRegionByID = cmdDuration.WithLabelValues("get_region_byid")
 	cmdDurationScanRegions = cmdDuration.WithLabelValues("scan_regions")
-	cmdDurationBatchScanRegions = cmdDuration.WithLabelValues("batch_scan_regions")
 	cmdDurationGetStore = cmdDuration.WithLabelValues("get_store")
 	cmdDurationGetAllStores = cmdDuration.WithLabelValues("get_all_stores")
 	cmdDurationUpdateGCSafePoint = cmdDuration.WithLabelValues("update_gc_safe_point")
@@ -221,20 +197,17 @@ func initCmdDurations() {
 	cmdFailDurationGetPrevRegion = cmdFailedDuration.WithLabelValues("get_prev_region")
 	cmdFailedDurationGetRegionByID = cmdFailedDuration.WithLabelValues("get_region_byid")
 	cmdFailedDurationScanRegions = cmdFailedDuration.WithLabelValues("scan_regions")
-	cmdFailedDurationBatchScanRegions = cmdFailedDuration.WithLabelValues("batch_scan_regions")
 	cmdFailedDurationGetStore = cmdFailedDuration.WithLabelValues("get_store")
 	cmdFailedDurationGetAllStores = cmdFailedDuration.WithLabelValues("get_all_stores")
 	cmdFailedDurationUpdateGCSafePoint = cmdFailedDuration.WithLabelValues("update_gc_safe_point")
 	cmdFailedDurationUpdateServiceGCSafePoint = cmdFailedDuration.WithLabelValues("update_service_gc_safe_point")
 	cmdFailedDurationLoadKeyspace = cmdFailedDuration.WithLabelValues("load_keyspace")
 	cmdFailedDurationUpdateKeyspaceState = cmdFailedDuration.WithLabelValues("update_keyspace_state")
+	requestDurationTSO = requestDuration.WithLabelValues("tso")
 	cmdFailedDurationGet = cmdFailedDuration.WithLabelValues("get")
 	cmdFailedDurationPut = cmdFailedDuration.WithLabelValues("put")
 	cmdFailedDurationUpdateGCSafePointV2 = cmdFailedDuration.WithLabelValues("update_gc_safe_point_v2")
 	cmdFailedDurationUpdateServiceSafePointV2 = cmdFailedDuration.WithLabelValues("update_service_safe_point_v2")
-
-	requestDurationTSO = requestDuration.WithLabelValues("tso")
-	requestFailedDurationTSO = requestDuration.WithLabelValues("tso-failed")
 }
 
 func registerMetrics() {
@@ -245,5 +218,4 @@ func registerMetrics() {
 	prometheus.MustRegister(tsoBatchSize)
 	prometheus.MustRegister(tsoBatchSendLatency)
 	prometheus.MustRegister(requestForwarded)
-	prometheus.MustRegister(estimateTSOLatencyGauge)
 }

@@ -19,15 +19,14 @@ import (
 	"strings"
 
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/utils/keypath"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
 )
 
 // ConfigStorage defines the storage operations on the config.
 type ConfigStorage interface {
 	// Persisted config will be stored in the storage.
-	LoadConfig(cfg any) (bool, error)
-	SaveConfig(cfg any) error
+	LoadConfig(cfg interface{}) (bool, error)
+	SaveConfig(cfg interface{}) error
 	// Each scheduler has its own customized config, so we need to store them separately.
 	LoadAllSchedulerConfigs() ([]string, []string, error)
 	LoadSchedulerConfig(schedulerName string) (string, error)
@@ -37,9 +36,9 @@ type ConfigStorage interface {
 
 var _ ConfigStorage = (*StorageEndpoint)(nil)
 
-// LoadConfig loads config from keypath.Config then unmarshal it to cfg.
-func (se *StorageEndpoint) LoadConfig(cfg any) (bool, error) {
-	value, err := se.Load(keypath.Config)
+// LoadConfig loads config from configPath then unmarshal it to cfg.
+func (se *StorageEndpoint) LoadConfig(cfg interface{}) (bool, error) {
+	value, err := se.Load(configPath)
 	if err != nil || value == "" {
 		return false, err
 	}
@@ -50,15 +49,19 @@ func (se *StorageEndpoint) LoadConfig(cfg any) (bool, error) {
 	return true, nil
 }
 
-// SaveConfig stores marshallable cfg to the keypath.Config.
-func (se *StorageEndpoint) SaveConfig(cfg any) error {
-	return se.saveJSON(keypath.Config, cfg)
+// SaveConfig stores marshallable cfg to the configPath.
+func (se *StorageEndpoint) SaveConfig(cfg interface{}) error {
+	value, err := json.Marshal(cfg)
+	if err != nil {
+		return errs.ErrJSONMarshal.Wrap(err).GenWithStackByCause()
+	}
+	return se.Save(configPath, string(value))
 }
 
 // LoadAllSchedulerConfigs loads all schedulers' config.
 func (se *StorageEndpoint) LoadAllSchedulerConfigs() ([]string, []string, error) {
-	prefix := keypath.CustomSchedulerConfigPath + "/"
-	keys, values, err := se.LoadRange(prefix, clientv3.GetPrefixRangeEnd(prefix), MinKVRangeLimit)
+	prefix := customSchedulerConfigPath + "/"
+	keys, values, err := se.LoadRange(prefix, clientv3.GetPrefixRangeEnd(prefix), 1000)
 	for i, key := range keys {
 		keys[i] = strings.TrimPrefix(key, prefix)
 	}
@@ -67,15 +70,15 @@ func (se *StorageEndpoint) LoadAllSchedulerConfigs() ([]string, []string, error)
 
 // LoadSchedulerConfig loads the config of the given scheduler.
 func (se *StorageEndpoint) LoadSchedulerConfig(schedulerName string) (string, error) {
-	return se.Load(keypath.SchedulerConfigPath(schedulerName))
+	return se.Load(schedulerConfigPath(schedulerName))
 }
 
 // SaveSchedulerConfig saves the config of the given scheduler.
 func (se *StorageEndpoint) SaveSchedulerConfig(schedulerName string, data []byte) error {
-	return se.Save(keypath.SchedulerConfigPath(schedulerName), string(data))
+	return se.Save(schedulerConfigPath(schedulerName), string(data))
 }
 
 // RemoveSchedulerConfig removes the config of the given scheduler.
 func (se *StorageEndpoint) RemoveSchedulerConfig(schedulerName string) error {
-	return se.Remove(keypath.SchedulerConfigPath(schedulerName))
+	return se.Remove(schedulerConfigPath(schedulerName))
 }

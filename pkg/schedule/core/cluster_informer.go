@@ -30,6 +30,7 @@ type ClusterInformer interface {
 	CheckerCluster
 
 	GetStorage() storage.Storage
+	UpdateRegionsLabelLevelStats(regions []*core.RegionInfo)
 }
 
 // SchedulerCluster is an aggregate interface that wraps multiple interfaces
@@ -42,6 +43,7 @@ type SchedulerCluster interface {
 	GetSchedulerConfig() sc.SchedulerConfigProvider
 	GetRegionLabeler() *labeler.RegionLabeler
 	GetStoreConfig() sc.StoreConfigProvider
+	IsSchedulingHalted() bool
 }
 
 // CheckerCluster is an aggregate interface that wraps multiple interfaces
@@ -50,7 +52,6 @@ type CheckerCluster interface {
 
 	GetCheckerConfig() sc.CheckerConfigProvider
 	GetStoreConfig() sc.StoreConfigProvider
-	UpdateRegionsLabelLevelStats(regions []*core.RegionInfo)
 }
 
 // SharedCluster is an aggregate interface that wraps multiple interfaces
@@ -62,7 +63,6 @@ type SharedCluster interface {
 	GetSharedConfig() sc.SharedConfigProvider
 	GetRuleManager() *placement.RuleManager
 	AllocID() (uint64, error)
-	IsSchedulingHalted() bool
 }
 
 // BasicCluster is an aggregate interface that wraps multiple interfaces

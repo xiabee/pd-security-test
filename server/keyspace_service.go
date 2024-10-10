@@ -23,10 +23,10 @@ import (
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/tikv/pd/pkg/keyspace"
+	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/keypath"
-	"go.etcd.io/etcd/api/v3/mvccpb"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/mvcc/mvccpb"
 )
 
 // KeyspaceServer wraps GrpcServer to provide keyspace service.
@@ -74,7 +74,7 @@ func (s *KeyspaceServer) WatchKeyspaces(request *keyspacepb.WatchKeyspacesReques
 	}
 	ctx, cancel := context.WithCancel(s.Context())
 	defer cancel()
-	startKey := path.Join(s.rootPath, keypath.KeyspaceMetaPrefix()) + "/"
+	startKey := path.Join(s.rootPath, endpoint.KeyspaceMetaPrefix()) + "/"
 
 	keyspaces := make([]*keyspacepb.KeyspaceMeta, 0)
 	putFn := func(kv *mvccpb.KeyValue) error {
@@ -86,13 +86,10 @@ func (s *KeyspaceServer) WatchKeyspaces(request *keyspacepb.WatchKeyspacesReques
 		keyspaces = append(keyspaces, meta)
 		return nil
 	}
-	deleteFn := func(*mvccpb.KeyValue) error {
+	deleteFn := func(kv *mvccpb.KeyValue) error {
 		return nil
 	}
-	postEventsFn := func([]*clientv3.Event) error {
-		if len(keyspaces) == 0 {
-			return nil
-		}
+	postEventFn := func() error {
 		defer func() {
 			keyspaces = keyspaces[:0]
 		}()
@@ -112,11 +109,10 @@ func (s *KeyspaceServer) WatchKeyspaces(request *keyspacepb.WatchKeyspacesReques
 		s.client,
 		"keyspace-server-watcher",
 		startKey,
-		func([]*clientv3.Event) error { return nil },
 		putFn,
 		deleteFn,
-		postEventsFn,
-		true, /* withPrefix */
+		postEventFn,
+		clientv3.WithRange(clientv3.GetPrefixRangeEnd(startKey)),
 	)
 	watcher.StartWatchLoop()
 	if err := watcher.WaitLoad(); err != nil {

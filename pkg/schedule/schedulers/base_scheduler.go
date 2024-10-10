@@ -16,7 +16,6 @@ package schedulers
 
 import (
 	"fmt"
-	"math/rand"
 	"net/http"
 	"time"
 
@@ -24,7 +23,6 @@ import (
 	"github.com/tikv/pd/pkg/errs"
 	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/operator"
-	"github.com/tikv/pd/pkg/schedule/types"
 	"github.com/tikv/pd/pkg/utils/typeutil"
 )
 
@@ -63,85 +61,39 @@ func intervalGrow(x time.Duration, maxInterval time.Duration, typ intervalGrowth
 // BaseScheduler is a basic scheduler for all other complex scheduler
 type BaseScheduler struct {
 	OpController *operator.Controller
-	R            *rand.Rand
-
-	name string
-	tp   types.CheckerSchedulerType
-	conf schedulerConfig
 }
 
 // NewBaseScheduler returns a basic scheduler
-func NewBaseScheduler(
-	opController *operator.Controller,
-	tp types.CheckerSchedulerType,
-	conf schedulerConfig,
-) *BaseScheduler {
-	return &BaseScheduler{OpController: opController, tp: tp, conf: conf, R: rand.New(rand.NewSource(time.Now().UnixNano()))}
+func NewBaseScheduler(opController *operator.Controller) *BaseScheduler {
+	return &BaseScheduler{OpController: opController}
 }
 
-func (*BaseScheduler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+func (s *BaseScheduler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "not implements")
 }
 
 // GetMinInterval returns the minimal interval for the scheduler
-func (*BaseScheduler) GetMinInterval() time.Duration {
+func (s *BaseScheduler) GetMinInterval() time.Duration {
 	return MinScheduleInterval
 }
 
 // EncodeConfig encode config for the scheduler
-func (*BaseScheduler) EncodeConfig() ([]byte, error) {
+func (s *BaseScheduler) EncodeConfig() ([]byte, error) {
 	return EncodeConfig(nil)
 }
 
 // ReloadConfig reloads the config from the storage.
 // By default, the scheduler does not need to reload the config
 // if it doesn't support the dynamic configuration.
-func (*BaseScheduler) ReloadConfig() error { return nil }
+func (s *BaseScheduler) ReloadConfig() error { return nil }
 
 // GetNextInterval return the next interval for the scheduler
-func (*BaseScheduler) GetNextInterval(interval time.Duration) time.Duration {
+func (s *BaseScheduler) GetNextInterval(interval time.Duration) time.Duration {
 	return intervalGrow(interval, MaxScheduleInterval, exponentialGrowth)
 }
 
-// PrepareConfig does some prepare work about config.
-func (*BaseScheduler) PrepareConfig(sche.SchedulerCluster) error { return nil }
+// Prepare does some prepare work
+func (s *BaseScheduler) Prepare(cluster sche.SchedulerCluster) error { return nil }
 
-// CleanConfig does some cleanup work about config.
-func (*BaseScheduler) CleanConfig(sche.SchedulerCluster) {}
-
-// GetName returns the name of the scheduler
-func (s *BaseScheduler) GetName() string {
-	if len(s.name) == 0 {
-		return s.tp.String()
-	}
-	return s.name
-}
-
-// GetType returns the type of the scheduler
-func (s *BaseScheduler) GetType() types.CheckerSchedulerType {
-	return s.tp
-}
-
-// IsDisable implements the Scheduler interface.
-func (s *BaseScheduler) IsDisable() bool {
-	if conf, ok := s.conf.(defaultSchedulerConfig); ok {
-		return conf.isDisable()
-	}
-	return false
-}
-
-// SetDisable implements the Scheduler interface.
-func (s *BaseScheduler) SetDisable(disable bool) error {
-	if conf, ok := s.conf.(defaultSchedulerConfig); ok {
-		return conf.setDisable(disable)
-	}
-	return nil
-}
-
-// IsDefault returns if the scheduler is a default scheduler.
-func (s *BaseScheduler) IsDefault() bool {
-	if _, ok := s.conf.(defaultSchedulerConfig); ok {
-		return true
-	}
-	return false
-}
+// Cleanup does some cleanup work
+func (s *BaseScheduler) Cleanup(cluster sche.SchedulerCluster) {}

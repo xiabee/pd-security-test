@@ -37,7 +37,7 @@ func newMockSplitRegionsHandler() *mockSplitRegionsHandler {
 }
 
 // SplitRegionByKeys mock SplitRegionsHandler
-func (m *mockSplitRegionsHandler) SplitRegionByKeys(region *core.RegionInfo, _ [][]byte) error {
+func (m *mockSplitRegionsHandler) SplitRegionByKeys(region *core.RegionInfo, splitKeys [][]byte) error {
 	m.regions[region.GetID()] = [2][]byte{
 		region.GetStartKey(),
 		region.GetEndKey(),
@@ -76,40 +76,38 @@ func (suite *regionSplitterTestSuite) SetupSuite() {
 	suite.ctx, suite.cancel = context.WithCancel(context.Background())
 }
 
-func (suite *regionSplitterTestSuite) TearDownSuite() {
+func (suite *regionSplitterTestSuite) TearDownTest() {
 	suite.cancel()
 }
 
 func (suite *regionSplitterTestSuite) TestRegionSplitter() {
-	re := suite.Require()
 	opt := mockconfig.NewTestOptions()
 	opt.SetPlacementRuleEnabled(false)
 	tc := mockcluster.NewCluster(suite.ctx, opt)
 	handler := newMockSplitRegionsHandler()
 	tc.AddLeaderRegionWithRange(1, "eee", "hhh", 2, 3, 4)
-	splitter := NewRegionSplitter(tc, handler, tc.AddPendingProcessedRegions)
+	splitter := NewRegionSplitter(tc, handler, tc.AddSuspectRegions)
 	newRegions := map[uint64]struct{}{}
 	// assert success
 	failureKeys := splitter.splitRegionsByKeys(suite.ctx, [][]byte{[]byte("fff"), []byte("ggg")}, newRegions)
-	re.Empty(failureKeys)
-	re.Len(newRegions, 2)
+	suite.Empty(failureKeys)
+	suite.Len(newRegions, 2)
 
 	percentage, newRegionsID := splitter.SplitRegions(suite.ctx, [][]byte{[]byte("fff"), []byte("ggg")}, 1)
-	re.Equal(100, percentage)
-	re.Len(newRegionsID, 2)
+	suite.Equal(100, percentage)
+	suite.Len(newRegionsID, 2)
 	// assert out of range
 	newRegions = map[uint64]struct{}{}
 	failureKeys = splitter.splitRegionsByKeys(suite.ctx, [][]byte{[]byte("aaa"), []byte("bbb")}, newRegions)
-	re.Len(failureKeys, 2)
-	re.Empty(newRegions)
+	suite.Len(failureKeys, 2)
+	suite.Empty(newRegions)
 
 	percentage, newRegionsID = splitter.SplitRegions(suite.ctx, [][]byte{[]byte("aaa"), []byte("bbb")}, 1)
-	re.Equal(0, percentage)
-	re.Empty(newRegionsID)
+	suite.Equal(0, percentage)
+	suite.Empty(newRegionsID)
 }
 
 func (suite *regionSplitterTestSuite) TestGroupKeysByRegion() {
-	re := suite.Require()
 	opt := mockconfig.NewTestOptions()
 	opt.SetPlacementRuleEnabled(false)
 	tc := mockcluster.NewCluster(suite.ctx, opt)
@@ -117,22 +115,22 @@ func (suite *regionSplitterTestSuite) TestGroupKeysByRegion() {
 	tc.AddLeaderRegionWithRange(1, "aaa", "ccc", 2, 3, 4)
 	tc.AddLeaderRegionWithRange(2, "ccc", "eee", 2, 3, 4)
 	tc.AddLeaderRegionWithRange(3, "fff", "ggg", 2, 3, 4)
-	splitter := NewRegionSplitter(tc, handler, tc.AddPendingProcessedRegions)
+	splitter := NewRegionSplitter(tc, handler, tc.AddSuspectRegions)
 	groupKeys := splitter.groupKeysByRegion([][]byte{
 		[]byte("bbb"),
 		[]byte("ddd"),
 		[]byte("fff"),
 		[]byte("zzz"),
 	})
-	re.Len(groupKeys, 2)
+	suite.Len(groupKeys, 2)
 	for k, v := range groupKeys {
 		switch k {
 		case uint64(1):
-			re.Len(v.keys, 1)
-			re.Equal([]byte("bbb"), v.keys[0])
+			suite.Len(v.keys, 1)
+			suite.Equal([]byte("bbb"), v.keys[0])
 		case uint64(2):
-			re.Len(v.keys, 1)
-			re.Equal([]byte("ddd"), v.keys[0])
+			suite.Len(v.keys, 1)
+			suite.Equal([]byte("ddd"), v.keys[0])
 		}
 	}
 }

@@ -20,10 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/stretchr/testify/require"
 	tso "github.com/tikv/pd/pkg/mcs/tso/server"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
+	mcsutils "github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/tempurl"
 	"github.com/tikv/pd/pkg/utils/testutil"
@@ -77,7 +76,7 @@ func RestartTestTSOCluster(
 			defer wg.Done()
 			clean()
 			serverCfg := cluster.servers[addr].GetConfig()
-			newServer, newCleanup, err := NewTSOTestServer(ctx, serverCfg)
+			newServer, newCleanup, err := NewTSOTestServer(newCluster.ctx, serverCfg)
 			serverMap.Store(addr, newServer)
 			cleanupMap.Store(addr, newCleanup)
 			errorMap.Store(addr, err)
@@ -85,7 +84,7 @@ func RestartTestTSOCluster(
 	}
 	wg.Wait()
 
-	errorMap.Range(func(key, value any) bool {
+	errorMap.Range(func(key, value interface{}) bool {
 		if value != nil {
 			err = value.(error)
 			return false
@@ -99,7 +98,7 @@ func RestartTestTSOCluster(
 	})
 
 	if err != nil {
-		return nil, errors.New("failed to restart the cluster." + err.Error())
+		return nil, fmt.Errorf("failed to restart the cluster." + err.Error())
 	}
 
 	return newCluster, nil
@@ -181,7 +180,7 @@ func (tc *TestTSOCluster) WaitForPrimaryServing(re *require.Assertions, keyspace
 
 // WaitForDefaultPrimaryServing waits for one of servers being elected to be the primary/leader of the default keyspace.
 func (tc *TestTSOCluster) WaitForDefaultPrimaryServing(re *require.Assertions) *tso.Server {
-	return tc.WaitForPrimaryServing(re, constant.DefaultKeyspaceID, constant.DefaultKeyspaceGroupID)
+	return tc.WaitForPrimaryServing(re, mcsutils.DefaultKeyspaceID, mcsutils.DefaultKeyspaceGroupID)
 }
 
 // GetServer returns the TSO server by the given address.
@@ -204,7 +203,7 @@ func (tc *TestTSOCluster) GetKeyspaceGroupMember() (members []endpoint.KeyspaceG
 	for _, server := range tc.servers {
 		members = append(members, endpoint.KeyspaceGroupMember{
 			Address:  server.GetAddr(),
-			Priority: constant.DefaultKeyspaceGroupReplicaPriority,
+			Priority: mcsutils.DefaultKeyspaceGroupReplicaPriority,
 		})
 	}
 	return

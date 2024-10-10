@@ -15,8 +15,6 @@
 package cluster
 
 import (
-	"context"
-
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/placement"
@@ -30,41 +28,24 @@ type Cluster interface {
 	GetLabelStats() *statistics.LabelStatistics
 	GetCoordinator() *schedule.Coordinator
 	GetRuleManager() *placement.RuleManager
-	GetBasicCluster() *core.BasicCluster
 }
 
 // HandleStatsAsync handles the flow asynchronously.
 func HandleStatsAsync(c Cluster, region *core.RegionInfo) {
-	checkWritePeerTask := func(cache *statistics.HotPeerCache) {
-		reportInterval := region.GetInterval()
-		interval := reportInterval.GetEndTimestamp() - reportInterval.GetStartTimestamp()
-		stats := cache.CheckPeerFlow(region, region.GetPeers(), region.GetWriteLoads(), interval)
-		for _, stat := range stats {
-			cache.UpdateStat(stat)
-		}
+	c.GetHotStat().CheckWriteAsync(statistics.NewCheckExpiredItemTask(region))
+	c.GetHotStat().CheckReadAsync(statistics.NewCheckExpiredItemTask(region))
+	reportInterval := region.GetInterval()
+	interval := reportInterval.GetEndTimestamp() - reportInterval.GetStartTimestamp()
+	for _, peer := range region.GetPeers() {
+		peerInfo := core.NewPeerInfo(peer, region.GetWriteLoads(), interval)
+		c.GetHotStat().CheckWriteAsync(statistics.NewCheckPeerTask(peerInfo, region))
 	}
-
-	checkExpiredTask := func(cache *statistics.HotPeerCache) {
-		expiredStats := cache.CollectExpiredItems(region)
-		for _, stat := range expiredStats {
-			cache.UpdateStat(stat)
-		}
-	}
-
-	c.GetHotStat().CheckWriteAsync(checkExpiredTask)
-	c.GetHotStat().CheckReadAsync(checkExpiredTask)
-	c.GetHotStat().CheckWriteAsync(checkWritePeerTask)
 	c.GetCoordinator().GetSchedulersController().CheckTransferWitnessLeader(region)
 }
 
 // HandleOverlaps handles the overlap regions.
-func HandleOverlaps(ctx context.Context, c Cluster, overlaps []*core.RegionInfo) {
+func HandleOverlaps(c Cluster, overlaps []*core.RegionInfo) {
 	for _, item := range overlaps {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
 		if c.GetRegionStats() != nil {
 			c.GetRegionStats().ClearDefunctRegion(item.GetID())
 		}
@@ -74,20 +55,8 @@ func HandleOverlaps(ctx context.Context, c Cluster, overlaps []*core.RegionInfo)
 }
 
 // Collect collects the cluster information.
-func Collect(ctx context.Context, c Cluster, region *core.RegionInfo) {
-	// get region again from root tree. make sure the observed region is the latest.
-	bc := c.GetBasicCluster()
-	if bc == nil {
-		return
+func Collect(c Cluster, region *core.RegionInfo, stores []*core.StoreInfo, hasRegionStats bool) {
+	if hasRegionStats {
+		c.GetRegionStats().Observe(region, stores)
 	}
-	region = bc.GetRegion(region.GetID())
-	if region == nil {
-		return
-	}
-	select {
-	case <-ctx.Done():
-		return
-	default:
-	}
-	c.GetRegionStats().Observe(region, c.GetBasicCluster().GetRegionStores(region))
 }

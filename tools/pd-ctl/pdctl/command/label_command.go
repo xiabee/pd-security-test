@@ -21,9 +21,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/response"
 	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/statistics"
+	"github.com/tikv/pd/server/api"
 )
 
 var (
@@ -53,7 +53,7 @@ func NewLabelListStoresCommand() *cobra.Command {
 	return l
 }
 
-func showLabelsCommandFunc(cmd *cobra.Command, _ []string) {
+func showLabelsCommandFunc(cmd *cobra.Command, args []string) {
 	r, err := doRequest(cmd, labelsPrefix, http.MethodGet, http.Header{})
 	if err != nil {
 		cmd.Printf("Failed to get labels: %s\n", err)
@@ -114,7 +114,7 @@ func getStores(cmd *cobra.Command, _ []string) ([]*core.StoreInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var storesInfo response.StoresInfo
+	var storesInfo api.StoresInfo
 	if err := json.Unmarshal([]byte(body), &storesInfo); err != nil {
 		return nil, err
 	}
@@ -125,13 +125,13 @@ func getStores(cmd *cobra.Command, _ []string) ([]*core.StoreInfo, error) {
 	return stores, nil
 }
 
-func getRegions(cmd *cobra.Command, _ []string) ([]response.RegionInfo, error) {
+func getRegions(cmd *cobra.Command, _ []string) ([]api.RegionInfo, error) {
 	prefix := regionsPrefix
 	body, err := doRequest(cmd, prefix, http.MethodGet, http.Header{})
 	if err != nil {
 		return nil, err
 	}
-	var RegionsInfo response.RegionsInfo
+	var RegionsInfo api.RegionsInfo
 	if err := json.Unmarshal([]byte(body), &RegionsInfo); err != nil {
 		return nil, err
 	}

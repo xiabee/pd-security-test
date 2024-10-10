@@ -113,7 +113,7 @@ func LoadKeyspace(c *gin.Context) {
 	if value, ok := c.GetQuery("force_refresh_group_id"); ok && value == "true" {
 		groupManager := svr.GetKeyspaceGroupManager()
 		if groupManager == nil {
-			c.AbortWithStatusJSON(http.StatusInternalServerError, GroupManagerUninitializedErr)
+			c.AbortWithStatusJSON(http.StatusInternalServerError, managerUninitializedErr)
 			return
 		}
 		// keyspace has been checked in LoadKeyspace, so no need to check again.
@@ -285,7 +285,6 @@ func UpdateKeyspaceConfig(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, managerUninitializedErr)
 		return
 	}
-
 	name := c.Param("name")
 	configParams := &UpdateConfigParams{}
 	err := c.BindJSON(configParams)
@@ -294,16 +293,6 @@ func UpdateKeyspaceConfig(c *gin.Context) {
 		return
 	}
 	mutations := getMutations(configParams.Config)
-
-	// Check if the update is supported.
-	for _, mutation := range mutations {
-		if mutation.Key == keyspace.GCManagementType && mutation.Value == keyspace.KeyspaceLevelGC {
-			err = keyspace.ErrUnsupportedOperationInKeyspace
-			c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
-
 	meta, err := manager.UpdateKeyspaceConfig(name, mutations)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, err.Error())

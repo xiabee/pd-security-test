@@ -18,17 +18,17 @@ import (
 	"github.com/tikv/pd/pkg/btree"
 )
 
-// defaultDegree is default btree degree, the depth is h<log(degree)(capacity+1)/2.
+// defaultDegree default btree degree, the depth is h<log(degree)(capacity+1)/2
 const defaultDegree = 4
 
-// PriorityQueue queue has priority and preempt.
+// PriorityQueue queue has priority  and preempt
 type PriorityQueue struct {
 	items    map[uint64]*Entry
 	btree    *btree.BTreeG[*Entry]
 	capacity int
 }
 
-// NewPriorityQueue constructs of priority queue.
+// NewPriorityQueue construct of priority queue
 func NewPriorityQueue(capacity int) *PriorityQueue {
 	return &PriorityQueue{
 		items:    make(map[uint64]*Entry),
@@ -37,12 +37,12 @@ func NewPriorityQueue(capacity int) *PriorityQueue {
 	}
 }
 
-// PriorityQueueItem avoids convert cost.
+// PriorityQueueItem avoid convert cost
 type PriorityQueueItem interface {
 	ID() uint64
 }
 
-// Put puts value with priority into queue.
+// Put put value with priority into queue
 func (pq *PriorityQueue) Put(priority int, value PriorityQueueItem) bool {
 	id := value.ID()
 	entry, ok := pq.items[id]
@@ -66,30 +66,28 @@ func (pq *PriorityQueue) Put(priority int, value PriorityQueueItem) bool {
 	return true
 }
 
-// Get finds entry by id from queue.
+// Get find entry by id from queue
 func (pq *PriorityQueue) Get(id uint64) *Entry {
 	return pq.items[id]
 }
 
-// peek returns the highest priority entry.
-// It only is used for test.
-func (pq *PriorityQueue) peek() *Entry {
+// Peek return the highest priority entry
+func (pq *PriorityQueue) Peek() *Entry {
 	if max, ok := pq.btree.Max(); ok {
 		return max
 	}
 	return nil
 }
 
-// tail returns the lowest priority entry.
-// It only is used for test.
-func (pq *PriorityQueue) tail() *Entry {
+// Tail return the lowest priority entry
+func (pq *PriorityQueue) Tail() *Entry {
 	if min, ok := pq.btree.Min(); ok {
 		return min
 	}
 	return nil
 }
 
-// Elems returns all elements in queue.
+// Elems return all elements in queue
 func (pq *PriorityQueue) Elems() []*Entry {
 	rs := make([]*Entry, pq.Len())
 	count := 0
@@ -101,7 +99,7 @@ func (pq *PriorityQueue) Elems() []*Entry {
 	return rs
 }
 
-// Remove removes value from queue.
+// Remove remove value from queue
 func (pq *PriorityQueue) Remove(id uint64) {
 	if v, ok := pq.items[id]; ok {
 		pq.btree.Delete(v)
@@ -109,18 +107,18 @@ func (pq *PriorityQueue) Remove(id uint64) {
 	}
 }
 
-// Len returns queue size.
+// Len return queue size
 func (pq *PriorityQueue) Len() int {
 	return pq.btree.Len()
 }
 
-// Entry is a pair of region and its priority.
+// Entry a pair of region and it's priority
 type Entry struct {
 	Priority int
 	Value    PriorityQueueItem
 }
 
-// Less returns true if the entry has smaller priority.
+// Less return true if the entry has smaller priority
 func (r *Entry) Less(other *Entry) bool {
 	left := r.Priority
 	right := other.Priority
