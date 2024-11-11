@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -68,7 +69,7 @@ func setupServer() (*httptest.Server, *config.Config) {
 		AdvertiseClientUrls: "example.com:2380",
 		AdvertisePeerUrls:   "example.com:2380",
 		Name:                "test-svc",
-		DataDir:             "/data",
+		DataDir:             string(filepath.Separator) + "data",
 		ForceNewCluster:     true,
 		EnableGRPCGateway:   true,
 		InitialCluster:      "pd1=http://127.0.0.1:10208",
@@ -83,7 +84,7 @@ func setupServer() (*httptest.Server, *config.Config) {
 		},
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, _ *http.Request) {
 		b, err := json.Marshal(serverConfig)
 		if err != nil {
 			res.WriteHeader(http.StatusInternalServerError)
@@ -98,7 +99,8 @@ func setupServer() (*httptest.Server, *config.Config) {
 	return server, serverConfig
 }
 
-func (s *backupTestSuite) BeforeTest(suiteName, testName string) {
+func (s *backupTestSuite) BeforeTest(string, string) {
+	re := s.Require()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 
@@ -106,30 +108,31 @@ func (s *backupTestSuite) BeforeTest(suiteName, testName string) {
 		ctx,
 		pdClusterIDPath,
 		string(typeutil.Uint64ToBytes(clusterID)))
-	s.NoError(err)
+	re.NoError(err)
 
 	var (
 		rootPath               = path.Join(pdRootPath, strconv.FormatUint(clusterID, 10))
 		allocTimestampMaxBytes = typeutil.Uint64ToBytes(allocTimestampMax)
 	)
 	_, err = s.etcdClient.Put(ctx, endpoint.TimestampPath(rootPath), string(allocTimestampMaxBytes))
-	s.NoError(err)
+	re.NoError(err)
 
 	var (
 		allocIDPath     = path.Join(rootPath, "alloc_id")
 		allocIDMaxBytes = typeutil.Uint64ToBytes(allocIDMax)
 	)
 	_, err = s.etcdClient.Put(ctx, allocIDPath, string(allocIDMaxBytes))
-	s.NoError(err)
+	re.NoError(err)
 }
 
-func (s *backupTestSuite) AfterTest(suiteName, testName string) {
+func (s *backupTestSuite) AfterTest(string, string) {
 	s.etcd.Close()
 }
 
 func (s *backupTestSuite) TestGetBackupInfo() {
+	re := s.Require()
 	actual, err := GetBackupInfo(s.etcdClient, s.server.URL)
-	s.NoError(err)
+	re.NoError(err)
 
 	expected := &BackupInfo{
 		ClusterID:         clusterID,
@@ -137,22 +140,22 @@ func (s *backupTestSuite) TestGetBackupInfo() {
 		AllocTimestampMax: allocTimestampMax,
 		Config:            s.serverConfig,
 	}
-	s.Equal(expected, actual)
+	re.Equal(expected, actual)
 
 	tmpFile, err := os.CreateTemp(os.TempDir(), "pd_backup_info_test.json")
-	s.NoError(err)
+	re.NoError(err)
 	defer os.RemoveAll(tmpFile.Name())
 
-	s.NoError(OutputToFile(actual, tmpFile))
+	re.NoError(OutputToFile(actual, tmpFile))
 	_, err = tmpFile.Seek(0, 0)
-	s.NoError(err)
+	re.NoError(err)
 
 	b, err := io.ReadAll(tmpFile)
-	s.NoError(err)
+	re.NoError(err)
 
 	var restored BackupInfo
 	err = json.Unmarshal(b, &restored)
-	s.NoError(err)
+	re.NoError(err)
 
-	s.Equal(expected, &restored)
+	re.Equal(expected, &restored)
 }

@@ -19,11 +19,14 @@ import (
 	"time"
 
 	"github.com/docker/go-units"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/ratelimit"
 	"github.com/tikv/pd/pkg/storage"
 	"github.com/tikv/pd/pkg/utils/grpcutil"
 	"github.com/tikv/pd/pkg/utils/logutil"
@@ -66,7 +69,7 @@ func (s *RegionSyncer) syncRegion(ctx context.Context, conn *grpc.ClientConn) (C
 	err = syncStream.Send(&pdpb.SyncRegionRequest{
 		Header:     &pdpb.RequestHeader{ClusterId: s.server.ClusterID()},
 		Member:     s.server.GetMemberInfo(),
-		StartIndex: s.history.GetNextIndex(),
+		StartIndex: s.history.getNextIndex(),
 	})
 	if err != nil {
 		return nil, err
@@ -76,6 +79,11 @@ func (s *RegionSyncer) syncRegion(ctx context.Context, conn *grpc.ClientConn) (C
 }
 
 var regionGuide = core.GenerateRegionGuideFunc(false)
+
+// IsRunning returns whether the region syncer client is running.
+func (s *RegionSyncer) IsRunning() bool {
+	return s.streamingRunning.Load()
+}
 
 // StartSyncWithLeader starts to sync with leader.
 func (s *RegionSyncer) StartSyncWithLeader(addr string) {
@@ -89,6 +97,7 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 	go func() {
 		defer logutil.LogPanic()
 		defer s.wg.Done()
+		defer s.streamingRunning.Store(false)
 		// used to load region from kv storage to cache storage.
 		bc := s.server.GetBasicCluster()
 		regionStorage := s.server.GetStorage()
@@ -132,6 +141,9 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 			}
 
 			stream, err := s.syncRegion(ctx, conn)
+			failpoint.Inject("disableClientStreaming", func() {
+				err = errors.Errorf("no stream")
+			})
 			if err != nil {
 				if ev, ok := status.FromError(err); ok {
 					if ev.Code() == codes.Canceled {
@@ -142,11 +154,11 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 				time.Sleep(time.Second)
 				continue
 			}
-
-			log.Info("server starts to synchronize with leader", zap.String("server", s.server.Name()), zap.String("leader", s.server.GetLeader().GetName()), zap.Uint64("request-index", s.history.GetNextIndex()))
+			log.Info("server starts to synchronize with leader", zap.String("server", s.server.Name()), zap.String("leader", s.server.GetLeader().GetName()), zap.Uint64("request-index", s.history.getNextIndex()))
 			for {
 				resp, err := stream.Recv()
 				if err != nil {
+					s.streamingRunning.Store(false)
 					log.Error("region sync with leader meet error", errs.ZapError(errs.ErrGRPCRecv, err))
 					if err = stream.CloseSend(); err != nil {
 						log.Error("failed to terminate client stream", errs.ZapError(errs.ErrGRPCCloseSend, err))
@@ -154,14 +166,14 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 					time.Sleep(time.Second)
 					break
 				}
-				if s.history.GetNextIndex() != resp.GetStartIndex() {
+				if s.history.getNextIndex() != resp.GetStartIndex() {
 					log.Warn("server sync index not match the leader",
 						zap.String("server", s.server.Name()),
-						zap.Uint64("own", s.history.GetNextIndex()),
+						zap.Uint64("own", s.history.getNextIndex()),
 						zap.Uint64("leader", resp.GetStartIndex()),
 						zap.Int("records-length", len(resp.GetRegions())))
 					// reset index
-					s.history.ResetWithIndex(resp.GetStartIndex())
+					s.history.resetWithIndex(resp.GetStartIndex())
 				}
 				stats := resp.GetRegionStats()
 				regions := resp.GetRegions()
@@ -194,7 +206,13 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 						log.Debug("region is stale", zap.Stringer("origin", origin.GetMeta()), errs.ZapError(err))
 						continue
 					}
-					saveKV, _, _ := regionGuide(region, origin)
+					ctx := &core.MetaProcessContext{
+						Context:    ctx,
+						TaskRunner: ratelimit.NewSyncRunner(),
+						Tracer:     core.NewNoopHeartbeatProcessTracer(),
+						// no limit for followers.
+					}
+					saveKV, _, _, _ := regionGuide(ctx, region, origin)
 					overlaps := bc.PutRegion(region)
 
 					if hasBuckets {
@@ -206,12 +224,14 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 						err = regionStorage.SaveRegion(r)
 					}
 					if err == nil {
-						s.history.Record(region)
+						s.history.record(region)
 					}
 					for _, old := range overlaps {
 						_ = regionStorage.DeleteRegion(old.GetMeta())
 					}
 				}
+				// mark the client as running status when it finished the first history region sync.
+				s.streamingRunning.Store(true)
 			}
 		}
 	}()

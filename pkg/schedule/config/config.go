@@ -20,6 +20,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/core/storelimit"
+	types "github.com/tikv/pd/pkg/schedule/type"
 	"github.com/tikv/pd/pkg/utils/configutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/pkg/utils/typeutil"
@@ -49,14 +50,16 @@ const (
 	defaultSlowStoreEvictingAffectedStoreRatioThreshold = 0.3
 	defaultMaxMovableHotPeerSize                        = int64(512)
 
-	defaultEnableJointConsensus  = true
-	defaultEnableTiKVSplitRegion = true
-	defaultEnableCrossTableMerge = true
-	defaultEnableDiagnostic      = true
-	defaultStrictlyMatchLabel    = false
-	defaultEnablePlacementRules  = true
-	defaultEnableWitness         = false
-	defaultHaltScheduling        = false
+	defaultEnableJointConsensus            = true
+	defaultEnableTiKVSplitRegion           = true
+	defaultEnableHeartbeatBreakdownMetrics = true
+	defaultEnableHeartbeatConcurrentRunner = true
+	defaultEnableCrossTableMerge           = true
+	defaultEnableDiagnostic                = true
+	defaultStrictlyMatchLabel              = false
+	defaultEnablePlacementRules            = true
+	defaultEnableWitness                   = false
+	defaultHaltScheduling                  = false
 
 	defaultRegionScoreFormulaVersion = "v2"
 	defaultLeaderSchedulePolicy      = "count"
@@ -77,6 +80,34 @@ var (
 	DefaultStoreLimit = StoreLimit{AddPeer: 15, RemovePeer: 15}
 	// DefaultTiFlashStoreLimit is the default TiFlash store limit of add peer and remove peer.
 	DefaultTiFlashStoreLimit = StoreLimit{AddPeer: 30, RemovePeer: 30}
+)
+
+// The following consts are used to identify the config item that needs to set TTL.
+const (
+	// TTLConfigPrefix is the prefix of the config item that needs to set TTL.
+	TTLConfigPrefix = "/config/ttl"
+
+	MaxSnapshotCountKey            = "schedule.max-snapshot-count"
+	MaxMergeRegionSizeKey          = "schedule.max-merge-region-size"
+	MaxPendingPeerCountKey         = "schedule.max-pending-peer-count"
+	MaxMergeRegionKeysKey          = "schedule.max-merge-region-keys"
+	LeaderScheduleLimitKey         = "schedule.leader-schedule-limit"
+	RegionScheduleLimitKey         = "schedule.region-schedule-limit"
+	WitnessScheduleLimitKey        = "schedule.witness-schedule-limit"
+	ReplicaRescheduleLimitKey      = "schedule.replica-schedule-limit"
+	MergeScheduleLimitKey          = "schedule.merge-schedule-limit"
+	HotRegionScheduleLimitKey      = "schedule.hot-region-schedule-limit"
+	SchedulerMaxWaitingOperatorKey = "schedule.scheduler-max-waiting-operator"
+	EnableLocationReplacement      = "schedule.enable-location-replacement"
+	DefaultAddPeer                 = "default-add-peer"
+	DefaultRemovePeer              = "default-remove-peer"
+
+	// EnableTiKVSplitRegion is the option to enable tikv split region.
+	// it's related to schedule, but it's not an explicit config
+	EnableTiKVSplitRegion = "schedule.enable-tikv-split-region"
+
+	DefaultGCInterval = 5 * time.Second
+	DefaultTTL        = 5 * time.Minute
 )
 
 // StoreLimit is the default limit of adding peer and removing peer when putting stores.
@@ -235,11 +266,14 @@ type ScheduleConfig struct {
 	// on ebs-based BR we need to disable it with TTL
 	EnableTiKVSplitRegion bool `toml:"enable-tikv-split-region" json:"enable-tikv-split-region,string"`
 
+	// EnableHeartbeatBreakdownMetrics is the option to enable heartbeat stats metrics.
+	EnableHeartbeatBreakdownMetrics bool `toml:"enable-heartbeat-breakdown-metrics" json:"enable-heartbeat-breakdown-metrics,string"`
+
+	// EnableHeartbeatConcurrentRunner is the option to enable heartbeat concurrent runner.
+	EnableHeartbeatConcurrentRunner bool `toml:"enable-heartbeat-concurrent-runner" json:"enable-heartbeat-concurrent-runner,string"`
+
 	// Schedulers support for loading customized schedulers
 	Schedulers SchedulerConfigs `toml:"schedulers" json:"schedulers-v2"` // json v2 is for the sake of compatible upgrade
-
-	// Only used to display
-	SchedulersPayload map[string]interface{} `toml:"schedulers-payload" json:"schedulers-payload"`
 
 	// Controls the time interval between write hot regions info into leveldb.
 	HotRegionsWriteInterval typeutil.Duration `toml:"hot-regions-write-interval" json:"hot-regions-write-interval"`
@@ -284,7 +318,6 @@ func (c *ScheduleConfig) Clone() *ScheduleConfig {
 	cfg := *c
 	cfg.StoreLimit = storeLimit
 	cfg.Schedulers = schedulers
-	cfg.SchedulersPayload = nil
 	return &cfg
 }
 
@@ -345,6 +378,15 @@ func (c *ScheduleConfig) Adjust(meta *configutil.ConfigMetaData, reloading bool)
 	if !meta.IsDefined("enable-tikv-split-region") {
 		c.EnableTiKVSplitRegion = defaultEnableTiKVSplitRegion
 	}
+
+	if !meta.IsDefined("enable-heartbeat-breakdown-metrics") {
+		c.EnableHeartbeatBreakdownMetrics = defaultEnableHeartbeatBreakdownMetrics
+	}
+
+	if !meta.IsDefined("enable-heartbeat-concurrent-runner") {
+		c.EnableHeartbeatConcurrentRunner = defaultEnableHeartbeatConcurrentRunner
+	}
+
 	if !meta.IsDefined("enable-cross-table-merge") {
 		c.EnableCrossTableMerge = defaultEnableCrossTableMerge
 	}
@@ -370,7 +412,7 @@ func (c *ScheduleConfig) Adjust(meta *configutil.ConfigMetaData, reloading bool)
 	adjustSchedulers(&c.Schedulers, DefaultSchedulers)
 
 	for k, b := range c.migrateConfigurationMap() {
-		v, err := c.parseDeprecatedFlag(meta, k, *b[0], *b[1])
+		v, err := parseDeprecatedFlag(meta, k, *b[0], *b[1])
 		if err != nil {
 			return err
 		}
@@ -419,7 +461,7 @@ func (c *ScheduleConfig) GetMaxMergeRegionKeys() uint64 {
 	return c.MaxMergeRegionSize * 10000
 }
 
-func (c *ScheduleConfig) parseDeprecatedFlag(meta *configutil.ConfigMetaData, name string, old, new bool) (bool, error) {
+func parseDeprecatedFlag(meta *configutil.ConfigMetaData, name string, old, new bool) (bool, error) {
 	oldName, newName := "disable-"+name, "enable-"+name
 	defineOld, defineNew := meta.IsDefined(oldName), meta.IsDefined(newName)
 	switch {
@@ -523,14 +565,13 @@ type SchedulerConfig struct {
 // If these schedulers are not in the persistent configuration, they
 // will be created automatically when reloading.
 var DefaultSchedulers = SchedulerConfigs{
-	{Type: "balance-region"},
-	{Type: "balance-leader"},
-	{Type: "balance-witness"},
-	{Type: "hot-region"},
-	{Type: "transfer-witness-leader"},
+	{Type: types.SchedulerTypeCompatibleMap[types.BalanceRegionScheduler]},
+	{Type: types.SchedulerTypeCompatibleMap[types.BalanceLeaderScheduler]},
+	{Type: types.SchedulerTypeCompatibleMap[types.BalanceHotRegionScheduler]},
+	{Type: types.SchedulerTypeCompatibleMap[types.EvictSlowStoreScheduler]},
 }
 
-// IsDefaultScheduler checks whether the scheduler is enable by default.
+// IsDefaultScheduler checks whether the scheduler is enabled by default.
 func IsDefaultScheduler(typ string) bool {
 	for _, c := range DefaultSchedulers {
 		if typ == c.Type {

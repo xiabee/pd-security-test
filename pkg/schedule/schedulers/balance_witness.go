@@ -32,6 +32,7 @@ import (
 	"github.com/tikv/pd/pkg/schedule/filter"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
+	types "github.com/tikv/pd/pkg/schedule/type"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/reflectutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
@@ -42,8 +43,6 @@ import (
 const (
 	// BalanceWitnessName is balance witness scheduler name.
 	BalanceWitnessName = "balance-witness-scheduler"
-	// BalanceWitnessType is balance witness scheduler type.
-	BalanceWitnessType = "balance-witness"
 	// balanceWitnessBatchSize is the default number of operators to transfer witnesses by one scheduling.
 	// Default value is 4 which is subjected by scheduler-max-waiting-operator and witness-schedule-limit
 	// If you want to increase balance speed more, please increase above-mentioned param.
@@ -53,16 +52,16 @@ const (
 )
 
 type balanceWitnessSchedulerConfig struct {
-	mu      syncutil.RWMutex
+	syncutil.RWMutex
 	storage endpoint.ConfigStorage
 	Ranges  []core.KeyRange `json:"ranges"`
 	// Batch is used to generate multiple operators by one scheduling
 	Batch int `json:"batch"`
 }
 
-func (conf *balanceWitnessSchedulerConfig) Update(data []byte) (int, interface{}) {
-	conf.mu.Lock()
-	defer conf.mu.Unlock()
+func (conf *balanceWitnessSchedulerConfig) update(data []byte) (int, any) {
+	conf.Lock()
+	defer conf.Unlock()
 
 	oldc, _ := json.Marshal(conf)
 
@@ -71,15 +70,19 @@ func (conf *balanceWitnessSchedulerConfig) Update(data []byte) (int, interface{}
 	}
 	newc, _ := json.Marshal(conf)
 	if !bytes.Equal(oldc, newc) {
-		if !conf.validate() {
-			json.Unmarshal(oldc, conf)
+		if !conf.validateLocked() {
+			if err := json.Unmarshal(oldc, conf); err != nil {
+				return http.StatusInternalServerError, err.Error()
+			}
 			return http.StatusBadRequest, "invalid batch size which should be an integer between 1 and 10"
 		}
-		conf.persistLocked()
+		if err := conf.persistLocked(); err != nil {
+			log.Warn("failed to persist config", zap.Error(err))
+		}
 		log.Info("balance-witness-scheduler config is updated", zap.ByteString("old", oldc), zap.ByteString("new", newc))
 		return http.StatusOK, "Config is updated."
 	}
-	m := make(map[string]interface{})
+	m := make(map[string]any)
 	if err := json.Unmarshal(data, &m); err != nil {
 		return http.StatusInternalServerError, err.Error()
 	}
@@ -90,13 +93,13 @@ func (conf *balanceWitnessSchedulerConfig) Update(data []byte) (int, interface{}
 	return http.StatusBadRequest, "Config item is not found."
 }
 
-func (conf *balanceWitnessSchedulerConfig) validate() bool {
+func (conf *balanceWitnessSchedulerConfig) validateLocked() bool {
 	return conf.Batch >= 1 && conf.Batch <= 10
 }
 
-func (conf *balanceWitnessSchedulerConfig) Clone() *balanceWitnessSchedulerConfig {
-	conf.mu.RLock()
-	defer conf.mu.RUnlock()
+func (conf *balanceWitnessSchedulerConfig) clone() *balanceWitnessSchedulerConfig {
+	conf.RLock()
+	defer conf.RUnlock()
 	ranges := make([]core.KeyRange, len(conf.Ranges))
 	copy(ranges, conf.Ranges)
 	return &balanceWitnessSchedulerConfig{
@@ -113,6 +116,20 @@ func (conf *balanceWitnessSchedulerConfig) persistLocked() error {
 	return conf.storage.SaveSchedulerConfig(BalanceWitnessName, data)
 }
 
+func (conf *balanceWitnessSchedulerConfig) getBatch() int {
+	conf.RLock()
+	defer conf.RUnlock()
+	return conf.Batch
+}
+
+func (conf *balanceWitnessSchedulerConfig) getRanges() []core.KeyRange {
+	conf.RLock()
+	defer conf.RUnlock()
+	ranges := make([]core.KeyRange, len(conf.Ranges))
+	copy(ranges, conf.Ranges)
+	return ranges
+}
+
 type balanceWitnessHandler struct {
 	rd     *render.Render
 	config *balanceWitnessSchedulerConfig
@@ -124,27 +141,26 @@ func newBalanceWitnessHandler(conf *balanceWitnessSchedulerConfig) http.Handler 
 		rd:     render.New(render.Options{IndentJSON: true}),
 	}
 	router := mux.NewRouter()
-	router.HandleFunc("/config", handler.UpdateConfig).Methods(http.MethodPost)
-	router.HandleFunc("/list", handler.ListConfig).Methods(http.MethodGet)
+	router.HandleFunc("/config", handler.updateConfig).Methods(http.MethodPost)
+	router.HandleFunc("/list", handler.listConfig).Methods(http.MethodGet)
 	return router
 }
 
-func (handler *balanceWitnessHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
+func (handler *balanceWitnessHandler) updateConfig(w http.ResponseWriter, r *http.Request) {
 	data, _ := io.ReadAll(r.Body)
 	r.Body.Close()
-	httpCode, v := handler.config.Update(data)
+	httpCode, v := handler.config.update(data)
 	handler.rd.JSON(w, httpCode, v)
 }
 
-func (handler *balanceWitnessHandler) ListConfig(w http.ResponseWriter, r *http.Request) {
-	conf := handler.config.Clone()
+func (handler *balanceWitnessHandler) listConfig(w http.ResponseWriter, _ *http.Request) {
+	conf := handler.config.clone()
 	handler.rd.JSON(w, http.StatusOK, conf)
 }
 
 type balanceWitnessScheduler struct {
 	*BaseScheduler
 	*retryQuota
-	name          string
 	conf          *balanceWitnessSchedulerConfig
 	handler       http.Handler
 	filters       []filter.Filter
@@ -155,15 +171,13 @@ type balanceWitnessScheduler struct {
 // newBalanceWitnessScheduler creates a scheduler that tends to keep witnesses on
 // each store balanced.
 func newBalanceWitnessScheduler(opController *operator.Controller, conf *balanceWitnessSchedulerConfig, options ...BalanceWitnessCreateOption) Scheduler {
-	base := NewBaseScheduler(opController)
 	s := &balanceWitnessScheduler{
-		BaseScheduler: base,
+		BaseScheduler: NewBaseScheduler(opController, types.BalanceWitnessScheduler),
 		retryQuota:    newRetryQuota(),
-		name:          BalanceWitnessName,
 		conf:          conf,
 		handler:       newBalanceWitnessHandler(conf),
 		counter:       balanceWitnessCounter,
-		filterCounter: filter.NewCounter(filter.BalanceWitness.String()),
+		filterCounter: filter.NewCounter(types.BalanceWitnessScheduler.String()),
 	}
 	for _, option := range options {
 		option(s)
@@ -175,6 +189,7 @@ func newBalanceWitnessScheduler(opController *operator.Controller, conf *balance
 	return s
 }
 
+// ServeHTTP implements the http.Handler interface.
 func (b *balanceWitnessScheduler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b.handler.ServeHTTP(w, r)
 }
@@ -189,30 +204,17 @@ func WithBalanceWitnessCounter(counter *prometheus.CounterVec) BalanceWitnessCre
 	}
 }
 
-// WithBalanceWitnessName sets the name for the scheduler.
-func WithBalanceWitnessName(name string) BalanceWitnessCreateOption {
-	return func(s *balanceWitnessScheduler) {
-		s.name = name
-	}
-}
-
-func (b *balanceWitnessScheduler) GetName() string {
-	return b.name
-}
-
-func (b *balanceWitnessScheduler) GetType() string {
-	return BalanceWitnessType
-}
-
+// EncodeConfig implements the Scheduler interface.
 func (b *balanceWitnessScheduler) EncodeConfig() ([]byte, error) {
-	b.conf.mu.RLock()
-	defer b.conf.mu.RUnlock()
+	b.conf.RLock()
+	defer b.conf.RUnlock()
 	return EncodeConfig(b.conf)
 }
 
+// ReloadConfig implements the Scheduler interface.
 func (b *balanceWitnessScheduler) ReloadConfig() error {
-	b.conf.mu.Lock()
-	defer b.conf.mu.Unlock()
+	b.conf.Lock()
+	defer b.conf.Unlock()
 	cfgData, err := b.conf.storage.LoadSchedulerConfig(b.GetName())
 	if err != nil {
 		return err
@@ -229,23 +231,23 @@ func (b *balanceWitnessScheduler) ReloadConfig() error {
 	return nil
 }
 
+// IsScheduleAllowed implements the Scheduler interface.
 func (b *balanceWitnessScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
 	allowed := b.OpController.OperatorCount(operator.OpWitness) < cluster.GetSchedulerConfig().GetWitnessScheduleLimit()
 	if !allowed {
-		operator.OperatorLimitCounter.WithLabelValues(b.GetType(), operator.OpWitness.String()).Inc()
+		operator.IncOperatorLimitCounter(b.GetType(), operator.OpWitness)
 	}
 	return allowed
 }
 
+// Schedule implements the Scheduler interface.
 func (b *balanceWitnessScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
-	b.conf.mu.RLock()
-	defer b.conf.mu.RUnlock()
 	basePlan := plan.NewBalanceSchedulerPlan()
 	var collector *plan.Collector
 	if dryRun {
 		collector = plan.NewCollector(basePlan)
 	}
-	batch := b.conf.Batch
+	batch := b.conf.getBatch()
 	schedulerCounter.WithLabelValues(b.GetName(), "schedule").Inc()
 
 	opInfluence := b.OpController.GetOpInfluence(cluster.GetBasicCluster())
@@ -254,7 +256,7 @@ func (b *balanceWitnessScheduler) Schedule(cluster sche.SchedulerCluster, dryRun
 
 	stores := cluster.GetStores()
 	scoreFunc := func(store *core.StoreInfo) float64 {
-		return store.WitnessScore(solver.GetOpInfluence(store.GetID()))
+		return store.WitnessScore(solver.getOpInfluence(store.GetID()))
 	}
 	sourceCandidate := newCandidateStores(filter.SelectSourceStores(stores, b.filters, cluster.GetSchedulerConfig(), collector, b.filterCounter), false, scoreFunc)
 	usedRegions := make(map[uint64]struct{})
@@ -270,7 +272,7 @@ func (b *balanceWitnessScheduler) Schedule(cluster sche.SchedulerCluster, dryRun
 			makeInfluence(op, solver, usedRegions, sourceCandidate)
 		}
 	}
-	b.retryQuota.GC(sourceCandidate.stores)
+	b.retryQuota.gc(sourceCandidate.stores)
 	return result, collector.GetPlans()
 }
 
@@ -279,7 +281,7 @@ func createTransferWitnessOperator(cs *candidateStores, b *balanceWitnessSchedul
 	store := cs.getStore()
 	ssolver.Step++
 	defer func() { ssolver.Step-- }()
-	retryLimit := b.retryQuota.GetLimit(store)
+	retryLimit := b.retryQuota.getLimit(store)
 	ssolver.Source, ssolver.Target = store, nil
 	var op *operator.Operator
 	for i := 0; i < retryLimit; i++ {
@@ -292,9 +294,9 @@ func createTransferWitnessOperator(cs *candidateStores, b *balanceWitnessSchedul
 		}
 	}
 	if op != nil {
-		b.retryQuota.ResetLimit(store)
+		b.retryQuota.resetLimit(store)
 	} else {
-		b.Attenuate(store)
+		b.attenuate(store)
 		log.Debug("no operator created for selected stores", zap.String("scheduler", b.GetName()), zap.Uint64("transfer-out", store.GetID()))
 		cs.next()
 	}
@@ -305,10 +307,10 @@ func createTransferWitnessOperator(cs *candidateStores, b *balanceWitnessSchedul
 // It randomly selects a health region from the source store, then picks
 // the best follower peer and transfers the witness.
 func (b *balanceWitnessScheduler) transferWitnessOut(solver *solver, collector *plan.Collector) *operator.Operator {
-	solver.Region = filter.SelectOneRegion(solver.RandWitnessRegions(solver.SourceStoreID(), b.conf.Ranges),
+	solver.Region = filter.SelectOneRegion(solver.RandWitnessRegions(solver.sourceStoreID(), b.conf.getRanges()),
 		collector, filter.NewRegionPendingFilter(), filter.NewRegionDownFilter())
 	if solver.Region == nil {
-		log.Debug("store has no witness", zap.String("scheduler", b.GetName()), zap.Uint64("store-id", solver.SourceStoreID()))
+		log.Debug("store has no witness", zap.String("scheduler", b.GetName()), zap.Uint64("store-id", solver.sourceStoreID()))
 		schedulerCounter.WithLabelValues(b.GetName(), "no-witness-region").Inc()
 		return nil
 	}
@@ -322,8 +324,8 @@ func (b *balanceWitnessScheduler) transferWitnessOut(solver *solver, collector *
 	}
 	targets = filter.SelectTargetStores(targets, finalFilters, conf, collector, b.filterCounter)
 	sort.Slice(targets, func(i, j int) bool {
-		iOp := solver.GetOpInfluence(targets[i].GetID())
-		jOp := solver.GetOpInfluence(targets[j].GetID())
+		iOp := solver.getOpInfluence(targets[i].GetID())
+		jOp := solver.getOpInfluence(targets[j].GetID())
 		return targets[i].WitnessScore(iOp) < targets[j].WitnessScore(jOp)
 	})
 	for _, solver.Target = range targets {
@@ -353,7 +355,7 @@ func (b *balanceWitnessScheduler) createOperator(solver *solver, collector *plan
 	}
 	solver.Step++
 	defer func() { solver.Step-- }()
-	op, err := operator.CreateMoveWitnessOperator(BalanceWitnessType, solver, solver.Region, solver.SourceStoreID(), solver.TargetStoreID())
+	op, err := operator.CreateMoveWitnessOperator(b.GetName(), solver, solver.Region, solver.sourceStoreID(), solver.targetStoreID())
 	if err != nil {
 		log.Debug("fail to create balance witness operator", errs.ZapError(err))
 		return nil
@@ -362,11 +364,11 @@ func (b *balanceWitnessScheduler) createOperator(solver *solver, collector *plan
 		schedulerCounter.WithLabelValues(b.GetName(), "new-operator"),
 	)
 	op.FinishedCounters = append(op.FinishedCounters,
-		balanceDirectionCounter.WithLabelValues(b.GetName(), solver.SourceMetricLabel(), solver.TargetMetricLabel()),
-		b.counter.WithLabelValues("move-witness", solver.SourceMetricLabel()+"-out"),
-		b.counter.WithLabelValues("move-witness", solver.TargetMetricLabel()+"-in"),
+		balanceDirectionCounter.WithLabelValues(b.GetName(), solver.sourceMetricLabel(), solver.targetMetricLabel()),
+		b.counter.WithLabelValues("move-witness", solver.sourceMetricLabel()+"-out"),
+		b.counter.WithLabelValues("move-witness", solver.targetMetricLabel()+"-in"),
 	)
-	op.AdditionalInfos["sourceScore"] = strconv.FormatFloat(solver.sourceScore, 'f', 2, 64)
-	op.AdditionalInfos["targetScore"] = strconv.FormatFloat(solver.targetScore, 'f', 2, 64)
+	op.SetAdditionalInfo("sourceScore", strconv.FormatFloat(solver.sourceScore, 'f', 2, 64))
+	op.SetAdditionalInfo("targetScore", strconv.FormatFloat(solver.targetScore, 'f', 2, 64))
 	return op
 }

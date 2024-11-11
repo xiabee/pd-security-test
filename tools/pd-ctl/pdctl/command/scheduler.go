@@ -72,9 +72,16 @@ func pauseSchedulerCommandFunc(cmd *cobra.Command, args []string) {
 		cmd.Usage()
 		return
 	}
-	path := schedulersPrefix + "/" + args[0]
-	input := map[string]interface{}{"delay": delay}
+	path := schedulersPrefix + "/" + getEscapedSchedulerName(args[0])
+	input := map[string]any{"delay": delay}
 	postJSON(cmd, path, input)
+}
+
+// Since certain scheduler's name is defined by caller such as scatter-range,
+// it's possible the name contains special characters, like "#", "&" and so on.
+// So we need to escape the scheduler name here before attaching it to the URL.
+func getEscapedSchedulerName(schedulerName string) string {
+	return url.PathEscape(schedulerName)
 }
 
 // NewResumeSchedulerCommand returns a command to resume a scheduler.
@@ -92,8 +99,8 @@ func resumeSchedulerCommandFunc(cmd *cobra.Command, args []string) {
 		cmd.Usage()
 		return
 	}
-	path := schedulersPrefix + "/" + args[0]
-	input := map[string]interface{}{"delay": 0}
+	path := schedulersPrefix + "/" + getEscapedSchedulerName(args[0])
+	input := map[string]any{"delay": 0}
 	postJSON(cmd, path, input)
 }
 
@@ -217,7 +224,7 @@ func addSchedulerForStoreCommandFunc(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		input := make(map[string]interface{})
+		input := make(map[string]any)
 		input["name"] = cmd.Name()
 		input["store_id"] = storeID
 		postJSON(cmd, schedulersPrefix, input)
@@ -268,7 +275,7 @@ func addSchedulerForShuffleHotRegionCommandFunc(cmd *cobra.Command, args []strin
 		}
 		limit = l
 	}
-	input := make(map[string]interface{})
+	input := make(map[string]any)
 	input["name"] = cmd.Name()
 	input["limit"] = limit
 	postJSON(cmd, schedulersPrefix, input)
@@ -384,8 +391,8 @@ func NewSlowTrendEvictLeaderSchedulerCommand() *cobra.Command {
 	return c
 }
 
-func addSchedulerForSplitBucketCommandFunc(cmd *cobra.Command, args []string) {
-	input := make(map[string]interface{})
+func addSchedulerForSplitBucketCommandFunc(cmd *cobra.Command, _ []string) {
+	input := make(map[string]any)
 	input["name"] = cmd.Name()
 	postJSON(cmd, schedulersPrefix, input)
 }
@@ -395,7 +402,7 @@ func addSchedulerForGrantHotRegionCommandFunc(cmd *cobra.Command, args []string)
 		cmd.Println(cmd.UsageString())
 		return
 	}
-	input := make(map[string]interface{})
+	input := make(map[string]any)
 	input["name"] = cmd.Name()
 	input["store-leader-id"] = args[0]
 	input["store-id"] = args[1]
@@ -407,7 +414,7 @@ func addSchedulerCommandFunc(cmd *cobra.Command, args []string) {
 		cmd.Println(cmd.UsageString())
 		return
 	}
-	input := make(map[string]interface{})
+	input := make(map[string]any)
 	input["name"] = cmd.Name()
 	postJSON(cmd, schedulersPrefix, input)
 }
@@ -439,7 +446,7 @@ func addSchedulerForScatterRangeCommandFunc(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	input := make(map[string]interface{})
+	input := make(map[string]any)
 	input["name"] = cmd.Name()
 	input["start_key"] = url.QueryEscape(startKey)
 	input["end_key"] = url.QueryEscape(endKey)
@@ -475,7 +482,7 @@ func removeSchedulerCommandFunc(cmd *cobra.Command, args []string) {
 	case strings.HasPrefix(args[0], grantLeaderSchedulerName) && args[0] != grantLeaderSchedulerName:
 		redirectRemoveSchedulerToDeleteConfig(cmd, grantLeaderSchedulerName, args)
 	default:
-		path := schedulersPrefix + "/" + args[0]
+		path := schedulersPrefix + "/" + getEscapedSchedulerName(args[0])
 		_, err := doRequest(cmd, path, http.MethodDelete, http.Header{})
 		if err != nil {
 			cmd.Println(err)
@@ -499,6 +506,8 @@ func NewConfigSchedulerCommand() *cobra.Command {
 		newConfigGrantHotRegionCommand(),
 		newConfigBalanceLeaderCommand(),
 		newSplitBucketCommand(),
+		newConfigEvictSlowStoreCommand(),
+		newConfigShuffleHotRegionSchedulerCommand(),
 		newConfigEvictSlowTrendCommand(),
 	)
 	return c
@@ -583,6 +592,10 @@ func newConfigEvictLeaderCommand() *cobra.Command {
 		Use:   "delete-store <store-id>",
 		Short: "delete a store from evict leader list",
 		Run:   func(cmd *cobra.Command, args []string) { deleteStoreFromSchedulerConfig(cmd, c.Name(), args) },
+	}, &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "set the config item",
+		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
 	})
 	return c
 }
@@ -633,11 +646,23 @@ func addStoreToSchedulerConfig(cmd *cobra.Command, schedulerName string, args []
 		cmd.Println(err)
 		return
 	}
-	input := make(map[string]interface{})
+	input := make(map[string]any)
 	input["name"] = schedulerName
 	input["store_id"] = storeID
 
 	postJSON(cmd, path.Join(schedulerConfigPrefix, schedulerName, "config"), input)
+}
+
+var hiddenHotConfig = []string{
+	"max-zombie-rounds",
+	"max-peer-number",
+	"byte-rate-rank-step-ratio",
+	"key-rate-rank-step-ratio",
+	"query-rate-rank-step-ratio",
+	"count-rank-step-ratio",
+	"great-dec-ratio",
+	"minor-dec-ratio",
+	"enable-for-tiflash",
 }
 
 func listSchedulerConfigCommandFunc(cmd *cobra.Command, args []string) {
@@ -657,6 +682,23 @@ func listSchedulerConfigCommandFunc(cmd *cobra.Command, args []string) {
 		}
 		cmd.Println(err)
 		return
+	}
+	if p == "balance-hot-region-scheduler" {
+		schedulerConfig := make(map[string]any)
+		err := json.Unmarshal([]byte(r), &schedulerConfig)
+		if err != nil {
+			cmd.Println(err)
+			return
+		}
+		for _, config := range hiddenHotConfig {
+			delete(schedulerConfig, config)
+		}
+		b, err := json.MarshalIndent(schedulerConfig, "", "  ")
+		if err != nil {
+			cmd.Println(err)
+			return
+		}
+		r = string(b)
 	}
 	cmd.Println(r)
 }
@@ -695,7 +737,7 @@ func setGrantHotRegionCommandFunc(cmd *cobra.Command, schedulerName string, args
 		cmd.Println(cmd.UsageString())
 		return
 	}
-	input := make(map[string]interface{})
+	input := make(map[string]any)
 	input["store-leader-id"] = args[0]
 	input["store-id"] = args[1]
 	postJSON(cmd, path.Join(schedulerConfigPrefix, schedulerName, "config"), input)
@@ -706,8 +748,8 @@ func postSchedulerConfigCommandFunc(cmd *cobra.Command, schedulerName string, ar
 		cmd.Println(cmd.UsageString())
 		return
 	}
-	var val interface{}
-	input := make(map[string]interface{})
+	var val any
+	input := make(map[string]any)
 	key, value := args[0], args[1]
 	val, err := strconv.ParseFloat(value, 64)
 	if err != nil {
@@ -744,11 +786,17 @@ func showShuffleRegionSchedulerRolesCommandFunc(cmd *cobra.Command, args []strin
 	if p == "show-roles" {
 		p = cmd.Parent().Name()
 	}
-	path := path.Join(schedulerConfigPrefix, p, "roles")
-	r, err := doRequest(cmd, path, http.MethodGet, http.Header{})
+	url := path.Join(schedulerConfigPrefix, p, "list")
+	r, err := doRequest(cmd, url, http.MethodGet, http.Header{})
 	if err != nil {
-		cmd.Println(err)
-		return
+		// try to use old api
+		var err2 error
+		url := path.Join(schedulerConfigPrefix, p, "roles")
+		r, err2 = doRequest(cmd, url, http.MethodGet, http.Header{})
+		if err2 != nil {
+			cmd.Println(err, err2)
+			return
+		}
 	}
 	cmd.Println(r)
 }
@@ -774,6 +822,44 @@ func setShuffleRegionSchedulerRolesCommandFunc(cmd *cobra.Command, args []string
 		return
 	}
 	cmd.Println("Success!")
+}
+
+func newConfigEvictSlowStoreCommand() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "evict-slow-store-scheduler",
+		Short: "evict-slow-store-scheduler config",
+		Run:   listSchedulerConfigCommandFunc,
+	}
+
+	c.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "list the config item",
+		Run:   listSchedulerConfigCommandFunc,
+	}, &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "set the config item",
+		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
+	})
+	return c
+}
+
+func newConfigShuffleHotRegionSchedulerCommand() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "shuffle-hot-region-scheduler",
+		Short: "shuffle-hot-region-scheduler config",
+		Run:   listSchedulerConfigCommandFunc,
+	}
+
+	c.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "list the config item",
+		Run:   listSchedulerConfigCommandFunc,
+	}, &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "set the config item",
+		Run:   func(cmd *cobra.Command, args []string) { postSchedulerConfigCommandFunc(cmd, c.Name(), args) },
+	})
+	return c
 }
 
 func newConfigEvictSlowTrendCommand() *cobra.Command {

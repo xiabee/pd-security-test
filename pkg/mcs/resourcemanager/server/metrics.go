@@ -37,14 +37,6 @@ const (
 )
 
 var (
-	// Meta & Server info.
-	serverInfo = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: serverSubsystem,
-			Name:      "info",
-			Help:      "Indicate the resource manager server info, and the value is the start timestamp (s).",
-		}, []string{"version", "hash"})
 	// RU cost metrics.
 	// `sum` is added to the name to maintain compatibility with the previous use of histogram.
 	readRequestUnitCost = prometheus.NewCounterVec(
@@ -140,7 +132,6 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(serverInfo)
 	prometheus.MustRegister(readRequestUnitCost)
 	prometheus.MustRegister(writeRequestUnitCost)
 	prometheus.MustRegister(sqlLayerRequestUnitCost)

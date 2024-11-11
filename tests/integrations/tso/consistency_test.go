@@ -27,7 +27,7 @@ import (
 	tso "github.com/tikv/pd/pkg/mcs/tso/server"
 	tsopkg "github.com/tikv/pd/pkg/tso"
 	"github.com/tikv/pd/pkg/utils/tempurl"
-	pd "github.com/tikv/pd/pkg/utils/testutil"
+	tu "github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/pkg/utils/tsoutil"
 	"github.com/tikv/pd/tests"
 	"google.golang.org/grpc"
@@ -53,13 +53,13 @@ type tsoConsistencyTestSuite struct {
 	tsoClient tsopb.TSOClient
 }
 
-func TestLegacyTSOConsistency(t *testing.T) {
+func TestLegacyTSOConsistencySuite(t *testing.T) {
 	suite.Run(t, &tsoConsistencyTestSuite{
 		legacy: true,
 	})
 }
 
-func TestMicroserviceTSOConsistency(t *testing.T) {
+func TestMicroserviceTSOConsistencySuite(t *testing.T) {
 	suite.Run(t, &tsoConsistencyTestSuite{
 		legacy: false,
 	})
@@ -79,10 +79,11 @@ func (suite *tsoConsistencyTestSuite) SetupSuite() {
 	err = suite.cluster.RunInitialServers()
 	re.NoError(err)
 	leaderName := suite.cluster.WaitLeader()
+	re.NotEmpty(leaderName)
 	suite.pdLeaderServer = suite.cluster.GetServer(leaderName)
 	backendEndpoints := suite.pdLeaderServer.GetAddr()
 	if suite.legacy {
-		suite.pdClient = pd.MustNewGrpcClient(re, backendEndpoints)
+		suite.pdClient = tu.MustNewGrpcClient(re, backendEndpoints)
 	} else {
 		suite.tsoServer, suite.tsoServerCleanup = tests.StartSingleTSOTestServer(suite.ctx, re, backendEndpoints, tempurl.Alloc())
 		suite.tsoClientConn, suite.tsoClient = tso.MustNewGrpcClient(re, suite.tsoServer.GetAddr())
@@ -127,12 +128,15 @@ func (suite *tsoConsistencyTestSuite) request(ctx context.Context, count uint32)
 		DcLocation: tsopkg.GlobalDCLocation,
 		Count:      count,
 	}
-	tsoClient, err := suite.tsoClient.Tso(ctx)
-	re.NoError(err)
-	defer tsoClient.CloseSend()
-	re.NoError(tsoClient.Send(req))
-	resp, err := tsoClient.Recv()
-	re.NoError(err)
+	var resp *tsopb.TsoResponse
+	tu.Eventually(re, func() bool {
+		tsoClient, err := suite.tsoClient.Tso(ctx)
+		re.NoError(err)
+		defer tsoClient.CloseSend()
+		re.NoError(tsoClient.Send(req))
+		resp, err = tsoClient.Recv()
+		return err == nil && resp != nil
+	})
 	return checkAndReturnTimestampResponse(re, resp)
 }
 
@@ -145,6 +149,7 @@ func (suite *tsoConsistencyTestSuite) TestRequestTSOConcurrently() {
 }
 
 func (suite *tsoConsistencyTestSuite) requestTSOConcurrently() {
+	re := suite.Require()
 	ctx, cancel := context.WithCancel(suite.ctx)
 	defer cancel()
 
@@ -161,7 +166,7 @@ func (suite *tsoConsistencyTestSuite) requestTSOConcurrently() {
 			for j := 0; j < tsoRequestRound; j++ {
 				ts = suite.request(ctx, tsoCount)
 				// Check whether the TSO fallbacks
-				suite.Equal(1, tsoutil.CompareTimestamp(ts, last))
+				re.Equal(1, tsoutil.CompareTimestamp(ts, last))
 				last = ts
 				time.Sleep(10 * time.Millisecond)
 			}

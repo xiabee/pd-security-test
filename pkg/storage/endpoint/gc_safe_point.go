@@ -100,7 +100,9 @@ func (se *StorageEndpoint) LoadMinServiceGCSafePoint(now time.Time) (*ServiceSaf
 		}
 
 		if ssp.ExpiredAt < now.Unix() {
-			se.Remove(key)
+			if err := se.Remove(key); err != nil {
+				log.Error("failed to remove expired service safepoint", errs.ZapError(err))
+			}
 			continue
 		}
 		if ssp.SafePoint < min.SafePoint {
@@ -169,13 +171,7 @@ func (se *StorageEndpoint) SaveServiceGCSafePoint(ssp *ServiceSafePoint) error {
 		return errors.New("TTL of gc_worker's service safe point must be infinity")
 	}
 
-	key := gcSafePointServicePath(ssp.ServiceID)
-	value, err := json.Marshal(ssp)
-	if err != nil {
-		return err
-	}
-
-	return se.Save(key, string(value))
+	return se.saveJSON(gcSafePointServicePath(ssp.ServiceID), ssp)
 }
 
 // RemoveServiceGCSafePoint removes a GC safepoint for the service

@@ -21,6 +21,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,14 +173,14 @@ func TestHotRegionWrite(t *testing.T) {
 func TestHotRegionDelete(t *testing.T) {
 	re := require.New(t)
 	defaultRemainDay := 7
-	defaultDelteData := 30
+	defaultDeleteData := 30
 	deleteDate := time.Now().AddDate(0, 0, 0)
 	packHotRegionInfo := &MockPackHotRegionInfo{}
 	store, clean, err := newTestHotRegionStorage(10*time.Minute, uint64(defaultRemainDay), packHotRegionInfo)
 	re.NoError(err)
 	defer clean()
 	historyHotRegions := make([]HistoryHotRegion, 0)
-	for i := 0; i < defaultDelteData; i++ {
+	for i := 0; i < defaultDeleteData; i++ {
 		historyHotRegion := HistoryHotRegion{
 			UpdateTime:    deleteDate.UnixNano() / int64(time.Millisecond),
 			RegionID:      1,
@@ -287,7 +288,7 @@ func newTestHotRegionStorage(pullInterval time.Duration,
 	packHotRegionInfo *MockPackHotRegionInfo) (
 	hotRegionStorage *HotRegionStorage,
 	clear func(), err error) {
-	writePath := "./tmp"
+	writePath := strings.Join([]string{".", "tmp"}, string(filepath.Separator))
 	ctx := context.Background()
 	packHotRegionInfo.pullInterval = pullInterval
 	packHotRegionInfo.reservedDays = reservedDays

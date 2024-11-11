@@ -50,7 +50,7 @@ type LabelRule struct {
 	Index     int           `json:"index"`
 	Labels    []RegionLabel `json:"labels"`
 	RuleType  string        `json:"rule_type"`
-	Data      interface{}   `json:"data"`
+	Data      any           `json:"data"`
 	minExpire *time.Time
 }
 
@@ -219,8 +219,8 @@ func (rule *LabelRule) expireBefore(t time.Time) bool {
 }
 
 // initKeyRangeRulesFromLabelRuleData init and adjust []KeyRangeRule from `LabelRule.Data`
-func initKeyRangeRulesFromLabelRuleData(data interface{}) ([]*KeyRangeRule, error) {
-	rules, ok := data.([]interface{})
+func initKeyRangeRulesFromLabelRuleData(data any) ([]*KeyRangeRule, error) {
+	rules, ok := data.([]any)
 	if !ok {
 		return nil, errs.ErrRegionRuleContent.FastGenByArgs(fmt.Sprintf("invalid rule type: %T", data))
 	}
@@ -239,8 +239,8 @@ func initKeyRangeRulesFromLabelRuleData(data interface{}) ([]*KeyRangeRule, erro
 }
 
 // initAndAdjustKeyRangeRule inits and adjusts the KeyRangeRule from one item in `LabelRule.Data`
-func initAndAdjustKeyRangeRule(rule interface{}) (*KeyRangeRule, error) {
-	data, ok := rule.(map[string]interface{})
+func initAndAdjustKeyRangeRule(rule any) (*KeyRangeRule, error) {
+	data, ok := rule.(map[string]any)
 	if !ok {
 		return nil, errs.ErrRegionRuleContent.FastGenByArgs(fmt.Sprintf("invalid rule type: %T", reflect.TypeOf(rule)))
 	}

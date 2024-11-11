@@ -28,7 +28,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/election"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
@@ -67,6 +67,8 @@ type Participant struct {
 	campaignChecker atomic.Value // Store as leadershipCheckFunc
 	// lastLeaderUpdatedTime is the last time when the leader is updated.
 	lastLeaderUpdatedTime atomic.Value
+	// expectedPrimaryLease is the expected lease for the primary.
+	expectedPrimaryLease atomic.Value // stored as *election.Lease
 }
 
 // NewParticipant create a new Participant.
@@ -104,7 +106,7 @@ func (m *Participant) Name() string {
 }
 
 // GetMember returns the member.
-func (m *Participant) GetMember() interface{} {
+func (m *Participant) GetMember() any {
 	return m.member
 }
 
@@ -121,22 +123,16 @@ func (m *Participant) Client() *clientv3.Client {
 // IsLeader returns whether the participant is the leader or not by checking its leadership's
 // lease and leader info.
 func (m *Participant) IsLeader() bool {
-	if m.GetLeader() == nil {
-		return false
-	}
 	return m.leadership.Check() && m.GetLeader().GetId() == m.member.GetId() && m.campaignCheck()
 }
 
 // IsLeaderElected returns true if the leader exists; otherwise false
 func (m *Participant) IsLeaderElected() bool {
-	return m.GetLeader() != nil
+	return m.GetLeader().GetId() != 0
 }
 
 // GetLeaderListenUrls returns current leader's listen urls
 func (m *Participant) GetLeaderListenUrls() []string {
-	if m.GetLeader() == nil {
-		return nil
-	}
 	return m.GetLeader().GetListenUrls()
 }
 
@@ -149,13 +145,9 @@ func (m *Participant) GetLeaderID() uint64 {
 func (m *Participant) GetLeader() participant {
 	leader := m.leader.Load()
 	if leader == nil {
-		return nil
+		return NewParticipantByService(m.serviceName)
 	}
-	member := leader.(participant)
-	if member.GetId() == 0 {
-		return nil
-	}
-	return member
+	return leader.(participant)
 }
 
 // setLeader sets the member's leader.
@@ -210,7 +202,7 @@ func (m *Participant) KeepLeader(ctx context.Context) {
 
 // PreCheckLeader does some pre-check before checking whether or not it's the leader.
 // It returns true if it passes the pre-check, false otherwise.
-func (m *Participant) PreCheckLeader() error {
+func (*Participant) PreCheckLeader() error {
 	// No specific thing to check. Returns no error.
 	return nil
 }
@@ -290,7 +282,7 @@ func (m *Participant) IsSameLeader(leader participant) bool {
 }
 
 // CheckPriority checks whether there is another participant has higher priority and resign it as the leader if so.
-func (m *Participant) CheckPriority(ctx context.Context) {
+func (*Participant) CheckPriority(_ context.Context) {
 	// TODO: implement weighted-election when it's in need
 }
 
@@ -384,14 +376,28 @@ func (m *Participant) SetCampaignChecker(checker leadershipCheckFunc) {
 	m.campaignChecker.Store(checker)
 }
 
+// SetExpectedPrimaryLease sets the expected lease for the primary.
+func (m *Participant) SetExpectedPrimaryLease(lease *election.Lease) {
+	m.expectedPrimaryLease.Store(lease)
+}
+
+// GetExpectedPrimaryLease gets the expected lease for the primary.
+func (m *Participant) GetExpectedPrimaryLease() *election.Lease {
+	l := m.expectedPrimaryLease.Load()
+	if l == nil {
+		return nil
+	}
+	return l.(*election.Lease)
+}
+
 // NewParticipantByService creates a new participant by service name.
 func NewParticipantByService(serviceName string) (p participant) {
 	switch serviceName {
-	case utils.TSOServiceName:
+	case constant.TSOServiceName:
 		p = &tsopb.Participant{}
-	case utils.SchedulingServiceName:
+	case constant.SchedulingServiceName:
 		p = &schedulingpb.Participant{}
-	case utils.ResourceManagerServiceName:
+	case constant.ResourceManagerServiceName:
 		p = &resource_manager.Participant{}
 	}
 	return p

@@ -16,6 +16,7 @@ package schedulers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -47,7 +48,7 @@ type Controller struct {
 	ctx     context.Context
 	cluster sche.SchedulerCluster
 	storage endpoint.ConfigStorage
-	// schedulers is used to manage all schedulers, which will only be initialized
+	// schedulers are used to manage all schedulers, which will only be initialized
 	// and used in the PD leader service mode now.
 	schedulers map[string]*ScheduleController
 	// schedulerHandlers is used to manage the HTTP handlers of schedulers,
@@ -152,7 +153,8 @@ func (c *Controller) AddSchedulerHandler(scheduler Scheduler, args ...string) er
 		return err
 	}
 	c.cluster.GetSchedulerConfig().AddSchedulerCfg(scheduler.GetType(), args)
-	return nil
+	err := scheduler.PrepareConfig(c.cluster)
+	return err
 }
 
 // RemoveSchedulerHandler removes the HTTP handler for a scheduler.
@@ -179,6 +181,7 @@ func (c *Controller) RemoveSchedulerHandler(name string) error {
 		return err
 	}
 
+	s.(Scheduler).CleanConfig(c.cluster)
 	delete(c.schedulerHandlers, name)
 
 	return nil
@@ -194,7 +197,7 @@ func (c *Controller) AddScheduler(scheduler Scheduler, args ...string) error {
 	}
 
 	s := NewScheduleController(c.ctx, c.cluster, c.opController, scheduler)
-	if err := s.Scheduler.Prepare(c.cluster); err != nil {
+	if err := s.Scheduler.PrepareConfig(c.cluster); err != nil {
 		return err
 	}
 
@@ -274,7 +277,7 @@ func (c *Controller) PauseOrResumeScheduler(name string, t int64) error {
 // ReloadSchedulerConfig reloads a scheduler's config if it exists.
 func (c *Controller) ReloadSchedulerConfig(name string) error {
 	if exist, _ := c.IsSchedulerExisted(name); !exist {
-		return nil
+		return fmt.Errorf("scheduler %s is not existed", name)
 	}
 	return c.GetScheduler(name).ReloadConfig()
 }
@@ -339,7 +342,7 @@ func (c *Controller) IsSchedulerExisted(name string) (bool, error) {
 func (c *Controller) runScheduler(s *ScheduleController) {
 	defer logutil.LogPanic()
 	defer c.wg.Done()
-	defer s.Scheduler.Cleanup(c.cluster)
+	defer s.Scheduler.CleanConfig(c.cluster)
 
 	ticker := time.NewTicker(s.GetInterval())
 	defer ticker.Stop()
@@ -409,6 +412,11 @@ func (c *Controller) CheckTransferWitnessLeader(region *core.RegionInfo) {
 	}
 }
 
+// GetAllSchedulerConfigs returns all scheduler configs.
+func (c *Controller) GetAllSchedulerConfigs() ([]string, []string, error) {
+	return c.storage.LoadAllSchedulerConfigs()
+}
+
 // ScheduleController is used to manage a scheduler.
 type ScheduleController struct {
 	Scheduler
@@ -448,6 +456,8 @@ func (s *ScheduleController) Stop() {
 
 // Schedule tries to create some operators.
 func (s *ScheduleController) Schedule(diagnosable bool) []*operator.Operator {
+	_, isEvictLeaderScheduler := s.Scheduler.(*evictLeaderScheduler)
+retry:
 	for i := 0; i < maxScheduleRetries; i++ {
 		// no need to retry if schedule should stop to speed exit
 		select {
@@ -462,29 +472,34 @@ func (s *ScheduleController) Schedule(diagnosable bool) []*operator.Operator {
 		if diagnosable {
 			s.diagnosticRecorder.SetResultFromPlans(ops, plans)
 		}
-		foundDisabled := false
-		for _, op := range ops {
-			if labelMgr := s.cluster.GetRegionLabeler(); labelMgr != nil {
-				region := s.cluster.GetRegion(op.RegionID())
-				if region == nil {
-					continue
-				}
-				if labelMgr.ScheduleDisabled(region) {
-					denySchedulersByLabelerCounter.Inc()
-					foundDisabled = true
-					break
-				}
-			}
+		if len(ops) == 0 {
+			continue
 		}
-		if len(ops) > 0 {
-			// If we have schedule, reset interval to the minimal interval.
-			s.nextInterval = s.Scheduler.GetMinInterval()
-			// try regenerating operators
-			if foundDisabled {
+
+		// If we have schedule, reset interval to the minimal interval.
+		s.nextInterval = s.Scheduler.GetMinInterval()
+		for i := 0; i < len(ops); i++ {
+			region := s.cluster.GetRegion(ops[i].RegionID())
+			if region == nil {
+				continue retry
+			}
+			labelMgr := s.cluster.GetRegionLabeler()
+			if labelMgr == nil {
 				continue
 			}
-			return ops
+
+			// If the evict-leader-scheduler is disabled, it will obstruct the restart operation of tikv by the operator.
+			// Refer: https://docs.pingcap.com/tidb-in-kubernetes/stable/restart-a-tidb-cluster#perform-a-graceful-restart-to-a-single-tikv-pod
+			if labelMgr.ScheduleDisabled(region) && !isEvictLeaderScheduler {
+				denySchedulersByLabelerCounter.Inc()
+				ops = append(ops[:i], ops[i+1:]...)
+				i--
+			}
 		}
+		if len(ops) == 0 {
+			continue
+		}
+		return ops
 	}
 	s.nextInterval = s.Scheduler.GetNextInterval(s.nextInterval)
 	return nil
