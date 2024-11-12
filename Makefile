@@ -15,8 +15,6 @@ dev-basic: build check basic-test
 BUILD_FLAGS ?=
 BUILD_TAGS ?=
 BUILD_CGO_ENABLED := 0
-BUILD_TOOL_CGO_ENABLED := 0
-BUILD_GOEXPERIMENT ?=
 PD_EDITION ?= Community
 # Ensure PD_EDITION is set to Community or Enterprise before running build process.
 ifneq "$(PD_EDITION)" "Community"
@@ -35,10 +33,6 @@ else
 	BUILD_CGO_ENABLED := 1
 endif
 
-ifeq ($(FAILPOINT), 1)
-	BUILD_TAGS += with_fail
-endif
-
 ifeq ("$(WITH_RACE)", "1")
 	BUILD_FLAGS += -race
 	BUILD_CGO_ENABLED := 1
@@ -48,19 +42,7 @@ ifeq ($(PLUGIN), 1)
 	BUILD_TAGS += with_plugin
 endif
 
-ifeq ($(ENABLE_FIPS), 1)
-	BUILD_TAGS+=boringcrypto
-	BUILD_GOEXPERIMENT=boringcrypto
-	BUILD_CGO_ENABLED := 1
-	BUILD_TOOL_CGO_ENABLED := 1
-endif
-
-RELEASE_VERSION ?= $(shell git describe --tags --dirty --always)
-ifeq ($(RUN_CI), 1)
-	RELEASE_VERSION := None
-endif
-
-LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDReleaseVersion=$(RELEASE_VERSION)"
+LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDReleaseVersion=$(shell git describe --tags --dirty --always)"
 LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDBuildTS=$(shell date -u '+%Y-%m-%d %I:%M:%S')"
 LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDGitHash=$(shell git rev-parse HEAD)"
 LDFLAGS += -X "$(PD_PKG)/pkg/versioninfo.PDGitBranch=$(shell git rev-parse --abbrev-ref HEAD)"
@@ -80,7 +62,7 @@ BUILD_BIN_PATH := $(ROOT_PATH)/bin
 
 build: pd-server pd-ctl pd-recover
 
-tools: pd-tso-bench pd-heartbeat-bench regions-dump stores-dump pd-api-bench pd-ut
+tools: pd-tso-bench pd-heartbeat-bench regions-dump stores-dump
 
 PD_SERVER_DEP :=
 ifeq ($(SWAGGER), 1)
@@ -92,46 +74,34 @@ ifneq ($(DASHBOARD_DISTRIBUTION_DIR),)
 endif
 PD_SERVER_DEP += dashboard-ui
 
-pre-build: ${PD_SERVER_DEP}
-
-pd-server: pre-build
-	GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_CGO_ENABLED) go build $(BUILD_FLAGS) -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -tags "$(BUILD_TAGS)" -o $(BUILD_BIN_PATH)/pd-server cmd/pd-server/main.go
-
-pd-server-failpoint:
-	@$(FAILPOINT_ENABLE)
-	FAILPOINT=1 $(MAKE) pd-server || { $(FAILPOINT_DISABLE); exit 1; }
-	@$(FAILPOINT_DISABLE)
+pd-server: ${PD_SERVER_DEP}
+	CGO_ENABLED=$(BUILD_CGO_ENABLED) go build $(BUILD_FLAGS) -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -tags "$(BUILD_TAGS)" -o $(BUILD_BIN_PATH)/pd-server cmd/pd-server/main.go
 
 pd-server-basic:
 	SWAGGER=0 DASHBOARD=0 $(MAKE) pd-server
 
-.PHONY: pre-build build tools pd-server pd-server-basic
+.PHONY: build tools pd-server pd-server-basic
 
 # Tools
-pd-ctl:
-	cd tools && GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_TOOL_CGO_ENABLED) go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-ctl pd-ctl/main.go
-pd-tso-bench:
-	cd tools && CGO_ENABLED=0 go build -o $(BUILD_BIN_PATH)/pd-tso-bench pd-tso-bench/main.go
-pd-api-bench:
-	cd tools && CGO_ENABLED=0 go build -o $(BUILD_BIN_PATH)/pd-api-bench pd-api-bench/main.go
-pd-recover:
-	cd tools && GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_TOOL_CGO_ENABLED) go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-recover pd-recover/main.go
-pd-analysis:
-	cd tools && CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-analysis pd-analysis/main.go
-pd-heartbeat-bench:
-	cd tools && CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-heartbeat-bench pd-heartbeat-bench/main.go
-simulator:
-	cd tools && GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_CGO_ENABLED) go build $(BUILD_FLAGS) -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-simulator pd-simulator/main.go
-regions-dump:
-	cd tools && CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/regions-dump regions-dump/main.go
-stores-dump:
-	cd tools && CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/stores-dump stores-dump/main.go
-pd-ut: pd-xprog
-	cd tools && GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_TOOL_CGO_ENABLED) go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-ut pd-ut/ut.go pd-ut/coverProfile.go
-pd-xprog:
-	cd tools && GOEXPERIMENT=$(BUILD_GOEXPERIMENT) CGO_ENABLED=$(BUILD_TOOL_CGO_ENABLED) go build -tags xprog -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/xprog pd-ut/xprog.go
 
-.PHONY: pd-ctl pd-tso-bench pd-recover pd-analysis pd-heartbeat-bench simulator regions-dump stores-dump pd-api-bench pd-ut
+pd-ctl:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-ctl tools/pd-ctl/main.go
+pd-tso-bench:
+	cd tools/pd-tso-bench && CGO_ENABLED=0 go build -o $(BUILD_BIN_PATH)/pd-tso-bench main.go
+pd-recover:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-recover tools/pd-recover/main.go
+pd-analysis:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-analysis tools/pd-analysis/main.go
+pd-heartbeat-bench:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-heartbeat-bench tools/pd-heartbeat-bench/main.go
+simulator:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/pd-simulator tools/pd-simulator/main.go
+regions-dump:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/regions-dump tools/regions-dump/main.go
+stores-dump:
+	CGO_ENABLED=0 go build -gcflags '$(GCFLAGS)' -ldflags '$(LDFLAGS)' -o $(BUILD_BIN_PATH)/stores-dump tools/stores-dump/main.go
+
+.PHONY: pd-ctl pd-tso-bench pd-recover pd-analysis pd-heartbeat-bench simulator regions-dump stores-dump
 
 #### Docker image ####
 
@@ -170,26 +140,24 @@ SHELL := env PATH='$(PATH)' GOBIN='$(GO_TOOLS_BIN_PATH)' $(shell which bash)
 
 install-tools:
 	@mkdir -p $(GO_TOOLS_BIN_PATH)
-	@which golangci-lint >/dev/null 2>&1 || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GO_TOOLS_BIN_PATH) v1.56.2
+	@which golangci-lint >/dev/null 2>&1 || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GO_TOOLS_BIN_PATH) v1.51.2
 	@grep '_' tools.go | sed 's/"//g' | awk '{print $$2}' | xargs go install
 
 .PHONY: install-tools
 
 #### Static checks ####
 
-check: tidy static generate-errdoc
+check: install-tools tidy static generate-errdoc check-plugin check-test
 
-static: install-tools pre-build
+static: install-tools
 	@ echo "gofmt ..."
 	@ gofmt -s -l -d $(PACKAGE_DIRECTORIES) 2>&1 | awk '{ print } END { if (NR > 0) { exit 1 } }'
 	@ echo "golangci-lint ..."
 	@ golangci-lint run --verbose $(PACKAGE_DIRECTORIES) --allow-parallel-runners
-	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) static && cd $(ROOT_PATH) > /dev/null; done
+	@ echo "revive ..."
+	@ revive -formatter friendly -config revive.toml $(PACKAGES)
 
-# Because CI downloads the dashboard code and runs gofmt, we can't add this check into static now.
-fmt:
-	@ echo "gofmt ..."
-	@ gofmt -s -l -w -r 'interface{} -> any' -d $(PACKAGE_DIRECTORIES) 2>&1 | awk '{ print } END { if (NR > 0) { exit 1 } }'
+	@ for mod in $(SUBMODULES); do cd $$mod && $(MAKE) static && cd $(ROOT_PATH) > /dev/null; done
 
 tidy:
 	@ go mod tidy
@@ -206,7 +174,11 @@ check-plugin:
 	@echo "checking plugin..."
 	cd ./plugin/scheduler_example && $(MAKE) evictLeaderPlugin.so && rm evictLeaderPlugin.so
 
-.PHONY: check static tidy generate-errdoc check-plugin
+check-test:
+	@echo "checking test..."
+	./scripts/check-test.sh
+
+.PHONY: check static tidy generate-errdoc check-plugin check-test
 
 #### Test utils ####
 
@@ -224,13 +196,6 @@ failpoint-disable: install-tools
 .PHONY: failpoint-enable failpoint-disable
 
 #### Test ####
-
-ut: pd-ut
-	@$(FAILPOINT_ENABLE)
-	# only run unit tests
-	./bin/pd-ut run --ignore tests --race --junitfile ./junitfile
-	@$(CLEAN_UT_BINARY)
-	@$(FAILPOINT_DISABLE)
 
 PACKAGE_DIRECTORIES := $(subst $(PD_PKG)/,,$(PACKAGES))
 TEST_PKGS := $(filter $(shell find . -iname "*_test.go" -exec dirname {} \; | \
@@ -252,18 +217,12 @@ basic-test: install-tools
 	go test $(BASIC_TEST_PKGS) || { $(FAILPOINT_DISABLE); exit 1; }
 	@$(FAILPOINT_DISABLE)
 
-ci-test-job: install-tools dashboard-ui pd-ut
+ci-test-job: install-tools dashboard-ui
 	@$(FAILPOINT_ENABLE)
-	./scripts/ci-subtask.sh $(JOB_INDEX) || { $(FAILPOINT_DISABLE); exit 1; }
-	@$(FAILPOINT_DISABLE)
+	CGO_ENABLED=1 go test -timeout=15m -tags deadlock -race -covermode=atomic -coverprofile=covprofile -coverpkg=./... $(shell ./scripts/ci-subtask.sh $(JOB_COUNT) $(JOB_INDEX))
+	@ for mod in $(shell ./scripts/ci-subtask.sh $(JOB_COUNT) $(JOB_INDEX) 1); do cd $$mod && $(MAKE) ci-test-job && cd $(ROOT_PATH) > /dev/null && cat $$mod/covprofile >> covprofile; done	
 
 TSO_INTEGRATION_TEST_PKGS := $(PD_PKG)/tests/server/tso
-
-test-tso: install-tools
-	# testing TSO function & consistency...
-	@$(FAILPOINT_ENABLE)
-	CGO_ENABLED=1 go test -race -tags without_dashboard,tso_full_test,deadlock $(TSO_INTEGRATION_TEST_PKGS) || { $(FAILPOINT_DISABLE); exit 1; }
-	@$(FAILPOINT_DISABLE)
 
 test-tso-function: install-tools
 	# testing TSO function...
@@ -277,21 +236,14 @@ test-tso-consistency: install-tools
 	CGO_ENABLED=1 go test -race -tags without_dashboard,tso_consistency_test,deadlock $(TSO_INTEGRATION_TEST_PKGS) || { $(FAILPOINT_DISABLE); exit 1; }
 	@$(FAILPOINT_DISABLE)
 
-REAL_CLUSTER_TEST_PATH := $(ROOT_PATH)/tests/integrations/realcluster
-
-test-real-cluster:
-	@ rm -rf ~/.tiup/data/pd_real_cluster_test
-	# testing with the real cluster...
-	cd $(REAL_CLUSTER_TEST_PATH) && $(MAKE) check
-
-.PHONY: test basic-test test-with-cover test-tso test-tso-function test-tso-consistency test-real-cluster
+.PHONY: test basic-test test-with-cover test-tso-function test-tso-consistency
 
 #### Daily CI coverage analyze  ####
 
 TASK_COUNT=1
 TASK_ID=1
 
-# The command should be used in daily CI, it will split some tasks to run parallel.
+# The command should be used in daily CI，it will split some tasks to run parallel.
 # It should retain report.xml,coverage,coverage.xml and package.list to analyze.
 test-with-cover-parallel: install-tools dashboard-ui split
 	@$(FAILPOINT_ENABLE)
@@ -311,21 +263,16 @@ split:
 
 clean: failpoint-disable clean-test clean-build
 
-CLEAN_UT_BINARY := find . -name '*.test.bin'| xargs rm -f
-
 clean-test:
 	# Cleaning test tmp...
 	rm -rf /tmp/test_pd*
 	rm -rf /tmp/pd-tests*
 	rm -rf /tmp/test_etcd*
-	rm -f $(REAL_CLUSTER_TEST_PATH)/playground.log
 	go clean -testcache
-	@$(CLEAN_UT_BINARY)
 
 clean-build:
 	# Cleaning building files...
 	rm -rf .dashboard_download_cache/
-	rm -rf .dashboard_build_temp/
 	rm -rf $(BUILD_BIN_PATH)
 	rm -rf $(GO_TOOLS_BIN_PATH)
 

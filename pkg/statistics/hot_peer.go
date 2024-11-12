@@ -21,7 +21,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/movingaverage"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"go.uber.org/zap"
 )
@@ -35,13 +34,13 @@ type dimStat struct {
 
 func newDimStat(reportInterval time.Duration) *dimStat {
 	return &dimStat{
-		rolling:         movingaverage.NewTimeMedian(utils.DefaultAotSize, rollingWindowsSize, reportInterval),
+		rolling:         movingaverage.NewTimeMedian(DefaultAotSize, rollingWindowsSize, reportInterval),
 		lastIntervalSum: 0,
 		lastDelta:       0,
 	}
 }
 
-func (d *dimStat) add(delta float64, interval time.Duration) {
+func (d *dimStat) Add(delta float64, interval time.Duration) {
 	d.Lock()
 	defer d.Unlock()
 	d.lastIntervalSum += int(interval.Seconds())
@@ -74,13 +73,13 @@ func (d *dimStat) clearLastAverage() {
 	d.lastDelta = 0
 }
 
-func (d *dimStat) get() float64 {
+func (d *dimStat) Get() float64 {
 	d.RLock()
 	defer d.RUnlock()
 	return d.rolling.Get()
 }
 
-func (d *dimStat) clone() *dimStat {
+func (d *dimStat) Clone() *dimStat {
 	d.RLock()
 	defer d.RUnlock()
 	return &dimStat{
@@ -104,7 +103,7 @@ type HotPeerStat struct {
 	// stores contains the all peer's storeID in this region.
 	stores []uint64
 	// actionType is the action type of the region, add, update or remove.
-	actionType utils.ActionType
+	actionType ActionType
 	// isLeader is true means that the region has a leader on this store.
 	isLeader bool
 	// lastTransferLeaderTime is used to cool down frequent transfer leader.
@@ -122,8 +121,8 @@ func (stat *HotPeerStat) ID() uint64 {
 	return stat.RegionID
 }
 
-// Less compares two HotPeerStat. Implementing TopNItem.
-func (stat *HotPeerStat) Less(dim int, than utils.TopNItem) bool {
+// Less compares two HotPeerStat.Implementing TopNItem.
+func (stat *HotPeerStat) Less(dim int, than TopNItem) bool {
 	return stat.GetLoad(dim) < than.(*HotPeerStat).GetLoad(dim)
 }
 
@@ -145,7 +144,7 @@ func (stat *HotPeerStat) Log(str string) {
 }
 
 // IsNeedCoolDownTransferLeader use cooldown time after transfer leader to avoid unnecessary schedule
-func (stat *HotPeerStat) IsNeedCoolDownTransferLeader(minHotDegree int, rwTy utils.RWType) bool {
+func (stat *HotPeerStat) IsNeedCoolDownTransferLeader(minHotDegree int, rwTy RWType) bool {
 	return time.Since(stat.lastTransferLeaderTime).Seconds() < float64(minHotDegree*rwTy.ReportInterval())
 }
 
@@ -155,14 +154,14 @@ func (stat *HotPeerStat) IsLeader() bool {
 }
 
 // GetActionType returns the item action type.
-func (stat *HotPeerStat) GetActionType() utils.ActionType {
+func (stat *HotPeerStat) GetActionType() ActionType {
 	return stat.actionType
 }
 
 // GetLoad returns denoising load if possible.
 func (stat *HotPeerStat) GetLoad(dim int) float64 {
 	if stat.rollingLoads != nil {
-		return math.Round(stat.rollingLoads[dim].get())
+		return math.Round(stat.rollingLoads[dim].Get())
 	}
 	return math.Round(stat.Loads[dim])
 }
@@ -172,7 +171,7 @@ func (stat *HotPeerStat) GetLoads() []float64 {
 	if stat.rollingLoads != nil {
 		ret := make([]float64, len(stat.rollingLoads))
 		for dim := range ret {
-			ret[dim] = math.Round(stat.rollingLoads[dim].get())
+			ret[dim] = math.Round(stat.rollingLoads[dim].Get())
 		}
 		return ret
 	}
@@ -182,8 +181,8 @@ func (stat *HotPeerStat) GetLoads() []float64 {
 // Clone clones the HotPeerStat.
 func (stat *HotPeerStat) Clone() *HotPeerStat {
 	ret := *stat
-	ret.Loads = make([]float64, utils.DimLen)
-	for i := 0; i < utils.DimLen; i++ {
+	ret.Loads = make([]float64, DimLen)
+	for i := 0; i < DimLen; i++ {
 		ret.Loads[i] = stat.GetLoad(i) // replace with denoising loads
 	}
 	ret.rollingLoads = nil

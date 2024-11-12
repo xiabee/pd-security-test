@@ -20,7 +20,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,25 +36,22 @@ import (
 )
 
 var (
-	certPath        = strings.Join([]string{".", "cert"}, string(filepath.Separator))
-	certExpiredPath = strings.Join([]string{".", "cert-expired"}, string(filepath.Separator))
-	certScript      = strings.Join([]string{".", "cert_opt.sh"}, string(filepath.Separator))
-	testTLSInfo     = transport.TLSInfo{
-		KeyFile:       strings.Join([]string{".", "cert", "pd-server-key.pem"}, string(filepath.Separator)),
-		CertFile:      strings.Join([]string{".", "cert", "pd-server.pem"}, string(filepath.Separator)),
-		TrustedCAFile: strings.Join([]string{".", "cert", "ca.pem"}, string(filepath.Separator)),
+	testTLSInfo = transport.TLSInfo{
+		KeyFile:       "./cert/pd-server-key.pem",
+		CertFile:      "./cert/pd-server.pem",
+		TrustedCAFile: "./cert/ca.pem",
 	}
 
 	testClientTLSInfo = transport.TLSInfo{
-		KeyFile:       strings.Join([]string{".", "cert", "client-key.pem"}, string(filepath.Separator)),
-		CertFile:      strings.Join([]string{".", "cert", "client.pem"}, string(filepath.Separator)),
-		TrustedCAFile: strings.Join([]string{".", "cert", "ca.pem"}, string(filepath.Separator)),
+		KeyFile:       "./cert/client-key.pem",
+		CertFile:      "./cert/client.pem",
+		TrustedCAFile: "./cert/ca.pem",
 	}
 
 	testTLSInfoExpired = transport.TLSInfo{
-		KeyFile:       strings.Join([]string{".", "cert-expired", "pd-server-key.pem"}, string(filepath.Separator)),
-		CertFile:      strings.Join([]string{".", "cert-expired", "pd-server.pem"}, string(filepath.Separator)),
-		TrustedCAFile: strings.Join([]string{".", "cert-expired", "ca.pem"}, string(filepath.Separator)),
+		KeyFile:       "./cert-expired/pd-server-key.pem",
+		CertFile:      "./cert-expired/pd-server.pem",
+		TrustedCAFile: "./cert-expired/ca.pem",
 	}
 )
 
@@ -63,26 +59,6 @@ var (
 // when all certs are atomically replaced by directory renaming.
 // And expects server to reject client requests, and vice versa.
 func TestTLSReloadAtomicReplace(t *testing.T) {
-	// generate certs
-	for _, path := range []string{certPath, certExpiredPath} {
-		if err := os.Mkdir(path, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := exec.Command(certScript, "generate", path).Run(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	defer func() {
-		for _, path := range []string{certPath, certExpiredPath} {
-			if err := exec.Command(certScript, "cleanup", path).Run(); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.RemoveAll(path); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}()
-
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -120,18 +96,18 @@ func TestTLSReloadAtomicReplace(t *testing.T) {
 		err = os.Rename(certsDirExp, certsDir)
 		re.NoError(err)
 	}
-	testTLSReload(ctx, re, cloneFunc, replaceFunc, revertFunc)
+	testTLSReload(re, ctx, cloneFunc, replaceFunc, revertFunc)
 }
 
 func testTLSReload(
-	ctx context.Context,
 	re *require.Assertions,
+	ctx context.Context,
 	cloneFunc func() transport.TLSInfo,
 	replaceFunc func(),
 	revertFunc func()) {
 	tlsInfo := cloneFunc()
 	// 1. start cluster with valid certs
-	clus, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, _ string) {
+	clus, err := tests.NewTestCluster(ctx, 1, func(conf *config.Config, serverName string) {
 		conf.Security.TLSConfig = grpcutil.TLSConfig{
 			KeyPath:  tlsInfo.KeyFile,
 			CertPath: tlsInfo.CertFile,
@@ -178,8 +154,8 @@ func testTLSReload(
 				dcancel()
 				return
 			}
-			cli.Close()
 			dcancel()
+			cli.Close()
 		}
 	}()
 
@@ -212,13 +188,12 @@ func testTLSReload(
 	caData, certData, keyData := loadTLSContent(re,
 		testClientTLSInfo.TrustedCAFile, testClientTLSInfo.CertFile, testClientTLSInfo.KeyFile)
 	ctx1, cancel1 := context.WithTimeout(ctx, 2*time.Second)
-	cli, err = pd.NewClientWithContext(ctx1, endpoints, pd.SecurityOption{
+	_, err = pd.NewClientWithContext(ctx1, endpoints, pd.SecurityOption{
 		SSLCABytes:   caData,
 		SSLCertBytes: certData,
 		SSLKEYBytes:  keyData,
 	}, pd.WithGRPCDialOptions(grpc.WithBlock()))
 	re.NoError(err)
-	defer cli.Close()
 	cancel1()
 }
 

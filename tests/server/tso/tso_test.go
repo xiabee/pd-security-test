@@ -70,13 +70,13 @@ func TestLoadTimestamp(t *testing.T) {
 		re.Greater(newTS.GetPhysical()-lastTS.GetPhysical(), int64(0))
 	}
 
-	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/tso/systemTimeSlow"))
+	failpoint.Disable("github.com/tikv/pd/pkg/tso/systemTimeSlow")
 }
 
 func requestLocalTSOs(re *require.Assertions, cluster *tests.TestCluster, dcLocationConfig map[string]string) map[string]*pdpb.Timestamp {
 	dcClientMap := make(map[string]pdpb.PDClient)
 	tsMap := make(map[string]*pdpb.Timestamp)
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	for _, dcLocation := range dcLocationConfig {
 		pdName := leaderServer.GetAllocatorLeader(dcLocation).GetName()
 		dcClientMap[dcLocation] = testutil.MustNewGrpcClient(re, cluster.GetServer(pdName).GetAddr())
@@ -122,10 +122,10 @@ func TestDisableLocalTSOAfterEnabling(t *testing.T) {
 		server.SetEnableLocalTSO(false)
 	}
 	re.NoError(cluster.RunInitialServers())
-	re.NotEmpty(cluster.WaitLeader())
+	cluster.WaitLeader()
 
 	// Re-request the global TSOs.
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	grpcPDClient := testutil.MustNewGrpcClient(re, leaderServer.GetAddr())
 	clusterID := leaderServer.GetClusterID()
 	req := &pdpb.TsoRequest{

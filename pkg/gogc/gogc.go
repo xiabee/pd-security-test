@@ -19,6 +19,9 @@ import (
 	"runtime/debug"
 	"strconv"
 	"sync/atomic"
+
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 )
 
 var gogcValue int64
@@ -36,6 +39,9 @@ func SetGOGC(val int) int {
 		val = 100
 	}
 	result := debug.SetGCPercent(val)
+	if result != val {
+		log.Info("debug.SetGCPercent", zap.Int("val", val), zap.Int("result", result))
+	}
 	atomic.StoreInt64(&gogcValue, int64(val))
 	return result
 }

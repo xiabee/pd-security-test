@@ -23,17 +23,14 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/errs"
-	sche "github.com/tikv/pd/pkg/schedule/core"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/filter"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
-	types "github.com/tikv/pd/pkg/schedule/type"
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/statistics"
-	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
@@ -44,19 +41,27 @@ import (
 const (
 	// GrantHotRegionName is grant hot region scheduler name.
 	GrantHotRegionName = "grant-hot-region-scheduler"
+	// GrantHotRegionType is grant hot region scheduler type.
+	GrantHotRegionType = "grant-hot-region"
+)
+
+var (
+	// WithLabelValues is a heavy operation, define variable to avoid call it every time.
+	grantHotRegionCounter     = schedulerCounter.WithLabelValues(GrantHotRegionName, "schedule")
+	grantHotRegionSkipCounter = schedulerCounter.WithLabelValues(GrantHotRegionName, "skip")
 )
 
 type grantHotRegionSchedulerConfig struct {
-	syncutil.RWMutex
+	mu            syncutil.RWMutex
 	storage       endpoint.ConfigStorage
-	cluster       *core.BasicCluster
+	cluster       schedule.Cluster
 	StoreIDs      []uint64 `json:"store-id"`
 	StoreLeaderID uint64   `json:"store-leader-id"`
 }
 
 func (conf *grantHotRegionSchedulerConfig) setStore(leaderID uint64, peers []uint64) bool {
-	conf.Lock()
-	defer conf.Unlock()
+	conf.mu.Lock()
+	defer conf.mu.Unlock()
 	ret := slice.AnyOf(peers, func(i int) bool {
 		return leaderID == peers[i]
 	})
@@ -67,21 +72,21 @@ func (conf *grantHotRegionSchedulerConfig) setStore(leaderID uint64, peers []uin
 	return ret
 }
 
-func (conf *grantHotRegionSchedulerConfig) getStoreLeaderID() uint64 {
-	conf.RLock()
-	defer conf.RUnlock()
+func (conf *grantHotRegionSchedulerConfig) GetStoreLeaderID() uint64 {
+	conf.mu.RLock()
+	defer conf.mu.RUnlock()
 	return conf.StoreLeaderID
 }
 
-func (conf *grantHotRegionSchedulerConfig) setStoreLeaderID(id uint64) {
-	conf.Lock()
-	defer conf.Unlock()
+func (conf *grantHotRegionSchedulerConfig) SetStoreLeaderID(id uint64) {
+	conf.mu.Lock()
+	defer conf.mu.Unlock()
 	conf.StoreLeaderID = id
 }
 
-func (conf *grantHotRegionSchedulerConfig) clone() *grantHotRegionSchedulerConfig {
-	conf.RLock()
-	defer conf.RUnlock()
+func (conf *grantHotRegionSchedulerConfig) Clone() *grantHotRegionSchedulerConfig {
+	conf.mu.RLock()
+	defer conf.mu.RUnlock()
 	newStoreIDs := make([]uint64, len(conf.StoreIDs))
 	copy(newStoreIDs, conf.StoreIDs)
 	return &grantHotRegionSchedulerConfig{
@@ -90,30 +95,27 @@ func (conf *grantHotRegionSchedulerConfig) clone() *grantHotRegionSchedulerConfi
 	}
 }
 
-func (conf *grantHotRegionSchedulerConfig) persist() error {
-	conf.RLock()
-	defer conf.RUnlock()
-	data, err := EncodeConfig(conf)
+func (conf *grantHotRegionSchedulerConfig) Persist() error {
+	name := conf.getSchedulerName()
+	conf.mu.RLock()
+	defer conf.mu.RUnlock()
+	data, err := schedule.EncodeConfig(conf)
 	if err != nil {
 		return err
 	}
-	return conf.storage.SaveSchedulerConfig(types.GrantHotRegionScheduler.String(), data)
+	return conf.storage.SaveScheduleConfig(name, data)
+}
+
+func (conf *grantHotRegionSchedulerConfig) getSchedulerName() string {
+	return GrantHotRegionName
 }
 
 func (conf *grantHotRegionSchedulerConfig) has(storeID uint64) bool {
-	conf.RLock()
-	defer conf.RUnlock()
+	conf.mu.RLock()
+	defer conf.mu.RUnlock()
 	return slice.AnyOf(conf.StoreIDs, func(i int) bool {
 		return storeID == conf.StoreIDs[i]
 	})
-}
-
-func (conf *grantHotRegionSchedulerConfig) getStoreIDs() []uint64 {
-	conf.RLock()
-	defer conf.RUnlock()
-	storeIDs := make([]uint64, len(conf.StoreIDs))
-	copy(storeIDs, conf.StoreIDs)
-	return storeIDs
 }
 
 // grantLeaderScheduler transfers all hot peers to peers  and transfer leader to the fixed store
@@ -124,10 +126,8 @@ type grantHotRegionScheduler struct {
 }
 
 // newGrantHotRegionScheduler creates an admin scheduler that transfers hot region peer to fixed store and hot region leader to one store.
-func newGrantHotRegionScheduler(opController *operator.Controller, conf *grantHotRegionSchedulerConfig) *grantHotRegionScheduler {
-	base := newBaseHotScheduler(opController,
-		statistics.DefaultHistorySampleDuration, statistics.DefaultHistorySampleInterval)
-	base.tp = types.GrantHotRegionScheduler
+func newGrantHotRegionScheduler(opController *schedule.OperatorController, conf *grantHotRegionSchedulerConfig) *grantHotRegionScheduler {
+	base := newBaseHotScheduler(opController)
 	handler := newGrantHotRegionHandler(conf)
 	ret := &grantHotRegionScheduler{
 		baseHotScheduler: base,
@@ -137,42 +137,28 @@ func newGrantHotRegionScheduler(opController *operator.Controller, conf *grantHo
 	return ret
 }
 
-// EncodeConfig implements the Scheduler interface.
-func (s *grantHotRegionScheduler) EncodeConfig() ([]byte, error) {
-	return EncodeConfig(s.conf)
+func (s *grantHotRegionScheduler) GetName() string {
+	return GrantHotRegionName
 }
 
-// ReloadConfig implements the Scheduler interface.
-func (s *grantHotRegionScheduler) ReloadConfig() error {
-	s.conf.Lock()
-	defer s.conf.Unlock()
-	cfgData, err := s.conf.storage.LoadSchedulerConfig(s.GetName())
-	if err != nil {
-		return err
-	}
-	if len(cfgData) == 0 {
-		return nil
-	}
-	newCfg := &grantHotRegionSchedulerConfig{}
-	if err := DecodeConfig([]byte(cfgData), newCfg); err != nil {
-		return err
-	}
-	s.conf.StoreIDs = newCfg.StoreIDs
-	s.conf.StoreLeaderID = newCfg.StoreLeaderID
-	return nil
+func (s *grantHotRegionScheduler) GetType() string {
+	return GrantHotRegionType
+}
+
+func (s *grantHotRegionScheduler) EncodeConfig() ([]byte, error) {
+	return schedule.EncodeConfig(s.conf)
 }
 
 // IsScheduleAllowed returns whether the scheduler is allowed to schedule.
 // TODO it should check if there is any scheduler such as evict or hot region scheduler
-func (s *grantHotRegionScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
-	conf := cluster.GetSchedulerConfig()
-	regionAllowed := s.OpController.OperatorCount(operator.OpRegion) < conf.GetRegionScheduleLimit()
-	leaderAllowed := s.OpController.OperatorCount(operator.OpLeader) < conf.GetLeaderScheduleLimit()
+func (s *grantHotRegionScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
+	regionAllowed := s.OpController.OperatorCount(operator.OpRegion) < cluster.GetOpts().GetRegionScheduleLimit()
+	leaderAllowed := s.OpController.OperatorCount(operator.OpLeader) < cluster.GetOpts().GetLeaderScheduleLimit()
 	if !regionAllowed {
-		operator.IncOperatorLimitCounter(s.GetType(), operator.OpRegion)
+		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpRegion.String()).Inc()
 	}
 	if !leaderAllowed {
-		operator.IncOperatorLimitCounter(s.GetType(), operator.OpLeader)
+		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpLeader.String()).Inc()
 	}
 	return regionAllowed && leaderAllowed
 }
@@ -186,46 +172,46 @@ type grantHotRegionHandler struct {
 	config *grantHotRegionSchedulerConfig
 }
 
-func (handler *grantHotRegionHandler) updateConfig(w http.ResponseWriter, r *http.Request) {
-	var input map[string]any
+func (handler *grantHotRegionHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
+	var input map[string]interface{}
 	if err := apiutil.ReadJSONRespondError(handler.rd, w, r.Body, &input); err != nil {
 		return
 	}
 	ids, ok := input["store-id"].(string)
 	if !ok {
-		handler.rd.JSON(w, http.StatusBadRequest, errs.ErrSchedulerConfig)
+		_ = handler.rd.JSON(w, http.StatusBadRequest, errs.ErrSchedulerConfig)
 		return
 	}
 	storeIDs := make([]uint64, 0)
 	for _, v := range strings.Split(ids, ",") {
 		id, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
-			handler.rd.JSON(w, http.StatusBadRequest, errs.ErrBytesToUint64)
+			_ = handler.rd.JSON(w, http.StatusBadRequest, errs.ErrBytesToUint64)
 			return
 		}
 		storeIDs = append(storeIDs, id)
 	}
 	leaderID, err := strconv.ParseUint(input["store-leader-id"].(string), 10, 64)
 	if err != nil {
-		handler.rd.JSON(w, http.StatusBadRequest, errs.ErrBytesToUint64)
+		_ = handler.rd.JSON(w, http.StatusBadRequest, errs.ErrBytesToUint64)
 		return
 	}
 	if !handler.config.setStore(leaderID, storeIDs) {
-		handler.rd.JSON(w, http.StatusBadRequest, errs.ErrSchedulerConfig)
+		_ = handler.rd.JSON(w, http.StatusBadRequest, errs.ErrSchedulerConfig)
 		return
 	}
 
-	if err = handler.config.persist(); err != nil {
-		handler.config.setStoreLeaderID(0)
-		handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
+	if err = handler.config.Persist(); err != nil {
+		handler.config.SetStoreLeaderID(0)
+		_ = handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	handler.rd.JSON(w, http.StatusOK, nil)
+	_ = handler.rd.JSON(w, http.StatusOK, nil)
 }
 
-func (handler *grantHotRegionHandler) listConfig(w http.ResponseWriter, _ *http.Request) {
-	conf := handler.config.clone()
-	handler.rd.JSON(w, http.StatusOK, conf)
+func (handler *grantHotRegionHandler) ListConfig(w http.ResponseWriter, _ *http.Request) {
+	conf := handler.config.Clone()
+	_ = handler.rd.JSON(w, http.StatusOK, conf)
 }
 
 func newGrantHotRegionHandler(config *grantHotRegionSchedulerConfig) http.Handler {
@@ -234,21 +220,20 @@ func newGrantHotRegionHandler(config *grantHotRegionSchedulerConfig) http.Handle
 		rd:     render.New(render.Options{IndentJSON: true}),
 	}
 	router := mux.NewRouter()
-	router.HandleFunc("/config", h.updateConfig).Methods(http.MethodPost)
-	router.HandleFunc("/list", h.listConfig).Methods(http.MethodGet)
+	router.HandleFunc("/config", h.UpdateConfig).Methods(http.MethodPost)
+	router.HandleFunc("/list", h.ListConfig).Methods(http.MethodGet)
 	return router
 }
 
-// Schedule implements the Scheduler interface.
-func (s *grantHotRegionScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) ([]*operator.Operator, []plan.Plan) {
+func (s *grantHotRegionScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	grantHotRegionCounter.Inc()
-	typ := s.randomType()
-	s.prepareForBalance(typ, cluster)
-	return s.dispatch(typ, cluster), nil
+	rw := s.randomRWType()
+	s.prepareForBalance(rw, cluster)
+	return s.dispatch(rw, cluster), nil
 }
 
-func (s *grantHotRegionScheduler) dispatch(typ resourceType, cluster sche.SchedulerCluster) []*operator.Operator {
-	stLoadInfos := s.stLoadInfos[typ]
+func (s *grantHotRegionScheduler) dispatch(typ statistics.RWType, cluster schedule.Cluster) []*operator.Operator {
+	stLoadInfos := s.stLoadInfos[buildResourceType(typ, constant.RegionKind)]
 	infos := make([]*statistics.StoreLoadDetail, len(stLoadInfos))
 	index := 0
 	for _, info := range stLoadInfos {
@@ -256,12 +241,12 @@ func (s *grantHotRegionScheduler) dispatch(typ resourceType, cluster sche.Schedu
 		index++
 	}
 	sort.Slice(infos, func(i, j int) bool {
-		return infos[i].LoadPred.Current.Loads[utils.ByteDim] > infos[j].LoadPred.Current.Loads[utils.ByteDim]
+		return infos[i].LoadPred.Current.Loads[statistics.ByteDim] > infos[j].LoadPred.Current.Loads[statistics.ByteDim]
 	})
 	return s.randomSchedule(cluster, infos)
 }
 
-func (s *grantHotRegionScheduler) randomSchedule(cluster sche.SchedulerCluster, srcStores []*statistics.StoreLoadDetail) (ops []*operator.Operator) {
+func (s *grantHotRegionScheduler) randomSchedule(cluster schedule.Cluster, srcStores []*statistics.StoreLoadDetail) (ops []*operator.Operator) {
 	isLeader := s.r.Int()%2 == 1
 	for _, srcStore := range srcStores {
 		srcStoreID := srcStore.GetID()
@@ -270,7 +255,7 @@ func (s *grantHotRegionScheduler) randomSchedule(cluster sche.SchedulerCluster, 
 				continue
 			}
 		} else {
-			if !s.conf.has(srcStoreID) || srcStoreID == s.conf.getStoreLeaderID() {
+			if !s.conf.has(srcStoreID) || srcStoreID == s.conf.GetStoreLeaderID() {
 				continue
 			}
 		}
@@ -292,7 +277,7 @@ func (s *grantHotRegionScheduler) randomSchedule(cluster sche.SchedulerCluster, 
 	return nil
 }
 
-func (s *grantHotRegionScheduler) transfer(cluster sche.SchedulerCluster, regionID uint64, srcStoreID uint64, isLeader bool) (op *operator.Operator, err error) {
+func (s *grantHotRegionScheduler) transfer(cluster schedule.Cluster, regionID uint64, srcStoreID uint64, isLeader bool) (op *operator.Operator, err error) {
 	srcRegion := cluster.GetRegion(regionID)
 	if srcRegion == nil || len(srcRegion.GetDownPeers()) != 0 || len(srcRegion.GetPendingPeers()) != 0 {
 		return nil, errs.ErrRegionRuleNotFound
@@ -303,23 +288,22 @@ func (s *grantHotRegionScheduler) transfer(cluster sche.SchedulerCluster, region
 		return nil, errs.ErrStoreNotFound
 	}
 	filters := []filter.Filter{
-		filter.NewPlacementSafeguard(s.GetName(), cluster.GetSchedulerConfig(), cluster.GetBasicCluster(), cluster.GetRuleManager(), srcRegion, srcStore, nil),
+		filter.NewPlacementSafeguard(s.GetName(), cluster.GetOpts(), cluster.GetBasicCluster(), cluster.GetRuleManager(), srcRegion, srcStore, nil),
 	}
 
-	storeIDs := s.conf.getStoreIDs()
-	destStoreIDs := make([]uint64, 0, len(storeIDs))
+	destStoreIDs := make([]uint64, 0, len(s.conf.StoreIDs))
 	var candidate []uint64
 	if isLeader {
 		filters = append(filters, &filter.StoreStateFilter{ActionScope: s.GetName(), TransferLeader: true, OperatorLevel: constant.High})
-		candidate = []uint64{s.conf.getStoreLeaderID()}
+		candidate = []uint64{s.conf.GetStoreLeaderID()}
 	} else {
 		filters = append(filters, &filter.StoreStateFilter{ActionScope: s.GetName(), MoveRegion: true, OperatorLevel: constant.High},
 			filter.NewExcludedFilter(s.GetName(), srcRegion.GetStoreIDs(), srcRegion.GetStoreIDs()))
-		candidate = storeIDs
+		candidate = s.conf.StoreIDs
 	}
 	for _, storeID := range candidate {
 		store := cluster.GetStore(storeID)
-		if !filter.Target(cluster.GetSchedulerConfig(), store, filters) {
+		if !filter.Target(cluster.GetOpts(), store, filters) {
 			continue
 		}
 		destStoreIDs = append(destStoreIDs, storeID)
@@ -336,9 +320,9 @@ func (s *grantHotRegionScheduler) transfer(cluster sche.SchedulerCluster, region
 	dstStore := &metapb.Peer{StoreId: destStoreIDs[i]}
 
 	if isLeader {
-		op, err = operator.CreateTransferLeaderOperator(s.GetName()+"-leader", cluster, srcRegion, dstStore.StoreId, []uint64{}, operator.OpLeader)
+		op, err = operator.CreateTransferLeaderOperator(GrantHotRegionType+"-leader", cluster, srcRegion, srcRegion.GetLeader().GetStoreId(), dstStore.StoreId, []uint64{}, operator.OpLeader)
 	} else {
-		op, err = operator.CreateMovePeerOperator(s.GetName()+"-move", cluster, srcRegion, operator.OpRegion|operator.OpLeader, srcStore.GetID(), dstStore)
+		op, err = operator.CreateMovePeerOperator(GrantHotRegionType+"-move", cluster, srcRegion, operator.OpRegion|operator.OpLeader, srcStore.GetID(), dstStore)
 	}
 	op.SetPriorityLevel(constant.High)
 	return

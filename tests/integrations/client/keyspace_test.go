@@ -16,29 +16,26 @@ package client_test
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/keyspace"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/server"
 )
 
 const (
-	testConfig1       = "config_entry_1"
-	testConfig2       = "config_entry_2"
-	testKeyspaceCount = 10
+	testConfig1 = "config_entry_1"
+	testConfig2 = "config_entry_2"
 )
 
-func mustMakeTestKeyspaces(re *require.Assertions, server *server.Server, start int) []*keyspacepb.KeyspaceMeta {
+func mustMakeTestKeyspaces(re *require.Assertions, server *server.Server, start, count int) []*keyspacepb.KeyspaceMeta {
 	now := time.Now().Unix()
 	var err error
-	keyspaces := make([]*keyspacepb.KeyspaceMeta, testKeyspaceCount)
+	keyspaces := make([]*keyspacepb.KeyspaceMeta, count)
 	manager := server.GetKeyspaceManager()
-	for i := 0; i < testKeyspaceCount; i++ {
+	for i := 0; i < count; i++ {
 		keyspaces[i], err = manager.CreateKeyspace(&keyspace.CreateKeyspaceRequest{
 			Name: fmt.Sprintf("test_keyspace_%d", start+i),
 			Config: map[string]string{
@@ -46,7 +43,6 @@ func mustMakeTestKeyspaces(re *require.Assertions, server *server.Server, start 
 				testConfig2: "200",
 			},
 			CreateTime: now,
-			IsPreAlloc: true, // skip wait region split
 		})
 		re.NoError(err)
 	}
@@ -55,7 +51,7 @@ func mustMakeTestKeyspaces(re *require.Assertions, server *server.Server, start 
 
 func (suite *clientTestSuite) TestLoadKeyspace() {
 	re := suite.Require()
-	metas := mustMakeTestKeyspaces(re, suite.srv, 0)
+	metas := mustMakeTestKeyspaces(re, suite.srv, 0, 10)
 	for _, expected := range metas {
 		loaded, err := suite.client.LoadKeyspace(suite.ctx, expected.GetName())
 		re.NoError(err)
@@ -65,37 +61,60 @@ func (suite *clientTestSuite) TestLoadKeyspace() {
 	_, err := suite.client.LoadKeyspace(suite.ctx, "non-existing keyspace")
 	re.Error(err)
 	// Loading default keyspace should be successful.
-	keyspaceDefault, err := suite.client.LoadKeyspace(suite.ctx, constant.DefaultKeyspaceName)
+	keyspaceDefault, err := suite.client.LoadKeyspace(suite.ctx, keyspace.DefaultKeyspaceName)
 	re.NoError(err)
-	re.Equal(constant.DefaultKeyspaceID, keyspaceDefault.GetId())
-	re.Equal(constant.DefaultKeyspaceName, keyspaceDefault.GetName())
+	re.Equal(keyspace.DefaultKeyspaceID, keyspaceDefault.GetId())
+	re.Equal(keyspace.DefaultKeyspaceName, keyspaceDefault.GetName())
 }
 
-func (suite *clientTestSuite) TestGetAllKeyspaces() {
+func (suite *clientTestSuite) TestWatchKeyspaces() {
 	re := suite.Require()
-	metas := mustMakeTestKeyspaces(re, suite.srv, 20)
-	for _, expected := range metas {
-		loaded, err := suite.client.LoadKeyspace(suite.ctx, expected.GetName())
-		re.NoError(err)
-		re.Equal(expected, loaded)
-	}
-	// Get all keyspaces.
-	resKeyspaces, err := suite.client.GetAllKeyspaces(suite.ctx, 1, math.MaxUint32)
+	initialKeyspaces := mustMakeTestKeyspaces(re, suite.srv, 10, 10)
+	watchChan, err := suite.client.WatchKeyspaces(suite.ctx)
 	re.NoError(err)
-	re.Equal(len(metas), len(resKeyspaces))
-	// Check expected keyspaces all in resKeyspaces.
-	for _, expected := range metas {
-		var isExists bool
-		for _, resKeyspace := range resKeyspaces {
-			if expected.GetName() == resKeyspace.GetName() {
-				isExists = true
-				continue
-			}
-		}
-		if !isExists {
-			re.Fail("not exists keyspace")
-		}
+	// First batch of watchChan message should contain all existing keyspaces.
+	initialLoaded := <-watchChan
+	for i := range initialKeyspaces {
+		re.Contains(initialLoaded, initialKeyspaces[i])
 	}
+	// Each additional message contains extra put events.
+	additionalKeyspaces := mustMakeTestKeyspaces(re, suite.srv, 30, 10)
+	re.NoError(err)
+	// Checks that all additional keyspaces are captured by watch channel.
+	for i := 0; i < 10; {
+		loadedKeyspaces := <-watchChan
+		re.NotEmpty(loadedKeyspaces)
+		for j := range loadedKeyspaces {
+			re.Equal(additionalKeyspaces[i+j], loadedKeyspaces[j])
+		}
+		i += len(loadedKeyspaces)
+	}
+	// Updates to state should also be captured.
+	expected, err := suite.srv.GetKeyspaceManager().UpdateKeyspaceState(initialKeyspaces[0].Name, keyspacepb.KeyspaceState_DISABLED, time.Now().Unix())
+	re.NoError(err)
+	loaded := <-watchChan
+	re.Equal([]*keyspacepb.KeyspaceMeta{expected}, loaded)
+	// Updates to config should also be captured.
+	expected, err = suite.srv.GetKeyspaceManager().UpdateKeyspaceConfig(initialKeyspaces[0].Name, []*keyspace.Mutation{
+		{
+			Op:  keyspace.OpDel,
+			Key: testConfig1,
+		},
+	})
+	re.NoError(err)
+	loaded = <-watchChan
+	re.Equal([]*keyspacepb.KeyspaceMeta{expected}, loaded)
+	// Updates to default keyspace's config should also be captured.
+	expected, err = suite.srv.GetKeyspaceManager().UpdateKeyspaceConfig(keyspace.DefaultKeyspaceName, []*keyspace.Mutation{
+		{
+			Op:    keyspace.OpPut,
+			Key:   "config",
+			Value: "value",
+		},
+	})
+	re.NoError(err)
+	loaded = <-watchChan
+	re.Equal([]*keyspacepb.KeyspaceMeta{expected}, loaded)
 }
 
 func mustCreateKeyspaceAtState(re *require.Assertions, server *server.Server, index int, state keyspacepb.KeyspaceState) *keyspacepb.KeyspaceMeta {
@@ -103,8 +122,7 @@ func mustCreateKeyspaceAtState(re *require.Assertions, server *server.Server, in
 	meta, err := manager.CreateKeyspace(&keyspace.CreateKeyspaceRequest{
 		Name:       fmt.Sprintf("test_keyspace_%d", index),
 		Config:     nil,
-		CreateTime: 0,    // Use 0 to indicate unchanged keyspace.
-		IsPreAlloc: true, // skip wait region split
+		CreateTime: 0, // Use 0 to indicate unchanged keyspace.
 	})
 	re.NoError(err)
 	switch state {

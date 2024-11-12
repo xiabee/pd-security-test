@@ -55,7 +55,7 @@ func NewCheckPeerTask(buckets *metapb.Buckets) flowBucketsItemTask {
 	}
 }
 
-func (*checkBucketsTask) taskType() flowItemTaskKind {
+func (t *checkBucketsTask) taskType() flowItemTaskKind {
 	return checkBucketsTaskType
 }
 
@@ -66,25 +66,25 @@ func (t *checkBucketsTask) runTask(cache *HotBucketCache) {
 
 type collectBucketStatsTask struct {
 	minDegree int
-	regionIDs []uint64
+	regions   []uint64
 	ret       chan map[uint64][]*BucketStat // RegionID ==>Buckets
 }
 
 // NewCollectBucketStatsTask creates task to collect bucket stats.
-func NewCollectBucketStatsTask(minDegree int, regionIDs ...uint64) *collectBucketStatsTask {
+func NewCollectBucketStatsTask(minDegree int, regions ...uint64) *collectBucketStatsTask {
 	return &collectBucketStatsTask{
 		minDegree: minDegree,
-		regionIDs: regionIDs,
+		regions:   regions,
 		ret:       make(chan map[uint64][]*BucketStat, 1),
 	}
 }
 
-func (*collectBucketStatsTask) taskType() flowItemTaskKind {
+func (t *collectBucketStatsTask) taskType() flowItemTaskKind {
 	return collectBucketStatsTaskType
 }
 
 func (t *collectBucketStatsTask) runTask(cache *HotBucketCache) {
-	t.ret <- cache.GetHotBucketStats(t.minDegree, t.regionIDs)
+	t.ret <- cache.GetHotBucketStats(t.minDegree, t.regions)
 }
 
 // WaitRet returns the result of the task.

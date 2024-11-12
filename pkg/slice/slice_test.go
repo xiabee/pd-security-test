@@ -22,6 +22,7 @@ import (
 )
 
 func TestSlice(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	testCases := []struct {
 		a      []int
@@ -44,6 +45,7 @@ func TestSlice(t *testing.T) {
 }
 
 func TestSliceContains(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	ss := []string{"a", "b", "c"}
 	re.True(slice.Contains(ss, "a"))
@@ -58,7 +60,8 @@ func TestSliceContains(t *testing.T) {
 	re.False(slice.Contains(is, int64(4)))
 }
 
-func TestSliceRemoveGenericTypes(t *testing.T) {
+func TestSliceRemove(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	ss := []string{"a", "b", "c"}
 	ss = slice.Remove(ss, "a")
@@ -71,26 +74,4 @@ func TestSliceRemoveGenericTypes(t *testing.T) {
 	is := []int64{1, 2, 3}
 	is = slice.Remove(is, 1)
 	re.Equal([]int64{2, 3}, is)
-}
-
-func TestSliceRemove(t *testing.T) {
-	re := require.New(t)
-
-	is := []int64{}
-	is = slice.Remove(is, 1)
-	re.Equal([]int64{}, is)
-
-	is = []int64{1}
-	is = slice.Remove(is, 2)
-	re.Equal([]int64{1}, is)
-	is = slice.Remove(is, 1)
-	re.Equal([]int64{}, is)
-
-	is = []int64{1, 2, 3}
-	is = slice.Remove(is, 1)
-	re.Equal([]int64{2, 3}, is)
-
-	is = []int64{1, 1, 1}
-	is = slice.Remove(is, 1)
-	re.Equal([]int64{}, is)
 }

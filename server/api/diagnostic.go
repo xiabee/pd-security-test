@@ -18,27 +18,32 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/cluster"
 	"github.com/unrolled/render"
 )
 
 type diagnosticHandler struct {
-	handler *server.Handler
-	svr     *server.Server
-	rd      *render.Render
+	svr *server.Server
+	rd  *render.Render
 }
 
 func newDiagnosticHandler(svr *server.Server, rd *render.Render) *diagnosticHandler {
 	return &diagnosticHandler{
-		handler: svr.GetHandler(),
-		svr:     svr,
-		rd:      rd,
+		svr: svr,
+		rd:  rd,
 	}
 }
 
-func (h *diagnosticHandler) getDiagnosticResult(w http.ResponseWriter, r *http.Request) {
+func (h *diagnosticHandler) GetDiagnosticResult(w http.ResponseWriter, r *http.Request) {
 	name := mux.Vars(r)["name"]
-	result, err := h.handler.GetDiagnosticResult(name)
+	if _, ok := cluster.DiagnosableSummaryFunc[name]; !ok {
+		h.rd.JSON(w, http.StatusBadRequest, errs.ErrSchedulerUndiagnosable.FastGenByArgs(name).Error())
+		return
+	}
+	rc := getCluster(r)
+	result, err := rc.GetCoordinator().GetDiagnosticResult(name)
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
 		return

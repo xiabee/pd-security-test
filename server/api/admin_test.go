@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -27,10 +26,10 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/suite"
 	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/replication"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	tu "github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/server/replication"
 )
 
 type adminTestSuite struct {
@@ -60,7 +59,6 @@ func (suite *adminTestSuite) TearDownSuite() {
 }
 
 func (suite *adminTestSuite) TestDropRegion() {
-	re := suite.Require()
 	cluster := suite.svr.GetRaftCluster()
 
 	// Update region's epoch to (100, 100).
@@ -74,7 +72,7 @@ func (suite *adminTestSuite) TestDropRegion() {
 		},
 	}))
 	err := cluster.HandleRegionHeartbeat(region)
-	re.NoError(err)
+	suite.NoError(err)
 
 	// Region epoch cannot decrease.
 	region = region.Clone(
@@ -82,26 +80,25 @@ func (suite *adminTestSuite) TestDropRegion() {
 		core.SetRegionVersion(50),
 	)
 	err = cluster.HandleRegionHeartbeat(region)
-	re.Error(err)
+	suite.Error(err)
 
 	// After drop region from cache, lower version is accepted.
 	url := fmt.Sprintf("%s/admin/cache/region/%d", suite.urlPrefix, region.GetID())
-	req, err := http.NewRequest(http.MethodDelete, url, http.NoBody)
-	re.NoError(err)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	suite.NoError(err)
 	res, err := testDialClient.Do(req)
-	re.NoError(err)
-	re.Equal(http.StatusOK, res.StatusCode)
+	suite.NoError(err)
+	suite.Equal(http.StatusOK, res.StatusCode)
 	res.Body.Close()
 	err = cluster.HandleRegionHeartbeat(region)
-	re.NoError(err)
+	suite.NoError(err)
 
 	region = cluster.GetRegionByKey([]byte("foo"))
-	re.Equal(uint64(50), region.GetRegionEpoch().ConfVer)
-	re.Equal(uint64(50), region.GetRegionEpoch().Version)
+	suite.Equal(uint64(50), region.GetRegionEpoch().ConfVer)
+	suite.Equal(uint64(50), region.GetRegionEpoch().Version)
 }
 
 func (suite *adminTestSuite) TestDropRegions() {
-	re := suite.Require()
 	cluster := suite.svr.GetRaftCluster()
 
 	n := uint64(10000)
@@ -126,7 +123,7 @@ func (suite *adminTestSuite) TestDropRegions() {
 		regions = append(regions, region)
 
 		err := cluster.HandleRegionHeartbeat(region)
-		re.NoError(err)
+		suite.NoError(err)
 	}
 
 	// Region epoch cannot decrease.
@@ -137,201 +134,188 @@ func (suite *adminTestSuite) TestDropRegions() {
 		)
 		regions[i] = region
 		err := cluster.HandleRegionHeartbeat(region)
-		re.Error(err)
+		suite.Error(err)
 	}
 
 	for i := uint64(0); i < n; i++ {
 		region := cluster.GetRegionByKey([]byte(fmt.Sprintf("%d", i)))
 
-		re.Equal(uint64(100), region.GetRegionEpoch().ConfVer)
-		re.Equal(uint64(100), region.GetRegionEpoch().Version)
+		suite.Equal(uint64(100), region.GetRegionEpoch().ConfVer)
+		suite.Equal(uint64(100), region.GetRegionEpoch().Version)
 	}
 
 	// After drop all regions from cache, lower version is accepted.
 	url := fmt.Sprintf("%s/admin/cache/regions", suite.urlPrefix)
-	req, err := http.NewRequest(http.MethodDelete, url, http.NoBody)
-	re.NoError(err)
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	suite.NoError(err)
 	res, err := testDialClient.Do(req)
-	re.NoError(err)
-	re.Equal(http.StatusOK, res.StatusCode)
+	suite.NoError(err)
+	suite.Equal(http.StatusOK, res.StatusCode)
 	res.Body.Close()
 
 	for _, region := range regions {
 		err := cluster.HandleRegionHeartbeat(region)
-		re.NoError(err)
+		suite.NoError(err)
 	}
 
 	for i := uint64(0); i < n; i++ {
 		region := cluster.GetRegionByKey([]byte(fmt.Sprintf("%d", i)))
 
-		re.Equal(uint64(50), region.GetRegionEpoch().ConfVer)
-		re.Equal(uint64(50), region.GetRegionEpoch().Version)
+		suite.Equal(uint64(50), region.GetRegionEpoch().ConfVer)
+		suite.Equal(uint64(50), region.GetRegionEpoch().Version)
 	}
 }
 
 func (suite *adminTestSuite) TestPersistFile() {
-	re := suite.Require()
 	data := []byte("#!/bin/sh\nrm -rf /")
+	re := suite.Require()
 	err := tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/admin/persist-file/"+replication.DrStatusFile, data, tu.StatusNotOK(re))
-	re.NoError(err)
+	suite.NoError(err)
 	data = []byte(`{"foo":"bar"}`)
 	err = tu.CheckPostJSON(testDialClient, suite.urlPrefix+"/admin/persist-file/"+replication.DrStatusFile, data, tu.StatusOK(re))
-	re.NoError(err)
+	suite.NoError(err)
 }
 
 func makeTS(offset time.Duration) uint64 {
 	physical := time.Now().Add(offset).UnixNano() / int64(time.Millisecond)
-	return uint64(physical) << 18
+	return uint64(physical << 18)
 }
 
 func (suite *adminTestSuite) TestResetTS() {
-	re := suite.Require()
-	args := make(map[string]any)
+	args := make(map[string]interface{})
 	t1 := makeTS(time.Hour)
 	url := fmt.Sprintf("%s/admin/reset-ts", suite.urlPrefix)
 	args["tso"] = fmt.Sprintf("%d", t1)
 	values, err := json.Marshal(args)
-	re.NoError(err)
-	tu.Eventually(re, func() bool {
-		resp, err := apiutil.PostJSON(testDialClient, url, values)
-		re.NoError(err)
-		defer resp.Body.Close()
-		b, err := io.ReadAll(resp.Body)
-		re.NoError(err)
-		switch resp.StatusCode {
-		case http.StatusOK:
-			re.Contains(string(b), "Reset ts successfully.")
-			return true
-		case http.StatusServiceUnavailable:
-			re.Contains(string(b), "[PD:etcd:ErrEtcdTxnConflict]etcd transaction failed, conflicted and rolled back")
-			return false
-		default:
-			re.FailNow("unexpected status code %d", resp.StatusCode)
-			return false
-		}
-	})
-	re.NoError(err)
+	suite.NoError(err)
+	re := suite.Require()
+	err = tu.CheckPostJSON(testDialClient, url, values,
+		tu.StatusOK(re),
+		tu.StringEqual(re, "\"Reset ts successfully.\"\n"))
+	suite.NoError(err)
 	t2 := makeTS(32 * time.Hour)
 	args["tso"] = fmt.Sprintf("%d", t2)
 	values, err = json.Marshal(args)
-	re.NoError(err)
+	suite.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, url, values,
 		tu.Status(re, http.StatusForbidden),
 		tu.StringContain(re, "too large"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	t3 := makeTS(-2 * time.Hour)
 	args["tso"] = fmt.Sprintf("%d", t3)
 	values, err = json.Marshal(args)
-	re.NoError(err)
+	suite.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, url, values,
 		tu.Status(re, http.StatusForbidden),
 		tu.StringContain(re, "small"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	args["tso"] = ""
 	values, err = json.Marshal(args)
-	re.NoError(err)
+	suite.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, url, values,
 		tu.Status(re, http.StatusBadRequest),
 		tu.StringEqual(re, "\"invalid tso value\"\n"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	args["tso"] = "test"
 	values, err = json.Marshal(args)
-	re.NoError(err)
+	suite.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, url, values,
 		tu.Status(re, http.StatusBadRequest),
 		tu.StringEqual(re, "\"invalid tso value\"\n"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	t4 := makeTS(32 * time.Hour)
 	args["tso"] = fmt.Sprintf("%d", t4)
 	args["force-use-larger"] = "xxx"
 	values, err = json.Marshal(args)
-	re.NoError(err)
+	suite.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, url, values,
 		tu.Status(re, http.StatusBadRequest),
 		tu.StringContain(re, "invalid force-use-larger value"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	args["force-use-larger"] = false
 	values, err = json.Marshal(args)
-	re.NoError(err)
+	suite.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, url, values,
 		tu.Status(re, http.StatusForbidden),
 		tu.StringContain(re, "too large"))
-	re.NoError(err)
+	suite.NoError(err)
 
 	args["force-use-larger"] = true
 	values, err = json.Marshal(args)
-	re.NoError(err)
+	suite.NoError(err)
 	err = tu.CheckPostJSON(testDialClient, url, values,
 		tu.StatusOK(re),
 		tu.StringEqual(re, "\"Reset ts successfully.\"\n"))
-	re.NoError(err)
+	suite.NoError(err)
 }
 
 func (suite *adminTestSuite) TestMarkSnapshotRecovering() {
 	re := suite.Require()
 	url := fmt.Sprintf("%s/admin/cluster/markers/snapshot-recovering", suite.urlPrefix)
 	// default to false
-	re.NoError(tu.CheckGetJSON(testDialClient, url, nil,
+	suite.NoError(tu.CheckGetJSON(testDialClient, url, nil,
 		tu.StatusOK(re), tu.StringContain(re, "false")))
 
 	// mark
-	re.NoError(tu.CheckPostJSON(testDialClient, url, nil,
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, nil,
 		tu.StatusOK(re)))
-	re.NoError(tu.CheckGetJSON(testDialClient, url, nil,
+	suite.NoError(tu.CheckGetJSON(testDialClient, url, nil,
 		tu.StatusOK(re), tu.StringContain(re, "true")))
 	// test using grpc call
 	grpcServer := server.GrpcServer{Server: suite.svr}
 	resp, err2 := grpcServer.IsSnapshotRecovering(context.Background(), &pdpb.IsSnapshotRecoveringRequest{})
-	re.NoError(err2)
-	re.True(resp.Marked)
+	suite.NoError(err2)
+	suite.True(resp.Marked)
 	// unmark
-	err := tu.CheckDelete(testDialClient, url, tu.StatusOK(re))
-	re.NoError(err)
-	re.NoError(tu.CheckGetJSON(testDialClient, url, nil,
+	code, err := apiutil.DoDelete(testDialClient, url)
+	suite.NoError(err)
+	suite.Equal(200, code)
+	suite.NoError(tu.CheckGetJSON(testDialClient, url, nil,
 		tu.StatusOK(re), tu.StringContain(re, "false")))
 }
 
 func (suite *adminTestSuite) TestRecoverAllocID() {
 	re := suite.Require()
 	url := fmt.Sprintf("%s/admin/base-alloc-id", suite.urlPrefix)
-	re.NoError(tu.CheckPostJSON(testDialClient, url, []byte("invalid json"), tu.Status(re, http.StatusBadRequest)))
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte("invalid json"), tu.Status(re, http.StatusBadRequest)))
 	// no id or invalid id
-	re.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{}`),
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{}`),
 		tu.Status(re, http.StatusBadRequest), tu.StringContain(re, "invalid id value")))
-	re.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": ""}`),
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": ""}`),
 		tu.Status(re, http.StatusBadRequest), tu.StringContain(re, "invalid id value")))
-	re.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": 11}`),
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": 11}`),
 		tu.Status(re, http.StatusBadRequest), tu.StringContain(re, "invalid id value")))
-	re.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "aa"}`),
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "aa"}`),
 		tu.Status(re, http.StatusBadRequest), tu.StringContain(re, "invalid syntax")))
 	// snapshot recovering=false
-	re.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "100000"}`),
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "100000"}`),
 		tu.Status(re, http.StatusForbidden), tu.StringContain(re, "can only recover alloc id when recovering")))
 	// mark and recover alloc id
 	markRecoveringURL := fmt.Sprintf("%s/admin/cluster/markers/snapshot-recovering", suite.urlPrefix)
-	re.NoError(tu.CheckPostJSON(testDialClient, markRecoveringURL, nil,
+	suite.NoError(tu.CheckPostJSON(testDialClient, markRecoveringURL, nil,
 		tu.StatusOK(re)))
-	re.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "1000000"}`),
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "1000000"}`),
 		tu.StatusOK(re)))
 	id, err2 := suite.svr.GetAllocator().Alloc()
-	re.NoError(err2)
-	re.Equal(uint64(1000001), id)
+	suite.NoError(err2)
+	suite.Equal(id, uint64(1000001))
 	// recover alloc id again
-	re.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "99000000"}`),
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "99000000"}`),
 		tu.StatusOK(re)))
 	id, err2 = suite.svr.GetAllocator().Alloc()
-	re.NoError(err2)
-	re.Equal(uint64(99000001), id)
+	suite.NoError(err2)
+	suite.Equal(id, uint64(99000001))
 	// unmark
-	err := tu.CheckDelete(testDialClient, markRecoveringURL, tu.StatusOK(re))
-	re.NoError(err)
-	re.NoError(tu.CheckGetJSON(testDialClient, markRecoveringURL, nil,
+	code, err := apiutil.DoDelete(testDialClient, markRecoveringURL)
+	suite.NoError(err)
+	suite.Equal(200, code)
+	suite.NoError(tu.CheckGetJSON(testDialClient, markRecoveringURL, nil,
 		tu.StatusOK(re), tu.StringContain(re, "false")))
-	re.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "100000"}`),
+	suite.NoError(tu.CheckPostJSON(testDialClient, url, []byte(`{"id": "100000"}`),
 		tu.Status(re, http.StatusForbidden), tu.StringContain(re, "can only recover alloc id when recovering")))
 }

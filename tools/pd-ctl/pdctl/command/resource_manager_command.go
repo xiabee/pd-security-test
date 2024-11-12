@@ -69,12 +69,12 @@ func newConfigControllerSetCommand() *cobra.Command {
 				return
 			}
 
-			var val any
+			var val interface{}
 			val, err := strconv.ParseFloat(args[1], 64)
 			if err != nil {
 				val = args[1]
 			}
-			data := map[string]any{args[0]: val}
+			data := map[string]interface{}{args[0]: val}
 			jsonData, err := json.Marshal(data)
 			if err != nil {
 				cmd.Println(err)

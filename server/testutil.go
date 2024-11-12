@@ -78,7 +78,7 @@ func NewTestSingleConfig(c *assertutil.Checker) *config.Config {
 
 	cfg.AdvertiseClientUrls = cfg.ClientUrls
 	cfg.AdvertisePeerUrls = cfg.PeerUrls
-	cfg.DataDir, _ = os.MkdirTemp(os.TempDir(), "test_pd")
+	cfg.DataDir, _ = os.MkdirTemp("/tmp", "test_pd")
 	cfg.InitialCluster = fmt.Sprintf("pd=%s", cfg.PeerUrls)
 	cfg.DisableStrictReconfigCheck = true
 	cfg.TickInterval = typeutil.NewDuration(100 * time.Millisecond)
@@ -138,12 +138,12 @@ func MustWaitLeader(re *require.Assertions, svrs []*Server) *Server {
 
 // CreateMockHandler creates a mock handler for test.
 func CreateMockHandler(re *require.Assertions, ip string) HandlerBuilder {
-	return func(context.Context, *Server) (http.Handler, apiutil.APIServiceGroup, error) {
+	return func(ctx context.Context, s *Server) (http.Handler, apiutil.APIServiceGroup, error) {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/pd/apis/mock/v1/hello", func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintln(w, "Hello World")
 			// test getting ip
-			clientIP, _ := apiutil.GetIPPortFromHTTPRequest(r)
+			clientIP := apiutil.GetIPAddrFromHTTPRequest(r)
 			re.Equal(ip, clientIP)
 		})
 		info := apiutil.APIServiceGroup{

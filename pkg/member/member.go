@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/election"
@@ -43,8 +42,6 @@ const (
 	// The timeout to wait transfer etcd leader to complete.
 	moveLeaderTimeout          = 5 * time.Second
 	dcLocationConfigEtcdPrefix = "dc-location"
-	// If the campaign times is more than this value in `campaignTimesRecordTimeout`, the PD will resign and campaign again.
-	campaignLeaderFrequencyTimes = 3
 )
 
 // EmbeddedEtcdMember is used for the election related logic. It implements Member interface.
@@ -57,7 +54,7 @@ type EmbeddedEtcdMember struct {
 	id       uint64       // etcd server id.
 	member   *pdpb.Member // current PD's info.
 	rootPath string
-	// memberValue is the serialized string of `member`. It will be saved in
+	// memberValue is the serialized string of `member`. It will be save in
 	// etcd leader key when the PD node is successfully elected as the PD leader
 	// of the cluster. Every write will use it to check PD leadership.
 	memberValue string
@@ -85,7 +82,7 @@ func (m *EmbeddedEtcdMember) Name() string {
 }
 
 // GetMember returns the member.
-func (m *EmbeddedEtcdMember) GetMember() any {
+func (m *EmbeddedEtcdMember) GetMember() interface{} {
 	return m.member
 }
 
@@ -180,27 +177,7 @@ func (m *EmbeddedEtcdMember) GetLastLeaderUpdatedTime() time.Time {
 
 // CampaignLeader is used to campaign a PD member's leadership
 // and make it become a PD leader.
-// leader should be changed when campaign leader frequently.
-func (m *EmbeddedEtcdMember) CampaignLeader(ctx context.Context, leaseTimeout int64) error {
-	m.leadership.AddCampaignTimes()
-	failpoint.Inject("skipCampaignLeaderCheck", func() {
-		failpoint.Return(m.leadership.Campaign(leaseTimeout, m.MemberValue()))
-	})
-
-	checkTimes := campaignLeaderFrequencyTimes
-	failpoint.Inject("changeFrequencyTimes", func(val failpoint.Value) {
-		if v, ok := val.(int); ok {
-			checkTimes = v
-		}
-	})
-	if m.leadership.GetCampaignTimesNum() > checkTimes {
-		if err := m.ResignEtcdLeader(ctx, m.Name(), ""); err != nil {
-			return err
-		}
-		m.leadership.ResetCampaignTimes()
-		return errs.ErrLeaderFrequentlyChange.FastGenByArgs(m.Name(), m.GetLeaderPath())
-	}
-
+func (m *EmbeddedEtcdMember) CampaignLeader(leaseTimeout int64) error {
 	return m.leadership.Campaign(leaseTimeout, m.MemberValue())
 }
 
@@ -209,7 +186,7 @@ func (m *EmbeddedEtcdMember) KeepLeader(ctx context.Context) {
 	m.leadership.Keep(ctx)
 }
 
-// PreCheckLeader does some pre-check before checking whether it's the leader.
+// PreCheckLeader does some pre-check before checking whether or not it's the leader.
 func (m *EmbeddedEtcdMember) PreCheckLeader() error {
 	if m.GetEtcdLeader() == 0 {
 		return errs.ErrEtcdLeaderNotFound
@@ -331,8 +308,8 @@ func (m *EmbeddedEtcdMember) GetEtcdLeader() uint64 {
 }
 
 // IsSameLeader checks whether a server is the leader itself.
-func (m *EmbeddedEtcdMember) IsSameLeader(leader any) bool {
-	return leader.(*pdpb.Member).GetMemberId() == m.ID()
+func (m *EmbeddedEtcdMember) IsSameLeader(leader *pdpb.Member) bool {
+	return leader.GetMemberId() == m.ID()
 }
 
 // InitMemberInfo initializes the member info.
@@ -362,7 +339,7 @@ func (m *EmbeddedEtcdMember) ResignEtcdLeader(ctx context.Context, from string, 
 	log.Info("try to resign etcd leader to next pd-server", zap.String("from", from), zap.String("to", nextEtcdLeader))
 	// Determine next etcd leader candidates.
 	var etcdLeaderIDs []uint64
-	res, err := etcdutil.ListEtcdMembers(ctx, m.client)
+	res, err := etcdutil.ListEtcdMembers(m.client)
 	if err != nil {
 		return err
 	}

@@ -27,6 +27,7 @@ type example struct {
 }
 
 func TestDurationJSON(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	example := &example{}
 
@@ -40,10 +41,11 @@ func TestDurationJSON(t *testing.T) {
 }
 
 func TestDurationTOML(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	example := &example{}
 
 	text := []byte(`interval = "1h1m1s"`)
-	re.NoError(toml.Unmarshal(text, example))
+	re.Nil(toml.Unmarshal(text, example))
 	re.Equal(float64(60*60+60+1), example.Interval.Seconds())
 }

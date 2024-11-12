@@ -28,12 +28,10 @@ import (
 	"github.com/pingcap/log"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/assertutil"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/testutil"
-	"github.com/tikv/pd/pkg/versioninfo"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 	"go.uber.org/goleak"
@@ -137,53 +135,6 @@ func mustBootstrapCluster(re *require.Assertions, s *server.Server) {
 	re.Equal(pdpb.ErrorType_OK, resp.GetHeader().GetError().GetType())
 }
 
-func mustPutRegion(re *require.Assertions, svr *server.Server, regionID, storeID uint64, start, end []byte, opts ...core.RegionCreateOption) *core.RegionInfo {
-	leader := &metapb.Peer{
-		Id:      regionID,
-		StoreId: storeID,
-	}
-	metaRegion := &metapb.Region{
-		Id:          regionID,
-		StartKey:    start,
-		EndKey:      end,
-		Peers:       []*metapb.Peer{leader},
-		RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
-	}
-	r := core.NewRegionInfo(metaRegion, leader, opts...)
-	err := svr.GetRaftCluster().HandleRegionHeartbeat(r)
-	re.NoError(err)
-	return r
-}
-
-func mustPutStore(re *require.Assertions, svr *server.Server, id uint64, state metapb.StoreState, nodeState metapb.NodeState, labels []*metapb.StoreLabel) {
-	s := &server.GrpcServer{Server: svr}
-	_, err := s.PutStore(context.Background(), &pdpb.PutStoreRequest{
-		Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()},
-		Store: &metapb.Store{
-			Id:        id,
-			Address:   fmt.Sprintf("tikv%d", id),
-			State:     state,
-			NodeState: nodeState,
-			Labels:    labels,
-			Version:   versioninfo.MinSupportedVersion(versioninfo.Version2_0).String(),
-		},
-	})
-	re.NoError(err)
-	if state == metapb.StoreState_Up {
-		_, err = s.StoreHeartbeat(context.Background(), &pdpb.StoreHeartbeatRequest{
-			Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()},
-			Stats:  &pdpb.StoreStats{StoreId: id},
-		})
-		re.NoError(err)
-	}
-}
-
-func mustRegionHeartbeat(re *require.Assertions, svr *server.Server, region *core.RegionInfo) {
-	cluster := svr.GetRaftCluster()
-	err := cluster.HandleRegionHeartbeat(region)
-	re.NoError(err)
-}
-
 type serviceTestSuite struct {
 	suite.Suite
 	svr     *server.Server
@@ -208,62 +159,61 @@ func (suite *serviceTestSuite) TearDownSuite() {
 }
 
 func (suite *serviceTestSuite) TestServiceLabels() {
-	re := suite.Require()
 	accessPaths := suite.svr.GetServiceLabels("Profile")
-	re.Len(accessPaths, 1)
-	re.Equal("/pd/api/v1/debug/pprof/profile", accessPaths[0].Path)
-	re.Equal("", accessPaths[0].Method)
+	suite.Len(accessPaths, 1)
+	suite.Equal("/pd/api/v1/debug/pprof/profile", accessPaths[0].Path)
+	suite.Equal("", accessPaths[0].Method)
 	serviceLabel := suite.svr.GetAPIAccessServiceLabel(
 		apiutil.NewAccessPath("/pd/api/v1/debug/pprof/profile", ""))
-	re.Equal("Profile", serviceLabel)
+	suite.Equal("Profile", serviceLabel)
 	serviceLabel = suite.svr.GetAPIAccessServiceLabel(
 		apiutil.NewAccessPath("/pd/api/v1/debug/pprof/profile", http.MethodGet))
-	re.Equal("Profile", serviceLabel)
+	suite.Equal("Profile", serviceLabel)
 
 	accessPaths = suite.svr.GetServiceLabels("GetSchedulerConfig")
-	re.Len(accessPaths, 1)
-	re.Equal("/pd/api/v1/scheduler-config", accessPaths[0].Path)
-	re.Equal("GET", accessPaths[0].Method)
+	suite.Len(accessPaths, 1)
+	suite.Equal("/pd/api/v1/scheduler-config", accessPaths[0].Path)
+	suite.Equal("GET", accessPaths[0].Method)
 	accessPaths = suite.svr.GetServiceLabels("HandleSchedulerConfig")
-	re.Len(accessPaths, 4)
-	re.Equal("/pd/api/v1/scheduler-config", accessPaths[0].Path)
+	suite.Len(accessPaths, 4)
+	suite.Equal("/pd/api/v1/scheduler-config", accessPaths[0].Path)
 
 	accessPaths = suite.svr.GetServiceLabels("ResignLeader")
-	re.Len(accessPaths, 1)
-	re.Equal("/pd/api/v1/leader/resign", accessPaths[0].Path)
-	re.Equal(http.MethodPost, accessPaths[0].Method)
+	suite.Len(accessPaths, 1)
+	suite.Equal("/pd/api/v1/leader/resign", accessPaths[0].Path)
+	suite.Equal(http.MethodPost, accessPaths[0].Method)
 	serviceLabel = suite.svr.GetAPIAccessServiceLabel(
 		apiutil.NewAccessPath("/pd/api/v1/leader/resign", http.MethodPost))
-	re.Equal("ResignLeader", serviceLabel)
+	suite.Equal("ResignLeader", serviceLabel)
 	serviceLabel = suite.svr.GetAPIAccessServiceLabel(
 		apiutil.NewAccessPath("/pd/api/v1/leader/resign", http.MethodGet))
-	re.Equal("", serviceLabel)
+	suite.Equal("", serviceLabel)
 	serviceLabel = suite.svr.GetAPIAccessServiceLabel(
 		apiutil.NewAccessPath("/pd/api/v1/leader/resign", ""))
-	re.Equal("", serviceLabel)
+	suite.Equal("", serviceLabel)
 
-	accessPaths = suite.svr.GetServiceLabels("queryMetric")
-	re.Len(accessPaths, 4)
+	accessPaths = suite.svr.GetServiceLabels("QueryMetric")
+	suite.Len(accessPaths, 4)
 	sort.Slice(accessPaths, func(i, j int) bool {
 		if accessPaths[i].Path == accessPaths[j].Path {
 			return accessPaths[i].Method < accessPaths[j].Method
 		}
 		return accessPaths[i].Path < accessPaths[j].Path
 	})
-	re.Equal("/pd/api/v1/metric/query", accessPaths[0].Path)
-	re.Equal(http.MethodGet, accessPaths[0].Method)
-	re.Equal("/pd/api/v1/metric/query", accessPaths[1].Path)
-	re.Equal(http.MethodPost, accessPaths[1].Method)
-	re.Equal("/pd/api/v1/metric/query_range", accessPaths[2].Path)
-	re.Equal(http.MethodGet, accessPaths[2].Method)
-	re.Equal("/pd/api/v1/metric/query_range", accessPaths[3].Path)
-	re.Equal(http.MethodPost, accessPaths[3].Method)
+	suite.Equal("/pd/api/v1/metric/query", accessPaths[0].Path)
+	suite.Equal(http.MethodGet, accessPaths[0].Method)
+	suite.Equal("/pd/api/v1/metric/query", accessPaths[1].Path)
+	suite.Equal(http.MethodPost, accessPaths[1].Method)
+	suite.Equal("/pd/api/v1/metric/query_range", accessPaths[2].Path)
+	suite.Equal(http.MethodGet, accessPaths[2].Method)
+	suite.Equal("/pd/api/v1/metric/query_range", accessPaths[3].Path)
+	suite.Equal(http.MethodPost, accessPaths[3].Method)
 	serviceLabel = suite.svr.GetAPIAccessServiceLabel(
 		apiutil.NewAccessPath("/pd/api/v1/metric/query", http.MethodPost))
-	re.Equal("queryMetric", serviceLabel)
+	suite.Equal("QueryMetric", serviceLabel)
 	serviceLabel = suite.svr.GetAPIAccessServiceLabel(
 		apiutil.NewAccessPath("/pd/api/v1/metric/query", http.MethodGet))
-	re.Equal("queryMetric", serviceLabel)
+	suite.Equal("QueryMetric", serviceLabel)
 }
 
 func (suite *adminTestSuite) TestCleanPath() {
@@ -272,12 +222,12 @@ func (suite *adminTestSuite) TestCleanPath() {
 	url := fmt.Sprintf("%s/admin/persist-file/../../config", suite.urlPrefix)
 	cfg := &config.Config{}
 	err := testutil.ReadGetJSON(re, testDialClient, url, cfg)
-	re.NoError(err)
+	suite.NoError(err)
 
 	// handled by router
 	response := httptest.NewRecorder()
 	r, _, _ := NewHandler(context.Background(), suite.svr)
-	request, err := http.NewRequest(http.MethodGet, url, http.NoBody)
+	request, err := http.NewRequest(http.MethodGet, url, nil)
 	re.NoError(err)
 	r.ServeHTTP(response, request)
 	// handled by `cleanPath` which is in `mux.ServeHTTP`

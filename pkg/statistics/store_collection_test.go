@@ -26,7 +26,6 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/mock/mockconfig"
-	"github.com/tikv/pd/pkg/statistics/utils"
 )
 
 func TestStoreStatistics(t *testing.T) {
@@ -55,7 +54,7 @@ func TestStoreStatistics(t *testing.T) {
 		stores = append(stores, s)
 	}
 
-	store3 := stores[3].Clone(core.SetStoreState(metapb.StoreState_Offline, false))
+	store3 := stores[3].Clone(core.OfflineStore(false))
 	stores[3] = store3
 	store4 := stores[4].Clone(core.SetLastHeartbeatTS(stores[4].GetLastHeartbeatTS().Add(-time.Hour)))
 	stores[4] = store4
@@ -65,10 +64,9 @@ func TestStoreStatistics(t *testing.T) {
 		UsedSize:  0,
 	}))
 	stores[5] = store5
-	storeStats := NewStoreStatisticsMap(opt)
+	storeStats := NewStoreStatisticsMap(opt, nil)
 	for _, store := range stores {
-		storeStats.Observe(store)
-		ObserveHotStat(store, storesStats)
+		storeStats.Observe(store, storesStats)
 	}
 	stats := storeStats.stats
 
@@ -85,22 +83,20 @@ func TestStoreStatistics(t *testing.T) {
 	re.Equal(0, stats.Disconnect)
 	re.Equal(1, stats.Tombstone)
 	re.Equal(1, stats.LowSpace)
-	re.Len(stats.LabelCounter["zone:z1"], 2)
-	re.Equal([]uint64{1, 2}, stats.LabelCounter["zone:z1"])
-	re.Len(stats.LabelCounter["zone:z2"], 2)
-	re.Len(stats.LabelCounter["zone:z3"], 2)
-	re.Len(stats.LabelCounter["host:h1"], 4)
-	re.Equal([]uint64{1, 3, 5, 7}, stats.LabelCounter["host:h1"])
-	re.Len(stats.LabelCounter["host:h2"], 4)
-	re.Len(stats.LabelCounter["zone:unknown"], 2)
+	re.Equal(2, stats.LabelCounter["zone:z1"])
+	re.Equal(2, stats.LabelCounter["zone:z2"])
+	re.Equal(2, stats.LabelCounter["zone:z3"])
+	re.Equal(4, stats.LabelCounter["host:h1"])
+	re.Equal(4, stats.LabelCounter["host:h2"])
+	re.Equal(2, stats.LabelCounter["zone:unknown"])
 }
 
 func TestSummaryStoreInfos(t *testing.T) {
 	re := require.New(t)
-	rw := utils.Read
+	rw := Read
 	kind := constant.LeaderKind
 	collector := newTikvCollector()
-	storeHistoryLoad := NewStoreHistoryLoads(utils.DimLen, DefaultHistorySampleDuration, DefaultHistorySampleInterval)
+	storeHistoryLoad := NewStoreHistoryLoads(DimLen)
 	storeInfos := make(map[uint64]*StoreSummaryInfo)
 	storeLoads := make(map[uint64][]float64)
 	for _, storeID := range []int{1, 3} {
@@ -132,7 +128,7 @@ func TestSummaryStoreInfos(t *testing.T) {
 	}
 
 	// case 2: put many elements into history load
-	storeHistoryLoad.sampleDuration = 0
+	historySampleInterval = 0
 	for i := 1; i < 10; i++ {
 		details = summaryStoresLoadByEngine(storeInfos, storeLoads, storeHistoryLoad, nil, rw, kind, collector)
 		expect := []float64{2, 4, 10}

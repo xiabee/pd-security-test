@@ -22,10 +22,10 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
+	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/tso"
 	"github.com/tikv/pd/pkg/utils/configutil"
 	"github.com/tikv/pd/pkg/utils/grpcutil"
@@ -41,7 +41,7 @@ const (
 	defaultBackendEndpoints = "http://127.0.0.1:2379"
 	defaultListenAddr       = "http://127.0.0.1:3379"
 
-	defaultTSOSaveInterval           = time.Duration(constant.DefaultLeaderLease) * time.Second
+	defaultTSOSaveInterval           = time.Duration(utils.DefaultLeaderLease) * time.Second
 	defaultTSOUpdatePhysicalInterval = 50 * time.Millisecond
 	maxTSOUpdatePhysicalInterval     = 10 * time.Second
 	minTSOUpdatePhysicalInterval     = 1 * time.Millisecond
@@ -167,22 +167,21 @@ func (c *Config) Parse(flagSet *pflag.FlagSet) error {
 	}
 
 	// Ignore the error check here
-	configutil.AdjustCommandLineString(flagSet, &c.Name, "name")
-	configutil.AdjustCommandLineString(flagSet, &c.Log.Level, "log-level")
-	configutil.AdjustCommandLineString(flagSet, &c.Log.File.Filename, "log-file")
-	configutil.AdjustCommandLineString(flagSet, &c.Metric.PushAddress, "metrics-addr")
-	configutil.AdjustCommandLineString(flagSet, &c.Security.CAPath, "cacert")
-	configutil.AdjustCommandLineString(flagSet, &c.Security.CertPath, "cert")
-	configutil.AdjustCommandLineString(flagSet, &c.Security.KeyPath, "key")
-	configutil.AdjustCommandLineString(flagSet, &c.BackendEndpoints, "backend-endpoints")
-	configutil.AdjustCommandLineString(flagSet, &c.ListenAddr, "listen-addr")
-	configutil.AdjustCommandLineString(flagSet, &c.AdvertiseListenAddr, "advertise-listen-addr")
+	configutil.AdjustCommandlineString(flagSet, &c.Log.Level, "log-level")
+	configutil.AdjustCommandlineString(flagSet, &c.Log.File.Filename, "log-file")
+	configutil.AdjustCommandlineString(flagSet, &c.Metric.PushAddress, "metrics-addr")
+	configutil.AdjustCommandlineString(flagSet, &c.Security.CAPath, "cacert")
+	configutil.AdjustCommandlineString(flagSet, &c.Security.CertPath, "cert")
+	configutil.AdjustCommandlineString(flagSet, &c.Security.KeyPath, "key")
+	configutil.AdjustCommandlineString(flagSet, &c.BackendEndpoints, "backend-endpoints")
+	configutil.AdjustCommandlineString(flagSet, &c.ListenAddr, "listen-addr")
+	configutil.AdjustCommandlineString(flagSet, &c.AdvertiseListenAddr, "advertise-listen-addr")
 
-	return c.Adjust(meta)
+	return c.Adjust(meta, false)
 }
 
 // Adjust is used to adjust the TSO configurations.
-func (c *Config) Adjust(meta *toml.MetaData) error {
+func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
 	configMetaData := configutil.NewConfigMetadata(meta)
 	if err := configMetaData.CheckUndecoded(); err != nil {
 		c.WarningMsgs = append(c.WarningMsgs, err.Error())
@@ -206,7 +205,7 @@ func (c *Config) Adjust(meta *toml.MetaData) error {
 	configutil.AdjustString(&c.AdvertiseListenAddr, c.ListenAddr)
 
 	configutil.AdjustDuration(&c.MaxResetTSGap, defaultMaxResetTSGap)
-	configutil.AdjustInt64(&c.LeaderLease, constant.DefaultLeaderLease)
+	configutil.AdjustInt64(&c.LeaderLease, utils.DefaultLeaderLease)
 	configutil.AdjustDuration(&c.TSOSaveInterval, defaultTSOSaveInterval)
 	configutil.AdjustDuration(&c.TSOUpdatePhysicalInterval, defaultTSOUpdatePhysicalInterval)
 
@@ -221,19 +220,23 @@ func (c *Config) Adjust(meta *toml.MetaData) error {
 	}
 
 	if !configMetaData.IsDefined("enable-grpc-gateway") {
-		c.EnableGRPCGateway = constant.DefaultEnableGRPCGateway
+		c.EnableGRPCGateway = utils.DefaultEnableGRPCGateway
 	}
 
 	c.adjustLog(configMetaData.Child("log"))
-	return c.Security.Encryption.Adjust()
+	c.Security.Encryption.Adjust()
+
+	if len(c.Log.Format) == 0 {
+		c.Log.Format = utils.DefaultLogFormat
+	}
+
+	return nil
 }
 
 func (c *Config) adjustLog(meta *configutil.ConfigMetaData) {
 	if !meta.IsDefined("disable-error-verbose") {
-		c.Log.DisableErrorVerbose = constant.DefaultDisableErrorVerbose
+		c.Log.DisableErrorVerbose = utils.DefaultDisableErrorVerbose
 	}
-	configutil.AdjustString(&c.Log.Format, constant.DefaultLogFormat)
-	configutil.AdjustString(&c.Log.Level, constant.DefaultLogLevel)
 }
 
 // Validate is used to validate if some configurations are right.

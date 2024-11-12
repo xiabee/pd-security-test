@@ -19,7 +19,6 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/kvproto/pkg/tsopb"
-	"github.com/tikv/pd/pkg/utils/grpcutil"
 	"google.golang.org/grpc"
 )
 
@@ -36,19 +35,19 @@ type TSOProtoFactory struct {
 type PDProtoFactory struct {
 }
 
-func (*TSOProtoFactory) createForwardStream(ctx context.Context, clientConn *grpc.ClientConn) (stream, context.CancelFunc, error) {
+func (s *TSOProtoFactory) createForwardStream(ctx context.Context, clientConn *grpc.ClientConn) (stream, context.CancelFunc, error) {
 	done := make(chan struct{})
 	cctx, cancel := context.WithCancel(ctx)
-	go grpcutil.CheckStream(cctx, cancel, done)
+	go checkStream(cctx, cancel, done)
 	forwardStream, err := tsopb.NewTSOClient(clientConn).Tso(cctx)
 	done <- struct{}{}
 	return &tsoStream{forwardStream}, cancel, err
 }
 
-func (*PDProtoFactory) createForwardStream(ctx context.Context, clientConn *grpc.ClientConn) (stream, context.CancelFunc, error) {
+func (s *PDProtoFactory) createForwardStream(ctx context.Context, clientConn *grpc.ClientConn) (stream, context.CancelFunc, error) {
 	done := make(chan struct{})
 	cctx, cancel := context.WithCancel(ctx)
-	go grpcutil.CheckStream(cctx, cancel, done)
+	go checkStream(cctx, cancel, done)
 	forwardStream, err := pdpb.NewPDClient(clientConn).Tso(cctx)
 	done <- struct{}{}
 	return &pdStream{forwardStream}, cancel, err

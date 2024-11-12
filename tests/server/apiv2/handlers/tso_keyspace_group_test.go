@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/pd/pkg/mcs/utils/constant"
+	"github.com/tikv/pd/pkg/mcs/utils"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/server/apiv2/handlers"
 	"github.com/tikv/pd/tests"
@@ -39,15 +39,14 @@ func TestKeyspaceGroupTestSuite(t *testing.T) {
 }
 
 func (suite *keyspaceGroupTestSuite) SetupTest() {
-	re := suite.Require()
 	suite.ctx, suite.cancel = context.WithCancel(context.Background())
 	cluster, err := tests.NewTestAPICluster(suite.ctx, 1)
 	suite.cluster = cluster
-	re.NoError(err)
-	re.NoError(cluster.RunInitialServers())
-	re.NotEmpty(cluster.WaitLeader())
-	suite.server = cluster.GetLeaderServer()
-	re.NoError(suite.server.BootstrapCluster())
+	suite.NoError(err)
+	suite.NoError(cluster.RunInitialServers())
+	suite.NotEmpty(cluster.WaitLeader())
+	suite.server = cluster.GetServer(cluster.GetLeader())
+	suite.NoError(suite.server.BootstrapCluster())
 }
 
 func (suite *keyspaceGroupTestSuite) TearDownTest() {
@@ -97,7 +96,7 @@ func (suite *keyspaceGroupTestSuite) TestCreateKeyspaceGroups() {
 	// invalid ID.
 	kgs = &handlers.CreateKeyspaceGroupParams{KeyspaceGroups: []*endpoint.KeyspaceGroup{
 		{
-			ID:       constant.MaxKeyspaceGroupCount + 1,
+			ID:       utils.MaxKeyspaceGroupCount + 1,
 			UserKind: endpoint.Standard.String(),
 		},
 	}}
@@ -127,7 +126,7 @@ func (suite *keyspaceGroupTestSuite) TestLoadKeyspaceGroup() {
 	}}
 
 	MustCreateKeyspaceGroup(re, suite.server, kgs)
-	resp := MustLoadKeyspaceGroups(re, suite.server, "0", "0")
+	resp := sendLoadKeyspaceGroupRequest(re, suite.server, "0", "0")
 	re.Len(resp, 3)
 }
 
@@ -138,18 +137,17 @@ func (suite *keyspaceGroupTestSuite) TestSplitKeyspaceGroup() {
 			ID:        uint32(1),
 			UserKind:  endpoint.Standard.String(),
 			Keyspaces: []uint32{111, 222, 333},
-			Members:   make([]endpoint.KeyspaceGroupMember, constant.DefaultKeyspaceGroupReplicaCount),
 		},
 	}}
 
 	MustCreateKeyspaceGroup(re, suite.server, kgs)
-	resp := MustLoadKeyspaceGroups(re, suite.server, "0", "0")
+	resp := sendLoadKeyspaceGroupRequest(re, suite.server, "0", "0")
 	re.Len(resp, 2)
 	MustSplitKeyspaceGroup(re, suite.server, 1, &handlers.SplitKeyspaceGroupByIDParams{
 		NewID:     uint32(2),
 		Keyspaces: []uint32{111, 222},
 	})
-	resp = MustLoadKeyspaceGroups(re, suite.server, "0", "0")
+	resp = sendLoadKeyspaceGroupRequest(re, suite.server, "0", "0")
 	re.Len(resp, 3)
 	// Check keyspace group 1.
 	kg1 := MustLoadKeyspaceGroupByID(re, suite.server, 1)

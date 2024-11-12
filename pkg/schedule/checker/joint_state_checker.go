@@ -19,18 +19,29 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/errs"
-	sche "github.com/tikv/pd/pkg/schedule/core"
+	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/operator"
 )
 
 // JointStateChecker ensures region is in joint state will leave.
 type JointStateChecker struct {
 	PauseController
-	cluster sche.CheckerCluster
+	cluster schedule.Cluster
 }
 
+const jointStateCheckerName = "joint_state_checker"
+
+var (
+	// WithLabelValues is a heavy operation, define variable to avoid call it every time.
+	jointCheckCounter                 = checkerCounter.WithLabelValues(jointStateCheckerName, "check")
+	jointCheckerPausedCounter         = checkerCounter.WithLabelValues(jointStateCheckerName, "paused")
+	jointCheckerFailedCounter         = checkerCounter.WithLabelValues(jointStateCheckerName, "create-operator-fail")
+	jointCheckerNewOpCounter          = checkerCounter.WithLabelValues(jointStateCheckerName, "new-operator")
+	jointCheckerTransferLeaderCounter = checkerCounter.WithLabelValues(jointStateCheckerName, "transfer-leader")
+)
+
 // NewJointStateChecker creates a joint state checker.
-func NewJointStateChecker(cluster sche.CheckerCluster) *JointStateChecker {
+func NewJointStateChecker(cluster schedule.Cluster) *JointStateChecker {
 	return &JointStateChecker{
 		cluster: cluster,
 	}

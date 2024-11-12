@@ -33,10 +33,7 @@
 # key-path = ""
 ## A CN which must be provided by a client
 # cert-allowed-cn = ["example.com"]
-## Whether to enable the log redaction. It can be the following values:
-##   - false: disable redact log.
-##   - true: enable redact log, which will replace the sensitive information with "?".
-##   - "MARKER": enable redact log, which will use single guillemets ‹› to enclose the sensitive information.
+## Whether or not to enable redact log.
 # redact-info-log = false
 
 [security.encryption]
@@ -204,7 +201,7 @@
 ## When enabled, usage data will be sent to PingCAP for improving user experience.
 # enable-telemetry = false
 
-[keyspace]
+[keyspaces]
 ## pre-alloc is used to pre-allocate keyspaces during pd bootstrap.
 ## Its value should be a list of strings, denotting the name of the keyspaces.
 ## Example:

@@ -28,9 +28,9 @@ func TestDeepClone(t *testing.T) {
 	re := assert.New(t)
 	src := &fate{ID: 1}
 	dst := DeepClone(src, fateFactory)
-	re.EqualValues(1, dst.ID)
+	re.EqualValues(dst.ID, 1)
 	dst.ID = 2
-	re.EqualValues(1, src.ID)
+	re.EqualValues(src.ID, 1)
 
 	// case2: the source is nil
 	var src2 *fate

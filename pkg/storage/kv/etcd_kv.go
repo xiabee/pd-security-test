@@ -55,7 +55,6 @@ func NewEtcdKVBase(client *clientv3.Client, rootPath string) *etcdKVBase {
 	}
 }
 
-// NewEtcdKV creates a new etcd kv.
 func (kv *etcdKVBase) Load(key string) (string, error) {
 	key = path.Join(kv.rootPath, key)
 
@@ -71,7 +70,6 @@ func (kv *etcdKVBase) Load(key string) (string, error) {
 	return string(resp.Kvs[0].Value), nil
 }
 
-// LoadRange loads a range of keys [key, endKey) from etcd.
 func (kv *etcdKVBase) LoadRange(key, endKey string, limit int) ([]string, []string, error) {
 	// Note: reason to use `strings.Join` instead of `path.Join` is that the latter will
 	// removes suffix '/' of the joined string.
@@ -101,7 +99,6 @@ func (kv *etcdKVBase) LoadRange(key, endKey string, limit int) ([]string, []stri
 	return keys, values, nil
 }
 
-// Save puts a key-value pair to etcd.
 func (kv *etcdKVBase) Save(key, value string) error {
 	failpoint.Inject("etcdSaveFailed", func() {
 		failpoint.Return(errors.New("save failed"))
@@ -120,7 +117,6 @@ func (kv *etcdKVBase) Save(key, value string) error {
 	return nil
 }
 
-// Remove removes the key from etcd.
 func (kv *etcdKVBase) Remove(key string) error {
 	key = path.Join(kv.rootPath, key)
 
@@ -279,13 +275,12 @@ func (txn *etcdTxn) LoadRange(key, endKey string, limit int) (keys []string, val
 	return keys, values, err
 }
 
-// commit perform the operations on etcd, with pre-condition that values observed by user have not been changed.
+// commit perform the operations on etcd, with pre-condition that values observed by user has not been changed.
 func (txn *etcdTxn) commit() error {
-	// Using slowLogTxn to commit transaction.
-	slowLogTxn := NewSlowLogTxn(txn.kv.client)
-	slowLogTxn.If(txn.conditions...)
-	slowLogTxn.Then(txn.operations...)
-	resp, err := slowLogTxn.Commit()
+	baseTxn := txn.kv.client.Txn(txn.ctx)
+	baseTxn.If(txn.conditions...)
+	baseTxn.Then(txn.operations...)
+	resp, err := baseTxn.Commit()
 	if err != nil {
 		return err
 	}

@@ -22,8 +22,7 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/core/storelimit"
-	"github.com/tikv/pd/pkg/schedule/config"
-	"github.com/tikv/pd/pkg/statistics/utils"
+	"github.com/tikv/pd/server/config"
 )
 
 const (
@@ -32,7 +31,8 @@ const (
 )
 
 type storeStatistics struct {
-	opt             config.ConfProvider
+	opt             *config.PersistOptions
+	storeConfig     *config.StoreConfig
 	Up              int
 	Disconnect      int
 	Unhealthy       int
@@ -47,21 +47,22 @@ type storeStatistics struct {
 	LeaderCount     int
 	LearnerCount    int
 	WitnessCount    int
-	LabelCounter    map[string][]uint64
+	LabelCounter    map[string]int
 	Preparing       int
 	Serving         int
 	Removing        int
 	Removed         int
 }
 
-func newStoreStatistics(opt config.ConfProvider) *storeStatistics {
+func newStoreStatistics(opt *config.PersistOptions, storeConfig *config.StoreConfig) *storeStatistics {
 	return &storeStatistics{
 		opt:          opt,
-		LabelCounter: make(map[string][]uint64),
+		storeConfig:  storeConfig,
+		LabelCounter: make(map[string]int),
 	}
 }
 
-func (s *storeStatistics) observe(store *core.StoreInfo) {
+func (s *storeStatistics) Observe(store *core.StoreInfo, stats *StoresStats) {
 	for _, k := range s.opt.GetLocationLabels() {
 		v := store.GetLabelValue(k)
 		if v == "" {
@@ -70,17 +71,15 @@ func (s *storeStatistics) observe(store *core.StoreInfo) {
 		key := fmt.Sprintf("%s:%s", k, v)
 		// exclude tombstone
 		if !store.IsRemoved() {
-			s.LabelCounter[key] = append(s.LabelCounter[key], store.GetID())
+			s.LabelCounter[key]++
 		}
 	}
 	storeAddress := store.GetAddress()
 	id := strconv.FormatUint(store.GetID(), 10)
 	// Store state.
-	isDown := false
 	switch store.GetNodeState() {
 	case metapb.NodeState_Preparing, metapb.NodeState_Serving:
 		if store.DownTime() >= s.opt.GetMaxStoreDownTime() {
-			isDown = true
 			s.Down++
 		} else if store.IsUnhealthy() {
 			s.Unhealthy++
@@ -102,10 +101,10 @@ func (s *storeStatistics) observe(store *core.StoreInfo) {
 	case metapb.NodeState_Removed:
 		s.Tombstone++
 		s.Removed++
+		s.resetStoreStatistics(storeAddress, id)
 		return
 	}
-
-	if !isDown && store.IsLowSpace(s.opt.GetLowSpaceRatio()) {
+	if store.IsLowSpace(s.opt.GetLowSpaceRatio()) {
 		s.LowSpace++
 	}
 
@@ -145,41 +144,36 @@ func (s *storeStatistics) observe(store *core.StoreInfo) {
 		storeStatusGauge.WithLabelValues(storeAddress, id, "store_slow_trend_result_value").Set(slowTrend.ResultValue)
 		storeStatusGauge.WithLabelValues(storeAddress, id, "store_slow_trend_result_rate").Set(slowTrend.ResultRate)
 	}
-}
 
-// ObserveHotStat records the hot region metrics for the store.
-func ObserveHotStat(store *core.StoreInfo, stats *StoresStats) {
 	// Store flows.
-	storeAddress := store.GetAddress()
-	id := strconv.FormatUint(store.GetID(), 10)
 	storeFlowStats := stats.GetRollingStoreStats(store.GetID())
 	if storeFlowStats == nil {
 		return
 	}
 
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_rate_bytes").Set(storeFlowStats.GetLoad(utils.StoreWriteBytes))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_rate_bytes").Set(storeFlowStats.GetLoad(utils.StoreReadBytes))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_rate_keys").Set(storeFlowStats.GetLoad(utils.StoreWriteKeys))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_rate_keys").Set(storeFlowStats.GetLoad(utils.StoreReadKeys))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_query_rate").Set(storeFlowStats.GetLoad(utils.StoreWriteQuery))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_query_rate").Set(storeFlowStats.GetLoad(utils.StoreReadQuery))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_cpu_usage").Set(storeFlowStats.GetLoad(utils.StoreCPUUsage))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_disk_read_rate").Set(storeFlowStats.GetLoad(utils.StoreDiskReadRate))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_disk_write_rate").Set(storeFlowStats.GetLoad(utils.StoreDiskWriteRate))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_regions_write_rate_bytes").Set(storeFlowStats.GetLoad(utils.StoreRegionsWriteBytes))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_regions_write_rate_keys").Set(storeFlowStats.GetLoad(utils.StoreRegionsWriteKeys))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_rate_bytes").Set(storeFlowStats.GetLoad(StoreWriteBytes))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_rate_bytes").Set(storeFlowStats.GetLoad(StoreReadBytes))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_rate_keys").Set(storeFlowStats.GetLoad(StoreWriteKeys))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_rate_keys").Set(storeFlowStats.GetLoad(StoreReadKeys))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_query_rate").Set(storeFlowStats.GetLoad(StoreWriteQuery))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_query_rate").Set(storeFlowStats.GetLoad(StoreReadQuery))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_cpu_usage").Set(storeFlowStats.GetLoad(StoreCPUUsage))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_disk_read_rate").Set(storeFlowStats.GetLoad(StoreDiskReadRate))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_disk_write_rate").Set(storeFlowStats.GetLoad(StoreDiskWriteRate))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_regions_write_rate_bytes").Set(storeFlowStats.GetLoad(StoreRegionsWriteBytes))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_regions_write_rate_keys").Set(storeFlowStats.GetLoad(StoreRegionsWriteKeys))
 
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_rate_bytes_instant").Set(storeFlowStats.GetInstantLoad(utils.StoreWriteBytes))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_rate_bytes_instant").Set(storeFlowStats.GetInstantLoad(utils.StoreReadBytes))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_rate_keys_instant").Set(storeFlowStats.GetInstantLoad(utils.StoreWriteKeys))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_rate_keys_instant").Set(storeFlowStats.GetInstantLoad(utils.StoreReadKeys))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_query_rate_instant").Set(storeFlowStats.GetInstantLoad(utils.StoreWriteQuery))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_query_rate_instant").Set(storeFlowStats.GetInstantLoad(utils.StoreReadQuery))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_regions_write_rate_bytes_instant").Set(storeFlowStats.GetInstantLoad(utils.StoreRegionsWriteBytes))
-	storeStatusGauge.WithLabelValues(storeAddress, id, "store_regions_write_rate_keys_instant").Set(storeFlowStats.GetInstantLoad(utils.StoreRegionsWriteKeys))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_rate_bytes_instant").Set(storeFlowStats.GetInstantLoad(StoreWriteBytes))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_rate_bytes_instant").Set(storeFlowStats.GetInstantLoad(StoreReadBytes))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_rate_keys_instant").Set(storeFlowStats.GetInstantLoad(StoreWriteKeys))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_rate_keys_instant").Set(storeFlowStats.GetInstantLoad(StoreReadKeys))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_write_query_rate_instant").Set(storeFlowStats.GetInstantLoad(StoreWriteQuery))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_read_query_rate_instant").Set(storeFlowStats.GetInstantLoad(StoreReadQuery))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_regions_write_rate_bytes_instant").Set(storeFlowStats.GetInstantLoad(StoreRegionsWriteBytes))
+	storeStatusGauge.WithLabelValues(storeAddress, id, "store_regions_write_rate_keys_instant").Set(storeFlowStats.GetInstantLoad(StoreRegionsWriteKeys))
 }
 
-func (s *storeStatistics) collect() {
+func (s *storeStatistics) Collect() {
 	placementStatusGauge.Reset()
 
 	metrics := make(map[string]float64)
@@ -222,10 +216,10 @@ func (s *storeStatistics) collect() {
 	configs["max-snapshot-count"] = float64(s.opt.GetMaxSnapshotCount())
 	configs["max-merge-region-size"] = float64(s.opt.GetMaxMergeRegionSize())
 	configs["max-merge-region-keys"] = float64(s.opt.GetMaxMergeRegionKeys())
-	configs["region-max-size"] = float64(s.opt.GetRegionMaxSize())
-	configs["region-split-size"] = float64(s.opt.GetRegionSplitSize())
-	configs["region-split-keys"] = float64(s.opt.GetRegionSplitKeys())
-	configs["region-max-keys"] = float64(s.opt.GetRegionMaxKeys())
+	configs["region-max-size"] = float64(s.storeConfig.GetRegionMaxSize())
+	configs["region-split-size"] = float64(s.storeConfig.GetRegionSplitSize())
+	configs["region-split-keys"] = float64(s.storeConfig.GetRegionSplitKeys())
+	configs["region-max-keys"] = float64(s.storeConfig.GetRegionMaxKeys())
 
 	var enableMakeUpReplica, enableRemoveDownReplica, enableRemoveExtraReplica, enableReplaceOfflineReplica float64
 	if s.opt.IsMakeUpReplicaEnabled() {
@@ -250,10 +244,8 @@ func (s *storeStatistics) collect() {
 		configStatusGauge.WithLabelValues(typ).Set(value)
 	}
 
-	for name, stores := range s.LabelCounter {
-		for _, storeID := range stores {
-			placementStatusGauge.WithLabelValues(labelType, name, strconv.FormatUint(storeID, 10)).Set(1)
-		}
+	for name, value := range s.LabelCounter {
+		placementStatusGauge.WithLabelValues(labelType, name).Set(float64(value))
 	}
 
 	for storeID, limit := range s.opt.GetStoresLimit() {
@@ -263,8 +255,7 @@ func (s *storeStatistics) collect() {
 	}
 }
 
-// ResetStoreStatistics resets the metrics of store.
-func ResetStoreStatistics(storeAddress string, id string) {
+func (s *storeStatistics) resetStoreStatistics(storeAddress string, id string) {
 	metrics := []string{
 		"region_score",
 		"leader_score",
@@ -285,10 +276,6 @@ func ResetStoreStatistics(storeAddress string, id string) {
 		"store_read_query_rate",
 		"store_regions_write_rate_bytes",
 		"store_regions_write_rate_keys",
-		"store_slow_trend_cause_value",
-		"store_slow_trend_cause_rate",
-		"store_slow_trend_result_value",
-		"store_slow_trend_result_rate",
 	}
 	for _, m := range metrics {
 		storeStatusGauge.DeleteLabelValues(storeAddress, id, m)
@@ -296,34 +283,28 @@ func ResetStoreStatistics(storeAddress string, id string) {
 }
 
 type storeStatisticsMap struct {
-	opt   config.ConfProvider
+	opt   *config.PersistOptions
 	stats *storeStatistics
 }
 
 // NewStoreStatisticsMap creates a new storeStatisticsMap.
-func NewStoreStatisticsMap(opt config.ConfProvider) *storeStatisticsMap {
+func NewStoreStatisticsMap(opt *config.PersistOptions, storeConfig *config.StoreConfig) *storeStatisticsMap {
 	return &storeStatisticsMap{
 		opt:   opt,
-		stats: newStoreStatistics(opt),
+		stats: newStoreStatistics(opt, storeConfig),
 	}
 }
 
-// Observe observes the store.
-func (m *storeStatisticsMap) Observe(store *core.StoreInfo) {
-	m.stats.observe(store)
+func (m *storeStatisticsMap) Observe(store *core.StoreInfo, stats *StoresStats) {
+	m.stats.Observe(store, stats)
 }
 
-// Collect collects the metrics.
 func (m *storeStatisticsMap) Collect() {
-	m.stats.collect()
+	m.stats.Collect()
 }
 
-// Reset resets the metrics.
-func Reset() {
+func (m *storeStatisticsMap) Reset() {
 	storeStatusGauge.Reset()
 	clusterStatusGauge.Reset()
 	placementStatusGauge.Reset()
-	ResetRegionStatsMetrics()
-	ResetLabelStatsMetrics()
-	ResetHotCacheStatusMetrics()
 }

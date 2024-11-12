@@ -24,12 +24,21 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/embed"
 )
 
 func TestEtcd(t *testing.T) {
 	re := require.New(t)
-	_, client, clean := etcdutil.NewTestEtcdCluster(t, 1)
-	defer clean()
+	cfg := etcdutil.NewTestSingleConfig(t)
+	etcd, err := embed.StartEtcd(cfg)
+	re.NoError(err)
+	defer etcd.Close()
+
+	ep := cfg.ListenClientUrls[0].String()
+	client, err := clientv3.New(clientv3.Config{
+		Endpoints: []string{ep},
+	})
+	re.NoError(err)
 	rootPath := path.Join("/pd", strconv.FormatUint(100, 10))
 
 	kv := NewEtcdKVBase(client, rootPath)
