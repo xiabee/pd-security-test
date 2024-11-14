@@ -212,6 +212,13 @@ func WithBalanceLeaderName(name string) BalanceLeaderCreateOption {
 	}
 }
 
+// WithBalanceLeaderFilterCounterName sets the filter counter name for the scheduler.
+func WithBalanceLeaderFilterCounterName(name string) BalanceLeaderCreateOption {
+	return func(s *balanceLeaderScheduler) {
+		s.filterCounter.SetScope(name)
+	}
+}
+
 func (l *balanceLeaderScheduler) GetName() string {
 	return l.name
 }
@@ -505,7 +512,7 @@ func (l *balanceLeaderScheduler) transferLeaderIn(solver *solver, collector *pla
 	if leaderFilter := filter.NewPlacementLeaderSafeguard(l.GetName(), conf, solver.GetBasicCluster(), solver.GetRuleManager(), solver.region, solver.source, false /*allowMoveLeader*/); leaderFilter != nil {
 		finalFilters = append(l.filters, leaderFilter)
 	}
-	target := filter.NewCandidates([]*core.StoreInfo{solver.target}).
+	target := filter.NewCandidates(l.R, []*core.StoreInfo{solver.target}).
 		FilterTarget(conf, nil, l.filterCounter, finalFilters...).
 		PickFirst()
 	if target == nil {
