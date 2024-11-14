@@ -21,9 +21,7 @@ const (
 	requestSubsystem      = "request"
 	tokenRequestSubsystem = "token_request"
 
-	resourceGroupNameLabel    = "name"
-	newResourceGroupNameLabel = "resource_group"
-	errType                   = "type"
+	resourceGroupNameLabel = "name"
 )
 
 var (
@@ -40,7 +38,7 @@ var (
 			Namespace: namespace,
 			Subsystem: requestSubsystem,
 			Name:      "success",
-			Buckets:   []float64{0.0005, .005, .01, .05, .1, .5, 1, 5, 10, 20, 25, 30, 60, 600, 1800, 3600}, // 0.0005 ~ 1h
+			Buckets:   []float64{.005, .01, .05, .1, .5, 1, 5, 10, 20, 25, 30}, // 0.005 ~ 30
 			Help:      "Bucketed histogram of wait duration of successful request.",
 		}, []string{resourceGroupNameLabel})
 
@@ -49,7 +47,7 @@ var (
 			Namespace: namespace,
 			Subsystem: requestSubsystem,
 			Name:      "limit_reserve_time_failed",
-			Buckets:   []float64{0.0005, .01, .05, .1, .5, 1, 5, 10, 20, 25, 30, 60, 600, 1800, 3600, 86400}, // 0.0005 ~ 24h
+			Buckets:   []float64{.005, .01, .05, .1, .5, 1, 5, 10, 20, 25, 30}, // 0.005 ~ 30
 			Help:      "Bucketed histogram of wait duration of failed request.",
 		}, []string{resourceGroupNameLabel})
 
@@ -59,7 +57,7 @@ var (
 			Subsystem: requestSubsystem,
 			Name:      "fail",
 			Help:      "Counter of failed request.",
-		}, []string{resourceGroupNameLabel, errType})
+		}, []string{resourceGroupNameLabel})
 
 	requestRetryCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -73,7 +71,6 @@ var (
 		prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: tokenRequestSubsystem,
-			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 13), // 1ms ~ 8s
 			Name:      "duration",
 			Help:      "Bucketed histogram of latency(s) of token request.",
 		}, []string{"type"})
@@ -85,14 +82,6 @@ var (
 			Name:      "resource_group",
 			Help:      "Counter of token request by every resource group.",
 		}, []string{resourceGroupNameLabel})
-
-	lowTokenRequestNotifyCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: namespace,
-			Subsystem: tokenRequestSubsystem,
-			Name:      "low_token_notified",
-			Help:      "Counter of low token request.",
-		}, []string{newResourceGroupNameLabel})
 )
 
 var (
@@ -109,5 +98,4 @@ func init() {
 	prometheus.MustRegister(requestRetryCounter)
 	prometheus.MustRegister(tokenRequestDuration)
 	prometheus.MustRegister(resourceGroupTokenRequestCounter)
-	prometheus.MustRegister(lowTokenRequestNotifyCounter)
 }

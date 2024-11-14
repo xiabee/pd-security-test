@@ -16,7 +16,6 @@ package schedulers
 
 import (
 	"fmt"
-	"math/rand"
 	"net/http"
 	"time"
 
@@ -61,12 +60,11 @@ func intervalGrow(x time.Duration, maxInterval time.Duration, typ intervalGrowth
 // BaseScheduler is a basic scheduler for all other complex scheduler
 type BaseScheduler struct {
 	OpController *schedule.OperatorController
-	R            *rand.Rand
 }
 
 // NewBaseScheduler returns a basic scheduler
 func NewBaseScheduler(opController *schedule.OperatorController) *BaseScheduler {
-	return &BaseScheduler{OpController: opController, R: rand.New(rand.NewSource(time.Now().UnixNano()))}
+	return &BaseScheduler{OpController: opController}
 }
 
 func (s *BaseScheduler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

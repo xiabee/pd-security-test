@@ -248,7 +248,7 @@ func (c *RaftCluster) InitCluster(
 	c.core, c.opt, c.storage, c.id = basicCluster, opt, storage, id
 	c.ctx, c.cancel = context.WithCancel(c.serverCtx)
 	c.labelLevelStats = statistics.NewLabelStatistics()
-	c.hotStat = statistics.NewHotStat(c.ctx, basicCluster)
+	c.hotStat = statistics.NewHotStat(c.ctx)
 	c.hotBuckets = buckets.NewBucketsCache(c.ctx)
 	c.slowStat = statistics.NewSlowStat(c.ctx)
 	c.progressManager = progress.NewManager()
@@ -1058,7 +1058,7 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 			if c.regionStats != nil {
 				c.regionStats.ClearDefunctRegion(item.GetID())
 			}
-			c.labelLevelStats.MarkDefunctRegion(item.GetID())
+			c.labelLevelStats.ClearDefunctRegion(item.GetID())
 			c.ruleManager.InvalidCache(item.GetID())
 		}
 		regionUpdateCacheEventCounter.Inc()
@@ -1379,9 +1379,6 @@ func (c *RaftCluster) checkStoreLabels(s *core.StoreInfo) error {
 	}
 	for _, label := range s.GetLabels() {
 		key := label.GetKey()
-		if key == core.EngineKey {
-			continue
-		}
 		if _, ok := keysSet[key]; !ok {
 			log.Warn("not found the key match with the store label",
 				zap.Stringer("store", s.GetMeta()),
@@ -2167,7 +2164,6 @@ func (c *RaftCluster) updateRegionsLabelLevelStats(regions []*core.RegionInfo) {
 	for _, region := range regions {
 		c.labelLevelStats.Observe(region, c.getStoresWithoutLabelLocked(region, core.EngineKey, core.EngineTiFlash), c.opt.GetLocationLabels())
 	}
-	c.labelLevelStats.ClearDefunctRegions()
 }
 
 func (c *RaftCluster) getRegionStoresLocked(region *core.RegionInfo) []*core.StoreInfo {

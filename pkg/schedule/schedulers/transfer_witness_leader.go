@@ -15,8 +15,6 @@
 package schedulers
 
 import (
-	"math/rand"
-
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/core"
@@ -83,7 +81,7 @@ func (s *trasferWitnessLeaderScheduler) scheduleTransferWitnessLeaderBatch(name,
 	for i := 0; i < batchSize; i++ {
 		select {
 		case region := <-s.regions:
-			op, err := s.scheduleTransferWitnessLeader(s.R, name, typ, cluster, region)
+			op, err := s.scheduleTransferWitnessLeader(name, typ, cluster, region)
 			if err != nil {
 				log.Debug("fail to create transfer leader operator", errs.ZapError(err))
 				continue
@@ -100,7 +98,7 @@ func (s *trasferWitnessLeaderScheduler) scheduleTransferWitnessLeaderBatch(name,
 	return ops
 }
 
-func (s *trasferWitnessLeaderScheduler) scheduleTransferWitnessLeader(r *rand.Rand, name, typ string, cluster schedule.Cluster, region *core.RegionInfo) (*operator.Operator, error) {
+func (s *trasferWitnessLeaderScheduler) scheduleTransferWitnessLeader(name, typ string, cluster schedule.Cluster, region *core.RegionInfo) (*operator.Operator, error) {
 	var filters []filter.Filter
 	unhealthyPeerStores := make(map[uint64]struct{})
 	for _, peer := range region.GetDownPeers() {
@@ -110,7 +108,7 @@ func (s *trasferWitnessLeaderScheduler) scheduleTransferWitnessLeader(r *rand.Ra
 		unhealthyPeerStores[peer.GetStoreId()] = struct{}{}
 	}
 	filters = append(filters, filter.NewExcludedFilter(name, nil, unhealthyPeerStores), &filter.StoreStateFilter{ActionScope: name, TransferLeader: true, OperatorLevel: constant.Urgent})
-	candidates := filter.NewCandidates(r, cluster.GetFollowerStores(region)).FilterTarget(cluster.GetOpts(), nil, nil, filters...)
+	candidates := filter.NewCandidates(cluster.GetFollowerStores(region)).FilterTarget(cluster.GetOpts(), nil, nil, filters...)
 	// Compatible with old TiKV transfer leader logic.
 	target := candidates.RandomPick()
 	targets := candidates.PickAll()

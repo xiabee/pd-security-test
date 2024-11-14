@@ -16,8 +16,6 @@ package statistics
 
 import (
 	"context"
-
-	"github.com/tikv/pd/pkg/core"
 )
 
 // HotStat contains cluster's hotspot statistics.
@@ -27,9 +25,9 @@ type HotStat struct {
 }
 
 // NewHotStat creates the container to hold cluster's hotspot statistics.
-func NewHotStat(ctx context.Context, cluster *core.BasicCluster) *HotStat {
+func NewHotStat(ctx context.Context) *HotStat {
 	return &HotStat{
-		HotCache:    NewHotCache(ctx, cluster),
+		HotCache:    NewHotCache(ctx),
 		StoresStats: NewStoresStats(),
 	}
 }

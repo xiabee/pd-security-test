@@ -212,7 +212,6 @@ const (
 type drAutoSyncStatus struct {
 	State            string     `json:"state,omitempty"`
 	StateID          uint64     `json:"state_id,omitempty"`
-	AsyncStartTime   *time.Time `json:"async_start,omitempty"`
 	RecoverStartTime *time.Time `json:"recover_start,omitempty"`
 	TotalRegions     int        `json:"total_regions,omitempty"`
 	SyncedRegions    int        `json:"synced_regions,omitempty"`
@@ -263,8 +262,7 @@ func (m *ModeManager) drSwitchToAsyncWithLock(availableStores []uint64) error {
 		log.Warn("failed to switch to async state", zap.String("replicate-mode", modeDRAutoSync), errs.ZapError(err))
 		return err
 	}
-	now := time.Now()
-	dr := drAutoSyncStatus{State: drStateAsync, StateID: id, AvailableStores: availableStores, AsyncStartTime: &now}
+	dr := drAutoSyncStatus{State: drStateAsync, StateID: id, AvailableStores: availableStores}
 	if err := m.storage.SaveReplicationStatus(modeDRAutoSync, dr); err != nil {
 		log.Warn("failed to switch to async state", zap.String("replicate-mode", modeDRAutoSync), errs.ZapError(err))
 		return err
@@ -272,15 +270,6 @@ func (m *ModeManager) drSwitchToAsyncWithLock(availableStores []uint64) error {
 	m.drAutoSync = dr
 	log.Info("switched to async state", zap.String("replicate-mode", modeDRAutoSync))
 	return nil
-}
-
-func (m *ModeManager) drDurationSinceAsyncStart() time.Duration {
-	m.RLock()
-	defer m.RUnlock()
-	if m.drAutoSync.AsyncStartTime == nil {
-		return 0
-	}
-	return time.Since(*m.drAutoSync.AsyncStartTime)
 }
 
 func (m *ModeManager) drSwitchToSyncRecover() error {
@@ -482,7 +471,7 @@ func (m *ModeManager) tickUpdateState() {
 			m.drSwitchToAsync(storeIDs[primaryUp])
 		}
 	case drStateAsync:
-		if canSync && m.drDurationSinceAsyncStart() > m.config.DRAutoSync.WaitRecoverTimeout.Duration {
+		if canSync {
 			m.drSwitchToSyncRecover()
 			break
 		}
