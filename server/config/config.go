@@ -224,6 +224,7 @@ const (
 	minTSOUpdatePhysicalInterval     = 1 * time.Millisecond
 
 	defaultLogFormat = "text"
+	defaultLogLevel  = "info"
 
 	defaultMaxMovableHotPeerSize = int64(512)
 
@@ -497,10 +498,6 @@ func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
 
 	c.Security.Encryption.Adjust()
 
-	if len(c.Log.Format) == 0 {
-		c.Log.Format = defaultLogFormat
-	}
-
 	c.Controller.Adjust(configMetaData.Child("controller"))
 
 	return nil
@@ -510,6 +507,8 @@ func (c *Config) adjustLog(meta *configutil.ConfigMetaData) {
 	if !meta.IsDefined("disable-error-verbose") {
 		c.Log.DisableErrorVerbose = defaultDisableErrorVerbose
 	}
+	configutil.AdjustString(&c.Log.Format, defaultLogFormat)
+	configutil.AdjustString(&c.Log.Level, defaultLogLevel)
 }
 
 // Clone returns a cloned configuration.
@@ -1376,13 +1375,14 @@ func NormalizeReplicationMode(m string) string {
 
 // DRAutoSyncReplicationConfig is the configuration for auto sync mode between 2 data centers.
 type DRAutoSyncReplicationConfig struct {
-	LabelKey         string            `toml:"label-key" json:"label-key"`
-	Primary          string            `toml:"primary" json:"primary"`
-	DR               string            `toml:"dr" json:"dr"`
-	PrimaryReplicas  int               `toml:"primary-replicas" json:"primary-replicas"`
-	DRReplicas       int               `toml:"dr-replicas" json:"dr-replicas"`
-	WaitStoreTimeout typeutil.Duration `toml:"wait-store-timeout" json:"wait-store-timeout"`
-	PauseRegionSplit bool              `toml:"pause-region-split" json:"pause-region-split,string"`
+	LabelKey           string            `toml:"label-key" json:"label-key"`
+	Primary            string            `toml:"primary" json:"primary"`
+	DR                 string            `toml:"dr" json:"dr"`
+	PrimaryReplicas    int               `toml:"primary-replicas" json:"primary-replicas"`
+	DRReplicas         int               `toml:"dr-replicas" json:"dr-replicas"`
+	WaitStoreTimeout   typeutil.Duration `toml:"wait-store-timeout" json:"wait-store-timeout"`
+	WaitRecoverTimeout typeutil.Duration `toml:"wait-recover-timeout" json:"wait-recover-timeout"`
+	PauseRegionSplit   bool              `toml:"pause-region-split" json:"pause-region-split,string"`
 }
 
 func (c *DRAutoSyncReplicationConfig) adjust(meta *configutil.ConfigMetaData) {
