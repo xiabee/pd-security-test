@@ -28,6 +28,7 @@ import (
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
+	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
@@ -51,7 +52,7 @@ func newMemberHandler(svr *server.Server, rd *render.Render) *memberHandler {
 // @Success  200  {object}  pdpb.GetMembersResponse
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /members [get]
-func (h *memberHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
+func (h *memberHandler) GetMembers(w http.ResponseWriter, _ *http.Request) {
 	members, err := getMembers(h.svr)
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())
@@ -61,7 +62,7 @@ func (h *memberHandler) GetMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 func getMembers(svr *server.Server) (*pdpb.GetMembersResponse, error) {
-	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()}}
+	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: keypath.ClusterID()}}
 	grpcServer := &server.GrpcServer{Server: svr}
 	members, err := grpcServer.GetMembers(context.Background(), req)
 	if err != nil {
@@ -238,7 +239,7 @@ func (h *memberHandler) SetMemberPropertyByName(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	var input map[string]interface{}
+	var input map[string]any
 	if err := apiutil.ReadJSONRespondError(h.rd, w, r.Body, &input); err != nil {
 		return
 	}
@@ -276,7 +277,7 @@ func newLeaderHandler(svr *server.Server, rd *render.Render) *leaderHandler {
 // @Produce  json
 // @Success  200  {object}  pdpb.Member
 // @Router   /leader [get]
-func (h *leaderHandler) GetLeader(w http.ResponseWriter, r *http.Request) {
+func (h *leaderHandler) GetLeader(w http.ResponseWriter, _ *http.Request) {
 	h.rd.JSON(w, http.StatusOK, h.svr.GetLeader())
 }
 
@@ -286,7 +287,7 @@ func (h *leaderHandler) GetLeader(w http.ResponseWriter, r *http.Request) {
 // @Success  200  {string}  string  "The resign command is submitted."
 // @Failure  500  {string}  string  "PD server failed to proceed the request."
 // @Router   /leader/resign [post]
-func (h *leaderHandler) ResignLeader(w http.ResponseWriter, r *http.Request) {
+func (h *leaderHandler) ResignLeader(w http.ResponseWriter, _ *http.Request) {
 	err := h.svr.GetMember().ResignEtcdLeader(h.svr.Context(), h.svr.Name(), "")
 	if err != nil {
 		h.rd.JSON(w, http.StatusInternalServerError, err.Error())

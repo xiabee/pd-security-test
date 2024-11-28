@@ -114,6 +114,8 @@ func TestDisableLocalTSOAfterEnabling(t *testing.T) {
 	re.NoError(cluster.RunInitialServers())
 
 	cluster.WaitAllLeaders(re, dcLocationConfig)
+	leaderServer := cluster.GetLeaderServer()
+	leaderServer.BootstrapCluster()
 	requestLocalTSOs(re, cluster, dcLocationConfig)
 
 	// Reboot the cluster.
@@ -122,10 +124,10 @@ func TestDisableLocalTSOAfterEnabling(t *testing.T) {
 		server.SetEnableLocalTSO(false)
 	}
 	re.NoError(cluster.RunInitialServers())
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 
 	// Re-request the global TSOs.
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer = cluster.GetLeaderServer()
 	grpcPDClient := testutil.MustNewGrpcClient(re, leaderServer.GetAddr())
 	clusterID := leaderServer.GetClusterID()
 	req := &pdpb.TsoRequest{

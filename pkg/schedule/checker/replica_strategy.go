@@ -15,6 +15,8 @@
 package checker
 
 import (
+	"math/rand"
+
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
@@ -26,6 +28,7 @@ import (
 // ReplicaStrategy collects some utilities to manipulate region peers. It
 // exists to allow replica_checker and rule_checker to reuse common logics.
 type ReplicaStrategy struct {
+	r              *rand.Rand
 	checkerName    string // replica-checker / rule-checker
 	cluster        sche.CheckerCluster
 	locationLabels []string
@@ -76,7 +79,7 @@ func (s *ReplicaStrategy) SelectStoreToAdd(coLocationStores []*core.StoreInfo, e
 
 	isolationComparer := filter.IsolationComparer(s.locationLabels, coLocationStores)
 	strictStateFilter := &filter.StoreStateFilter{ActionScope: s.checkerName, MoveRegion: true, AllowFastFailover: s.fastFailover, OperatorLevel: level}
-	targetCandidate := filter.NewCandidates(s.cluster.GetStores()).
+	targetCandidate := filter.NewCandidates(s.r, s.cluster.GetStores()).
 		FilterTarget(s.cluster.GetCheckerConfig(), nil, nil, filters...).
 		KeepTheTopStores(isolationComparer, false) // greater isolation score is better
 	if targetCandidate.Len() == 0 {
@@ -97,7 +100,7 @@ func (s *ReplicaStrategy) SelectStoreToFix(coLocationStores []*core.StoreInfo, o
 		return 0, false
 	}
 	// trick to avoid creating a slice with `old` removed.
-	s.swapStoreToFirst(coLocationStores, old)
+	swapStoreToFirst(coLocationStores, old)
 	// If the coLocationStores only has one store, no need to remove.
 	// Otherwise, the other stores will be filtered.
 	if len(coLocationStores) > 1 {
@@ -113,7 +116,7 @@ func (s *ReplicaStrategy) SelectStoreToImprove(coLocationStores []*core.StoreInf
 		return 0, false
 	}
 	// trick to avoid creating a slice with `old` removed.
-	s.swapStoreToFirst(coLocationStores, old)
+	swapStoreToFirst(coLocationStores, old)
 	oldStore := s.cluster.GetStore(old)
 	if oldStore == nil {
 		return 0, false
@@ -127,7 +130,7 @@ func (s *ReplicaStrategy) SelectStoreToImprove(coLocationStores []*core.StoreInf
 	return s.SelectStoreToAdd(coLocationStores[1:], filters...)
 }
 
-func (s *ReplicaStrategy) swapStoreToFirst(stores []*core.StoreInfo, id uint64) {
+func swapStoreToFirst(stores []*core.StoreInfo, id uint64) {
 	for i, s := range stores {
 		if s.GetID() == id {
 			stores[0], stores[i] = stores[i], stores[0]
@@ -143,7 +146,7 @@ func (s *ReplicaStrategy) SelectStoreToRemove(coLocationStores []*core.StoreInfo
 	if s.fastFailover {
 		level = constant.Urgent
 	}
-	source := filter.NewCandidates(coLocationStores).
+	source := filter.NewCandidates(s.r, coLocationStores).
 		FilterSource(s.cluster.GetCheckerConfig(), nil, nil, &filter.StoreStateFilter{ActionScope: s.checkerName, MoveRegion: true, OperatorLevel: level}).
 		KeepTheTopStores(isolationComparer, true).
 		PickTheTopStore(filter.RegionScoreComparer(s.cluster.GetCheckerConfig()), false)

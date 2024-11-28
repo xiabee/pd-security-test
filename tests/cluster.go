@@ -34,10 +34,11 @@ import (
 	"github.com/tikv/pd/pkg/id"
 	"github.com/tikv/pd/pkg/keyspace"
 	scheduling "github.com/tikv/pd/pkg/mcs/scheduling/server"
-	"github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/schedule/schedulers"
 	"github.com/tikv/pd/pkg/swaggerserver"
 	"github.com/tikv/pd/pkg/tso"
+	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/tikv/pd/pkg/utils/testutil"
@@ -47,7 +48,7 @@ import (
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/join"
-	"go.etcd.io/etcd/clientv3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 // TestServer states.
@@ -84,10 +85,12 @@ func NewTestServer(ctx context.Context, cfg *config.Config) (*TestServer, error)
 
 // NewTestAPIServer creates a new TestServer.
 func NewTestAPIServer(ctx context.Context, cfg *config.Config) (*TestServer, error) {
-	return createTestServer(ctx, cfg, []string{utils.APIServiceName})
+	return createTestServer(ctx, cfg, []string{constant.APIServiceName})
 }
 
 func createTestServer(ctx context.Context, cfg *config.Config, services []string) (*TestServer, error) {
+	//  disable the heartbeat async runner in test
+	cfg.Schedule.EnableHeartbeatConcurrentRunner = false
 	err := logutil.SetupLogger(cfg.Log, &cfg.Logger, &cfg.LogProps, cfg.Security.RedactInfoLog)
 	if err != nil {
 		return nil, err
@@ -218,10 +221,8 @@ func (s *TestServer) GetServer() *server.Server {
 }
 
 // GetClusterID returns the cluster ID.
-func (s *TestServer) GetClusterID() uint64 {
-	s.RLock()
-	defer s.RUnlock()
-	return s.server.ClusterID()
+func (*TestServer) GetClusterID() uint64 {
+	return keypath.ClusterID()
 }
 
 // GetLeader returns current leader of PD cluster.
@@ -305,7 +306,7 @@ func (s *TestServer) IsAllocatorLeader(dcLocation string) bool {
 func (s *TestServer) GetEtcdLeader() (string, error) {
 	s.RLock()
 	defer s.RUnlock()
-	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: s.server.ClusterID()}}
+	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: keypath.ClusterID()}}
 	members, _ := s.grpcServer.GetMembers(context.TODO(), req)
 	if members.Header.GetError() != nil {
 		return "", errors.WithStack(errors.New(members.Header.GetError().String()))
@@ -317,7 +318,7 @@ func (s *TestServer) GetEtcdLeader() (string, error) {
 func (s *TestServer) GetEtcdLeaderID() (uint64, error) {
 	s.RLock()
 	defer s.RUnlock()
-	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: s.server.ClusterID()}}
+	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: keypath.ClusterID()}}
 	members, err := s.grpcServer.GetMembers(context.TODO(), req)
 	if err != nil {
 		return 0, errors.WithStack(err)
@@ -410,7 +411,7 @@ func (s *TestServer) GetStoreRegions(storeID uint64) []*core.RegionInfo {
 // BootstrapCluster is used to bootstrap the cluster.
 func (s *TestServer) BootstrapCluster() error {
 	bootstrapReq := &pdpb.BootstrapRequest{
-		Header: &pdpb.RequestHeader{ClusterId: s.GetClusterID()},
+		Header: &pdpb.RequestHeader{ClusterId: keypath.ClusterID()},
 		Store:  &metapb.Store{Id: 1, Address: "mock://1", LastHeartbeat: time.Now().UnixNano()},
 		Region: &metapb.Region{Id: 2, Peers: []*metapb.Peer{{Id: 3, StoreId: 1, Role: metapb.PeerRole_Voter}}},
 	}
@@ -428,7 +429,7 @@ func (s *TestServer) BootstrapCluster() error {
 // make a test know the PD leader has been elected as soon as possible.
 // If it exceeds the maximum number of loops, it will return nil.
 func (s *TestServer) WaitLeader() bool {
-	for i := 0; i < WaitLeaderRetryTimes; i++ {
+	for range WaitLeaderRetryTimes {
 		if s.server.GetMember().IsLeader() {
 			return true
 		}
@@ -551,7 +552,7 @@ func restartTestCluster(
 	}
 	wg.Wait()
 
-	errorMap.Range(func(key, value interface{}) bool {
+	errorMap.Range(func(key, value any) bool {
 		if value != nil {
 			err = value.(error)
 			return false
@@ -570,17 +571,17 @@ func restartTestCluster(
 }
 
 // RunServer starts to run TestServer.
-func (c *TestCluster) RunServer(server *TestServer) <-chan error {
+func RunServer(server *TestServer) <-chan error {
 	resC := make(chan error)
 	go func() { resC <- server.Run() }()
 	return resC
 }
 
 // RunServers starts to run multiple TestServer.
-func (c *TestCluster) RunServers(servers []*TestServer) error {
+func RunServers(servers []*TestServer) error {
 	res := make([]<-chan error, len(servers))
 	for i, s := range servers {
-		res[i] = c.RunServer(s)
+		res[i] = RunServer(s)
 	}
 	for _, c := range res {
 		if err := <-c; err != nil {
@@ -596,7 +597,7 @@ func (c *TestCluster) RunInitialServers() error {
 	for _, conf := range c.config.InitialServers {
 		servers = append(servers, c.GetServer(conf.Name))
 	}
-	return c.RunServers(servers)
+	return RunServers(servers)
 }
 
 // StopAll is used to stop all servers.
@@ -607,6 +608,11 @@ func (c *TestCluster) StopAll() error {
 		}
 	}
 	return nil
+}
+
+// DeleteServer is used to delete a server.
+func (c *TestCluster) DeleteServer(name string) {
+	delete(c.servers, name)
 }
 
 // GetServer returns a server with a given name.
@@ -654,7 +660,7 @@ func (c *TestCluster) WaitLeader(ops ...WaitOption) string {
 	for _, op := range ops {
 		op(option)
 	}
-	for i := 0; i < option.retryTimes; i++ {
+	for range option.retryTimes {
 		counter := make(map[string]int)
 		running := 0
 		for _, s := range c.servers {
@@ -686,7 +692,7 @@ func (c *TestCluster) WaitRegionSyncerClientsReady(n int) bool {
 		retryTimes:   40,
 		waitInterval: WaitLeaderCheckInterval,
 	}
-	for i := 0; i < option.retryTimes; i++ {
+	for range option.retryTimes {
 		name := c.GetLeader()
 		if len(name) == 0 {
 			time.Sleep(option.waitInterval)
@@ -723,7 +729,7 @@ func (c *TestCluster) WaitAllocatorLeader(dcLocation string, ops ...WaitOption) 
 	for _, op := range ops {
 		op(option)
 	}
-	for i := 0; i < option.retryTimes; i++ {
+	for range option.retryTimes {
 		counter := make(map[string]int)
 		running := 0
 		for _, s := range c.servers {
@@ -808,7 +814,7 @@ func (c *TestCluster) HandleReportBuckets(b *metapb.Buckets) error {
 
 // Join is used to add a new TestServer into the cluster.
 func (c *TestCluster) Join(ctx context.Context, opts ...ConfigOption) (*TestServer, error) {
-	conf, err := c.config.Join().Generate(opts...)
+	conf, err := c.config.join().Generate(opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -822,7 +828,7 @@ func (c *TestCluster) Join(ctx context.Context, opts ...ConfigOption) (*TestServ
 
 // JoinAPIServer is used to add a new TestAPIServer into the cluster.
 func (c *TestCluster) JoinAPIServer(ctx context.Context, opts ...ConfigOption) (*TestServer, error) {
-	conf, err := c.config.Join().Generate(opts...)
+	conf, err := c.config.join().Generate(opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -852,8 +858,8 @@ func (c *TestCluster) CheckClusterDCLocation() {
 	wg := sync.WaitGroup{}
 	for _, server := range c.GetServers() {
 		wg.Add(1)
-		go func(ser *TestServer) {
-			ser.GetTSOAllocatorManager().ClusterDCLocationChecker()
+		go func(s *TestServer) {
+			s.GetTSOAllocatorManager().ClusterDCLocationChecker()
 			wg.Done()
 		}(server)
 	}

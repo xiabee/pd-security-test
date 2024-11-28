@@ -25,12 +25,14 @@ import (
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/id"
-	"github.com/tikv/pd/pkg/mcs/utils"
+	"github.com/tikv/pd/pkg/mcs/utils/constant"
 	"github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/labeler"
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/storage/kv"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
+	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"go.uber.org/zap"
@@ -52,10 +54,13 @@ const (
 	// Note: Config[TSOKeyspaceGroupIDKey] is only used to judge whether there is keyspace group id.
 	// It will not update the keyspace group id when merging or splitting.
 	TSOKeyspaceGroupIDKey = "tso_keyspace_group_id"
-	// MaxEtcdTxnOps is the max value of operations in an etcd txn. The default limit of etcd txn op is 128.
-	// We use 120 here to leave some space for other operations.
-	// See: https://github.com/etcd-io/etcd/blob/d3e43d4de6f6d9575b489dd7850a85e37e0f6b6c/server/embed/config.go#L61
-	MaxEtcdTxnOps = 120
+
+	// If `gc_management_type` is `global_gc`, it means the current keyspace requires a tidb without 'keyspace-name'
+	// configured to run a global gc worker to calculate a global gc safe point.
+	// If `gc_management_type` is `keyspace_level_gc` it means the current keyspace can calculate gc safe point by its own.
+	GCManagementType = "gc_management_type"
+	// KeyspaceLevelGC is a type of gc_management_type used to indicate that this keyspace independently advances its own gc safe point.
+	KeyspaceLevelGC = "keyspace_level_gc"
 )
 
 // Config is the interface for keyspace config.
@@ -121,20 +126,20 @@ func NewKeyspaceManager(
 		cluster:           cluster,
 		config:            config,
 		kgm:               kgm,
-		nextPatrolStartID: utils.DefaultKeyspaceID,
+		nextPatrolStartID: constant.DefaultKeyspaceID,
 	}
 }
 
 // Bootstrap saves default keyspace info.
 func (manager *Manager) Bootstrap() error {
 	// Split Keyspace Region for default keyspace.
-	if err := manager.splitKeyspaceRegion(utils.DefaultKeyspaceID, false); err != nil {
+	if err := manager.splitKeyspaceRegion(constant.DefaultKeyspaceID, false); err != nil {
 		return err
 	}
 	now := time.Now().Unix()
 	defaultKeyspaceMeta := &keyspacepb.KeyspaceMeta{
-		Id:             utils.DefaultKeyspaceID,
-		Name:           utils.DefaultKeyspaceName,
+		Id:             constant.DefaultKeyspaceID,
+		Name:           constant.DefaultKeyspaceName,
 		State:          keyspacepb.KeyspaceState_ENABLED,
 		CreatedAt:      now,
 		StateChangedAt: now,
@@ -233,8 +238,8 @@ func (manager *Manager) CreateKeyspace(request *CreateKeyspaceRequest) (*keyspac
 	err = manager.splitKeyspaceRegion(newID, waitRegionSplit)
 	if err != nil {
 		err2 := manager.store.RunInTxn(manager.ctx, func(txn kv.Txn) error {
-			idPath := endpoint.KeyspaceIDPath(request.Name)
-			metaPath := endpoint.KeyspaceMetaPath(newID)
+			idPath := keypath.KeyspaceIDPath(request.Name)
+			metaPath := keypath.KeyspaceMetaPath(newID)
 			e := txn.Remove(idPath)
 			if e != nil {
 				return e
@@ -325,7 +330,12 @@ func (manager *Manager) splitKeyspaceRegion(id uint32, waitRegionSplit bool) (er
 	}
 	defer func() {
 		if err != nil {
-			cl.GetRegionLabeler().DeleteLabelRule(keyspaceRule.ID)
+			if err := cl.GetRegionLabeler().DeleteLabelRule(keyspaceRule.ID); err != nil {
+				log.Warn("[keyspace] failed to delete region label for keyspace",
+					zap.Uint32("keyspace-id", id),
+					zap.Error(err),
+				)
+			}
 		}
 	}()
 
@@ -347,20 +357,20 @@ func (manager *Manager) splitKeyspaceRegion(id uint32, waitRegionSplit bool) (er
 		for {
 			select {
 			case <-ticker.C:
-				regionsInfo := manager.cluster.GetBasicCluster().RegionsInfo
-				region := regionsInfo.GetRegionByKey(rawLeftBound)
+				c := manager.cluster.GetBasicCluster()
+				region := c.GetRegionByKey(rawLeftBound)
 				if region == nil || !bytes.Equal(region.GetStartKey(), rawLeftBound) {
 					continue
 				}
-				region = regionsInfo.GetRegionByKey(rawRightBound)
+				region = c.GetRegionByKey(rawRightBound)
 				if region == nil || !bytes.Equal(region.GetStartKey(), rawRightBound) {
 					continue
 				}
-				region = regionsInfo.GetRegionByKey(txnLeftBound)
+				region = c.GetRegionByKey(txnLeftBound)
 				if region == nil || !bytes.Equal(region.GetStartKey(), txnLeftBound) {
 					continue
 				}
-				region = regionsInfo.GetRegionByKey(txnRightBound)
+				region = c.GetRegionByKey(txnRightBound)
 				if region == nil || !bytes.Equal(region.GetStartKey(), txnRightBound) {
 					continue
 				}
@@ -541,7 +551,7 @@ func (manager *Manager) UpdateKeyspaceConfig(name string, mutations []*Mutation)
 // It returns error if saving failed, operation not allowed, or if keyspace not exists.
 func (manager *Manager) UpdateKeyspaceState(name string, newState keyspacepb.KeyspaceState, now int64) (*keyspacepb.KeyspaceMeta, error) {
 	// Changing the state of default keyspace is not allowed.
-	if name == utils.DefaultKeyspaceName {
+	if name == constant.DefaultKeyspaceName {
 		log.Warn("[keyspace] failed to update keyspace config",
 			zap.Error(ErrModifyDefaultKeyspace),
 		)
@@ -593,7 +603,7 @@ func (manager *Manager) UpdateKeyspaceState(name string, newState keyspacepb.Key
 // It returns error if saving failed, operation not allowed, or if keyspace not exists.
 func (manager *Manager) UpdateKeyspaceStateByID(id uint32, newState keyspacepb.KeyspaceState, now int64) (*keyspacepb.KeyspaceMeta, error) {
 	// Changing the state of default keyspace is not allowed.
-	if id == utils.DefaultKeyspaceID {
+	if id == constant.DefaultKeyspaceID {
 		log.Warn("[keyspace] failed to update keyspace config",
 			zap.Error(ErrModifyDefaultKeyspace),
 		)
@@ -711,7 +721,7 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 			zap.Duration("cost", time.Since(start)),
 			zap.Uint64("patrolled-keyspace-count", patrolledKeyspaceCount),
 			zap.Uint64("assigned-keyspace-count", assignedKeyspaceCount),
-			zap.Int("batch-size", MaxEtcdTxnOps),
+			zap.Int("batch-size", etcdutil.MaxEtcdTxnOps),
 			zap.Uint32("start-keyspace-id", startKeyspaceID),
 			zap.Uint32("end-keyspace-id", endKeyspaceID),
 			zap.Uint32("current-start-id", currentStartID),
@@ -722,20 +732,20 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 		var defaultKeyspaceGroup *endpoint.KeyspaceGroup
 		err = manager.store.RunInTxn(manager.ctx, func(txn kv.Txn) error {
 			var err error
-			defaultKeyspaceGroup, err = manager.kgm.store.LoadKeyspaceGroup(txn, utils.DefaultKeyspaceGroupID)
+			defaultKeyspaceGroup, err = manager.kgm.store.LoadKeyspaceGroup(txn, constant.DefaultKeyspaceGroupID)
 			if err != nil {
 				return err
 			}
 			if defaultKeyspaceGroup == nil {
-				return errors.Errorf("default keyspace group %d not found", utils.DefaultKeyspaceGroupID)
+				return errors.Errorf("default keyspace group %d not found", constant.DefaultKeyspaceGroupID)
 			}
 			if defaultKeyspaceGroup.IsSplitting() {
-				return ErrKeyspaceGroupInSplit(utils.DefaultKeyspaceGroupID)
+				return ErrKeyspaceGroupInSplit(constant.DefaultKeyspaceGroupID)
 			}
 			if defaultKeyspaceGroup.IsMerging() {
-				return ErrKeyspaceGroupInMerging(utils.DefaultKeyspaceGroupID)
+				return ErrKeyspaceGroupInMerging(constant.DefaultKeyspaceGroupID)
 			}
-			keyspaces, err := manager.store.LoadRangeKeyspace(txn, manager.nextPatrolStartID, MaxEtcdTxnOps)
+			keyspaces, err := manager.store.LoadRangeKeyspace(txn, manager.nextPatrolStartID, etcdutil.MaxEtcdTxnOps)
 			if err != nil {
 				return err
 			}
@@ -745,9 +755,9 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 				currentStartID = keyspaces[0].GetId()
 				nextStartID = keyspaces[keyspaceNum-1].GetId() + 1
 			}
-			// If there are less than `MaxEtcdTxnOps` keyspaces or the next start ID reaches the end,
+			// If there are less than ` etcdutil.MaxEtcdTxnOps` keyspaces or the next start ID reaches the end,
 			// there is no need to patrol again.
-			moreToPatrol = keyspaceNum == MaxEtcdTxnOps
+			moreToPatrol = keyspaceNum == etcdutil.MaxEtcdTxnOps
 			var (
 				assigned            = false
 				keyspaceIDsToUnlock = make([]uint32, 0, keyspaceNum)
@@ -782,11 +792,11 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 					// Only save the keyspace group meta if any keyspace is assigned to it.
 					assigned = true
 				}
-				ks.Config[TSOKeyspaceGroupIDKey] = strconv.FormatUint(uint64(utils.DefaultKeyspaceGroupID), 10)
+				ks.Config[TSOKeyspaceGroupIDKey] = strconv.FormatUint(uint64(constant.DefaultKeyspaceGroupID), 10)
 				err = manager.store.SaveKeyspaceMeta(txn, ks)
 				if err != nil {
 					log.Error("[keyspace] failed to save keyspace meta during patrol",
-						zap.Int("batch-size", MaxEtcdTxnOps),
+						zap.Int("batch-size", etcdutil.MaxEtcdTxnOps),
 						zap.Uint32("start-keyspace-id", startKeyspaceID),
 						zap.Uint32("end-keyspace-id", endKeyspaceID),
 						zap.Uint32("current-start-id", currentStartID),
@@ -800,7 +810,7 @@ func (manager *Manager) PatrolKeyspaceAssignment(startKeyspaceID, endKeyspaceID 
 				err = manager.kgm.store.SaveKeyspaceGroup(txn, defaultKeyspaceGroup)
 				if err != nil {
 					log.Error("[keyspace] failed to save default keyspace group meta during patrol",
-						zap.Int("batch-size", MaxEtcdTxnOps),
+						zap.Int("batch-size", etcdutil.MaxEtcdTxnOps),
 						zap.Uint32("start-keyspace-id", startKeyspaceID),
 						zap.Uint32("end-keyspace-id", endKeyspaceID),
 						zap.Uint32("current-start-id", currentStartID),

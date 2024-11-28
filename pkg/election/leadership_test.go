@@ -25,8 +25,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/testutil"
-	"go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/embed"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/server/v3/embed"
 )
 
 const defaultLeaseTimeout = 1
@@ -100,9 +100,9 @@ func TestLeadership(t *testing.T) {
 	leadership2.Keep(ctx)
 
 	// Check the lease.
-	lease1 := leadership1.getLease()
+	lease1 := leadership1.GetLease()
 	re.NotNil(lease1)
-	lease2 := leadership2.getLease()
+	lease2 := leadership2.GetLease()
 	re.NotNil(lease2)
 
 	re.True(lease1.IsExpired())
@@ -117,35 +117,35 @@ func TestExitWatch(t *testing.T) {
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/election/fastTick", "return(true)"))
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/utils/etcdutil/fastTick", "return(true)"))
 	// Case1: close the client before the watch loop starts
-	checkExitWatch(t, leaderKey, func(server *embed.Etcd, client *clientv3.Client) func() {
+	checkExitWatch(t, leaderKey, func(_ *embed.Etcd, client *clientv3.Client) func() {
 		re.NoError(failpoint.Enable("github.com/tikv/pd/server/delayWatcher", `pause`))
 		client.Close()
 		re.NoError(failpoint.Disable("github.com/tikv/pd/server/delayWatcher"))
 		return func() {}
 	})
 	// Case2: close the client when the watch loop is running
-	checkExitWatch(t, leaderKey, func(server *embed.Etcd, client *clientv3.Client) func() {
+	checkExitWatch(t, leaderKey, func(_ *embed.Etcd, client *clientv3.Client) func() {
 		// Wait for the watch loop to start
 		time.Sleep(500 * time.Millisecond)
 		client.Close()
 		return func() {}
 	})
 	// Case3: delete the leader key
-	checkExitWatch(t, leaderKey, func(server *embed.Etcd, client *clientv3.Client) func() {
+	checkExitWatch(t, leaderKey, func(_ *embed.Etcd, client *clientv3.Client) func() {
 		leaderKey := leaderKey
 		_, err := client.Delete(context.Background(), leaderKey)
 		re.NoError(err)
 		return func() {}
 	})
 	// Case4: close the server before the watch loop starts
-	checkExitWatch(t, leaderKey, func(server *embed.Etcd, client *clientv3.Client) func() {
+	checkExitWatch(t, leaderKey, func(server *embed.Etcd, _ *clientv3.Client) func() {
 		re.NoError(failpoint.Enable("github.com/tikv/pd/server/delayWatcher", `pause`))
 		server.Close()
 		re.NoError(failpoint.Disable("github.com/tikv/pd/server/delayWatcher"))
 		return func() {}
 	})
 	// Case5: close the server when the watch loop is running
-	checkExitWatch(t, leaderKey, func(server *embed.Etcd, client *clientv3.Client) func() {
+	checkExitWatch(t, leaderKey, func(server *embed.Etcd, _ *clientv3.Client) func() {
 		// Wait for the watch loop to start
 		time.Sleep(500 * time.Millisecond)
 		server.Close()
@@ -175,7 +175,7 @@ func TestExitWatch(t *testing.T) {
 
 		resp2, err := client.MemberList(context.Background())
 		re.NoError(err)
-		re.Equal(3, len(resp2.Members))
+		re.Len(resp2.Members, 3)
 
 		etcd2.Server.HardStop()
 		etcd3.Server.HardStop()
@@ -274,7 +274,7 @@ func TestCampaignTimes(t *testing.T) {
 	defer func() {
 		campaignTimesRecordTimeout = 5 * time.Minute
 	}()
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		leadership.AddCampaignTimes()
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -282,7 +282,7 @@ func TestCampaignTimes(t *testing.T) {
 
 	// only the last 2 records are valid.
 	campaignTimesRecordTimeout = 200 * time.Millisecond
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		leadership.AddCampaignTimes()
 		time.Sleep(100 * time.Millisecond)
 	}

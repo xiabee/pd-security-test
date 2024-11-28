@@ -21,7 +21,7 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
-	"github.com/tikv/pd/client/grpcutil"
+	"github.com/tikv/pd/client/errs"
 )
 
 // KeyspaceClient manages keyspace metadata.
@@ -46,8 +46,8 @@ func (c *client) keyspaceClient() keyspacepb.KeyspaceClient {
 
 // LoadKeyspace loads and returns target keyspace's metadata.
 func (c *client) LoadKeyspace(ctx context.Context, name string) (*keyspacepb.KeyspaceMeta, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("keyspaceClient.LoadKeyspace", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("keyspaceClient.LoadKeyspace", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -57,8 +57,12 @@ func (c *client) LoadKeyspace(ctx context.Context, name string) (*keyspacepb.Key
 		Header: c.requestHeader(),
 		Name:   name,
 	}
-	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
-	resp, err := c.keyspaceClient().LoadKeyspace(ctx, req)
+	protoClient := c.keyspaceClient()
+	if protoClient == nil {
+		cancel()
+		return nil, errs.ErrClientGetProtoClient
+	}
+	resp, err := protoClient.LoadKeyspace(ctx, req)
 	cancel()
 
 	if err != nil {
@@ -86,8 +90,8 @@ func (c *client) LoadKeyspace(ctx context.Context, name string) (*keyspacepb.Key
 //
 // Updated keyspace meta will be returned.
 func (c *client) UpdateKeyspaceState(ctx context.Context, id uint32, state keyspacepb.KeyspaceState) (*keyspacepb.KeyspaceMeta, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("keyspaceClient.UpdateKeyspaceState", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("keyspaceClient.UpdateKeyspaceState", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -98,8 +102,12 @@ func (c *client) UpdateKeyspaceState(ctx context.Context, id uint32, state keysp
 		Id:     id,
 		State:  state,
 	}
-	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
-	resp, err := c.keyspaceClient().UpdateKeyspaceState(ctx, req)
+	protoClient := c.keyspaceClient()
+	if protoClient == nil {
+		cancel()
+		return nil, errs.ErrClientGetProtoClient
+	}
+	resp, err := protoClient.UpdateKeyspaceState(ctx, req)
 	cancel()
 
 	if err != nil {
@@ -120,14 +128,14 @@ func (c *client) UpdateKeyspaceState(ctx context.Context, id uint32, state keysp
 // It returns a stream of slices of keyspace metadata.
 // The first message in stream contains all current keyspaceMeta,
 // all subsequent messages contains new put events for all keyspaces.
-func (c *client) WatchKeyspaces(ctx context.Context) (chan []*keyspacepb.KeyspaceMeta, error) {
+func (*client) WatchKeyspaces(context.Context) (chan []*keyspacepb.KeyspaceMeta, error) {
 	return nil, errors.Errorf("WatchKeyspaces unimplemented")
 }
 
 // GetAllKeyspaces get all keyspaces metadata.
 func (c *client) GetAllKeyspaces(ctx context.Context, startID uint32, limit uint32) ([]*keyspacepb.KeyspaceMeta, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span = opentracing.StartSpan("keyspaceClient.GetAllKeyspaces", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span = span.Tracer().StartSpan("keyspaceClient.GetAllKeyspaces", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -138,8 +146,12 @@ func (c *client) GetAllKeyspaces(ctx context.Context, startID uint32, limit uint
 		StartId: startID,
 		Limit:   limit,
 	}
-	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
-	resp, err := c.keyspaceClient().GetAllKeyspaces(ctx, req)
+	protoClient := c.keyspaceClient()
+	if protoClient == nil {
+		cancel()
+		return nil, errs.ErrClientGetProtoClient
+	}
+	resp, err := protoClient.GetAllKeyspaces(ctx, req)
 	cancel()
 
 	if err != nil {

@@ -70,7 +70,7 @@ func main() {
 	rootCmd.SetOutput(os.Stdout)
 	if err := rootCmd.Execute(); err != nil {
 		rootCmd.Println(err)
-		os.Exit(1)
+		exit(1)
 	}
 }
 
@@ -94,6 +94,7 @@ func NewTSOServiceCommand() *cobra.Command {
 		Short: "Run the TSO service",
 		Run:   tso.CreateServerWrapper,
 	}
+	cmd.Flags().StringP("name", "", "", "human-readable name for this tso member")
 	cmd.Flags().BoolP("version", "V", false, "print version information and exit")
 	cmd.Flags().StringP("config", "", "", "config file")
 	cmd.Flags().StringP("backend-endpoints", "", "", "url for etcd client")
@@ -114,6 +115,7 @@ func NewSchedulingServiceCommand() *cobra.Command {
 		Short: "Run the scheduling service",
 		Run:   scheduling.CreateServerWrapper,
 	}
+	cmd.Flags().StringP("name", "", "", "human-readable name for this scheduling member")
 	cmd.Flags().BoolP("version", "V", false, "print version information and exit")
 	cmd.Flags().StringP("config", "", "", "config file")
 	cmd.Flags().StringP("backend-endpoints", "", "", "url for etcd client")
@@ -134,6 +136,7 @@ func NewResourceManagerServiceCommand() *cobra.Command {
 		Short: "Run the resource manager service",
 		Run:   resource_manager.CreateServerWrapper,
 	}
+	cmd.Flags().StringP("name", "", "", "human-readable name for this resource manager member")
 	cmd.Flags().BoolP("version", "V", false, "print version information and exit")
 	cmd.Flags().StringP("config", "", "", "config file")
 	cmd.Flags().StringP("backend-endpoints", "", "", "url for etcd client")
@@ -196,8 +199,12 @@ func start(cmd *cobra.Command, args []string, services ...string) {
 	schedulers.Register()
 	cfg := config.NewConfig()
 	flagSet := cmd.Flags()
-	flagSet.Parse(args)
-	err := cfg.Parse(flagSet)
+	err := flagSet.Parse(args)
+	if err != nil {
+		cmd.Println(err)
+		return
+	}
+	err = cfg.Parse(flagSet)
 	defer logutil.LogPanic()
 
 	if err != nil {
@@ -221,6 +228,8 @@ func start(cmd *cobra.Command, args []string, services ...string) {
 		exit(0)
 	}
 
+	// Check the PD version first before running.
+	server.CheckAndGetPDVersion()
 	// New zap logger
 	err = logutil.SetupLogger(cfg.Log, &cfg.Logger, &cfg.LogProps, cfg.Security.RedactInfoLog)
 	if err == nil {

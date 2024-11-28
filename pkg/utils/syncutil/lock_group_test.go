@@ -28,7 +28,7 @@ func TestLockGroup(t *testing.T) {
 	concurrency := 50
 	var wg sync.WaitGroup
 	wg.Add(concurrency)
-	for i := 0; i < concurrency; i++ {
+	for range concurrency {
 		go func(spaceID uint32) {
 			defer wg.Done()
 			mustSequentialUpdateSingle(re, spaceID, group, concurrency)
@@ -47,7 +47,7 @@ func TestLockGroupWithRemoveEntryOnUnlock(t *testing.T) {
 	// Test Concurrent lock/unlock.
 	var wg sync.WaitGroup
 	wg.Add(maxID)
-	for i := 0; i < maxID; i++ {
+	for i := range maxID {
 		go func(spaceID uint32) {
 			defer wg.Done()
 			mustSequentialUpdateSingle(re, spaceID, group, 10)
@@ -57,17 +57,17 @@ func TestLockGroupWithRemoveEntryOnUnlock(t *testing.T) {
 	// Test range lock in a scenario with non-consecutive large key space. One of example is
 	// keyspace group split loads non-consecutive keyspace meta in batches and lock all loaded
 	// keyspace meta within a batch at the same time.
-	for i := 0; i < maxID; i++ {
+	for i := range maxID {
 		group.Lock(uint32(i))
 	}
-	re.Equal(len(group.entries), maxID)
-	for i := 0; i < maxID; i++ {
+	re.Len(group.entries, maxID)
+	for i := range maxID {
 		group.Unlock(uint32(i))
 	}
 
 	wg.Wait()
 	// Check that size of the lock group is limited.
-	re.Equal(len(group.entries), 0)
+	re.Empty(group.entries)
 }
 
 // mustSequentialUpdateSingle checks that for any given update, update is sequential.
@@ -75,7 +75,7 @@ func mustSequentialUpdateSingle(re *require.Assertions, spaceID uint32, group *L
 	total := 0
 	var wg sync.WaitGroup
 	wg.Add(concurrency)
-	for i := 0; i < concurrency; i++ {
+	for range concurrency {
 		go func() {
 			defer wg.Done()
 			group.Lock(spaceID)

@@ -20,10 +20,13 @@ import (
 	"net/http"
 
 	"github.com/pingcap/kvproto/pkg/meta_storagepb"
+	"github.com/pingcap/log"
 	bs "github.com/tikv/pd/pkg/basicserver"
 	"github.com/tikv/pd/pkg/mcs/registry"
 	"github.com/tikv/pd/pkg/utils/apiutil"
-	"go.etcd.io/etcd/clientv3"
+	"github.com/tikv/pd/pkg/utils/keypath"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -37,13 +40,13 @@ var (
 var _ meta_storagepb.MetaStorageServer = (*Service)(nil)
 
 // SetUpRestHandler is a hook to sets up the REST service.
-var SetUpRestHandler = func(srv *Service) (http.Handler, apiutil.APIServiceGroup) {
+var SetUpRestHandler = func(*Service) (http.Handler, apiutil.APIServiceGroup) {
 	return dummyRestService{}, apiutil.APIServiceGroup{}
 }
 
 type dummyRestService struct{}
 
-func (d dummyRestService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (dummyRestService) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
 	w.Write([]byte("not implemented"))
 }
@@ -56,10 +59,10 @@ type Service struct {
 }
 
 // NewService creates a new meta storage service.
-func NewService[T ClusterIDProvider](svr bs.Server) registry.RegistrableService {
+func NewService(svr bs.Server) registry.RegistrableService {
 	return &Service{
 		ctx:     svr.Context(),
-		manager: NewManager[T](svr),
+		manager: NewManager(svr),
 	}
 }
 
@@ -69,9 +72,9 @@ func (s *Service) RegisterGRPCService(g *grpc.Server) {
 }
 
 // RegisterRESTHandler registers the service to REST server.
-func (s *Service) RegisterRESTHandler(userDefineHandlers map[string]http.Handler) {
-	handler, group := SetUpRestHandler(s)
-	apiutil.RegisterUserDefinedHandlers(userDefineHandlers, &group, handler)
+func (*Service) RegisterRESTHandler(_ map[string]http.Handler) error {
+	// restful API is not implemented yet.
+	return nil
 }
 
 func (s *Service) checkServing() error {
@@ -88,12 +91,13 @@ func (s *Service) Watch(req *meta_storagepb.WatchRequest, server meta_storagepb.
 	}
 	ctx, cancel := context.WithCancel(server.Context())
 	defer cancel()
-	options := []clientv3.OpOption{}
+	var options []clientv3.OpOption
 	key := string(req.GetKey())
 	var startRevision int64
 	if endKey := req.GetRangeEnd(); endKey != nil {
 		options = append(options, clientv3.WithRange(string(endKey)))
 	}
+	log.Info("watch request", zap.String("key", key), zap.String("range-end", string(req.GetRangeEnd())), zap.Int64("start-revision", req.GetStartRevision()))
 	if startRevision = req.GetStartRevision(); startRevision != 0 {
 		options = append(options, clientv3.WithRev(startRevision))
 	}
@@ -112,11 +116,11 @@ func (s *Service) Watch(req *meta_storagepb.WatchRequest, server meta_storagepb.
 			if res.Err() != nil {
 				var resp meta_storagepb.WatchResponse
 				if startRevision < res.CompactRevision {
-					resp.Header = s.wrapErrorAndRevision(res.Header.GetRevision(), meta_storagepb.ErrorType_DATA_COMPACTED,
+					resp.Header = wrapErrorAndRevision(res.Header.GetRevision(), meta_storagepb.ErrorType_DATA_COMPACTED,
 						fmt.Sprintf("required watch revision: %d is smaller than current compact/min revision %d.", startRevision, res.CompactRevision))
 					resp.CompactRevision = res.CompactRevision
 				} else {
-					resp.Header = s.wrapErrorAndRevision(res.Header.GetRevision(), meta_storagepb.ErrorType_UNKNOWN,
+					resp.Header = wrapErrorAndRevision(res.Header.GetRevision(), meta_storagepb.ErrorType_UNKNOWN,
 						fmt.Sprintf("watch channel meet other error %s.", res.Err().Error()))
 				}
 				if err := server.Send(&resp); err != nil {
@@ -126,8 +130,8 @@ func (s *Service) Watch(req *meta_storagepb.WatchRequest, server meta_storagepb.
 				return res.Err()
 			}
 
-			events := make([]*meta_storagepb.Event, 0, len(res.Events))
-			for _, e := range res.Events {
+			events := make([]*meta_storagepb.Event, len(res.Events))
+			for i, e := range res.Events {
 				event := &meta_storagepb.Event{Kv: &meta_storagepb.KeyValue{
 					Key:            e.Kv.Key,
 					Value:          e.Kv.Value,
@@ -139,11 +143,11 @@ func (s *Service) Watch(req *meta_storagepb.WatchRequest, server meta_storagepb.
 				if e.PrevKv != nil {
 					event.PrevKv = &meta_storagepb.KeyValue{Key: e.PrevKv.Key, Value: e.PrevKv.Value}
 				}
-				events = append(events, event)
+				events[i] = event
 			}
 			if len(events) > 0 {
 				if err := server.Send(&meta_storagepb.WatchResponse{
-					Header: &meta_storagepb.ResponseHeader{ClusterId: s.manager.ClusterID(), Revision: res.Header.GetRevision()},
+					Header: &meta_storagepb.ResponseHeader{ClusterId: keypath.ClusterID(), Revision: res.Header.GetRevision()},
 					Events: events, CompactRevision: res.CompactRevision}); err != nil {
 					return err
 				}
@@ -159,7 +163,7 @@ func (s *Service) Get(ctx context.Context, req *meta_storagepb.GetRequest) (*met
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	options := []clientv3.OpOption{}
+	var options []clientv3.OpOption
 	key := string(req.GetKey())
 	if endKey := req.GetRangeEnd(); endKey != nil {
 		options = append(options, clientv3.WithRange(string(endKey)))
@@ -177,15 +181,16 @@ func (s *Service) Get(ctx context.Context, req *meta_storagepb.GetRequest) (*met
 		revision = res.Header.GetRevision()
 	}
 	if err != nil {
-		return &meta_storagepb.GetResponse{Header: s.wrapErrorAndRevision(revision, meta_storagepb.ErrorType_UNKNOWN, err.Error())}, nil
+		return &meta_storagepb.GetResponse{Header: wrapErrorAndRevision(revision, meta_storagepb.ErrorType_UNKNOWN, err.Error())}, nil
 	}
 	resp := &meta_storagepb.GetResponse{
-		Header: &meta_storagepb.ResponseHeader{ClusterId: s.manager.ClusterID(), Revision: revision},
+		Header: &meta_storagepb.ResponseHeader{ClusterId: keypath.ClusterID(), Revision: revision},
 		Count:  res.Count,
 		More:   res.More,
 	}
-	for _, kv := range res.Kvs {
-		resp.Kvs = append(resp.Kvs, &meta_storagepb.KeyValue{Key: kv.Key, Value: kv.Value})
+	resp.Kvs = make([]*meta_storagepb.KeyValue, len(res.Kvs))
+	for i, kv := range res.Kvs {
+		resp.Kvs[i] = &meta_storagepb.KeyValue{Key: kv.Key, Value: kv.Value}
 	}
 
 	return resp, nil
@@ -198,7 +203,7 @@ func (s *Service) Put(ctx context.Context, req *meta_storagepb.PutRequest) (*met
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	options := []clientv3.OpOption{}
+	var options []clientv3.OpOption
 	key := string(req.GetKey())
 	value := string(req.GetValue())
 	if lease := clientv3.LeaseID(req.GetLease()); lease != 0 {
@@ -215,11 +220,11 @@ func (s *Service) Put(ctx context.Context, req *meta_storagepb.PutRequest) (*met
 		revision = res.Header.GetRevision()
 	}
 	if err != nil {
-		return &meta_storagepb.PutResponse{Header: s.wrapErrorAndRevision(revision, meta_storagepb.ErrorType_UNKNOWN, err.Error())}, nil
+		return &meta_storagepb.PutResponse{Header: wrapErrorAndRevision(revision, meta_storagepb.ErrorType_UNKNOWN, err.Error())}, nil
 	}
 
 	resp := &meta_storagepb.PutResponse{
-		Header: &meta_storagepb.ResponseHeader{ClusterId: s.manager.ClusterID(), Revision: revision},
+		Header: &meta_storagepb.ResponseHeader{ClusterId: keypath.ClusterID(), Revision: revision},
 	}
 	if res.PrevKv != nil {
 		resp.PrevKv = &meta_storagepb.KeyValue{Key: res.PrevKv.Key, Value: res.PrevKv.Value}
@@ -227,16 +232,49 @@ func (s *Service) Put(ctx context.Context, req *meta_storagepb.PutRequest) (*met
 	return resp, nil
 }
 
-func (s *Service) wrapErrorAndRevision(revision int64, errorType meta_storagepb.ErrorType, message string) *meta_storagepb.ResponseHeader {
-	return s.errorHeader(revision, &meta_storagepb.Error{
+// Delete deletes the key-value pair from meta storage.
+func (s *Service) Delete(ctx context.Context, req *meta_storagepb.DeleteRequest) (*meta_storagepb.DeleteResponse, error) {
+	if err := s.checkServing(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var options []clientv3.OpOption
+	key := string(req.GetKey())
+	if prevKv := req.GetPrevKv(); prevKv {
+		options = append(options, clientv3.WithPrevKV())
+	}
+
+	cli := s.manager.GetClient()
+	res, err := cli.Delete(ctx, key, options...)
+	var revision int64
+	if res != nil {
+		revision = res.Header.GetRevision()
+	}
+	if err != nil {
+		return &meta_storagepb.DeleteResponse{Header: wrapErrorAndRevision(revision, meta_storagepb.ErrorType_UNKNOWN, err.Error())}, nil
+	}
+
+	resp := &meta_storagepb.DeleteResponse{
+		Header: &meta_storagepb.ResponseHeader{ClusterId: keypath.ClusterID(), Revision: revision},
+	}
+	resp.PrevKvs = make([]*meta_storagepb.KeyValue, len(res.PrevKvs))
+	for i, kv := range res.PrevKvs {
+		resp.PrevKvs[i] = &meta_storagepb.KeyValue{Key: kv.Key, Value: kv.Value}
+	}
+	return resp, nil
+}
+
+func wrapErrorAndRevision(revision int64, errorType meta_storagepb.ErrorType, message string) *meta_storagepb.ResponseHeader {
+	return errorHeader(revision, &meta_storagepb.Error{
 		Type:    errorType,
 		Message: message,
 	})
 }
 
-func (s *Service) errorHeader(revision int64, err *meta_storagepb.Error) *meta_storagepb.ResponseHeader {
+func errorHeader(revision int64, err *meta_storagepb.Error) *meta_storagepb.ResponseHeader {
 	return &meta_storagepb.ResponseHeader{
-		ClusterId: s.manager.ClusterID(),
+		ClusterId: keypath.ClusterID(),
 		Revision:  revision,
 		Error:     err,
 	}

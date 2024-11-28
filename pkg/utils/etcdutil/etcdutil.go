@@ -17,9 +17,9 @@ package etcdutil
 import (
 	"context"
 	"crypto/tls"
-	"math/rand"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,13 +31,14 @@ import (
 	"github.com/tikv/pd/pkg/utils/grpcutil"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
-	"github.com/tikv/pd/pkg/utils/typeutil"
-	"go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/etcdserver"
-	"go.etcd.io/etcd/etcdserver/api/v3rpc/rpctypes"
-	"go.etcd.io/etcd/mvcc/mvccpb"
-	"go.etcd.io/etcd/pkg/types"
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	etcdtypes "go.etcd.io/etcd/client/pkg/v3/types"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/server/v3/etcdserver"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -63,11 +64,16 @@ const (
 	DefaultSlowRequestTime = time.Second
 
 	healthyPath = "health"
+
+	// MaxEtcdTxnOps is the max value of operations in an etcd txn. The default limit of etcd txn op is 128.
+	// We use 120 here to leave some space for other operations.
+	// See: https://github.com/etcd-io/etcd/blob/d3e43d4de6f6d9575b489dd7850a85e37e0f6b6c/server/embed/config.go#L61
+	MaxEtcdTxnOps = 120
 )
 
 // CheckClusterID checks etcd cluster ID, returns an error if mismatch.
 // This function will never block even quorum is not satisfied.
-func CheckClusterID(localClusterID types.ID, um types.URLsMap, tlsConfig *tls.Config) error {
+func CheckClusterID(localClusterID etcdtypes.ID, um etcdtypes.URLsMap, tlsConfig *tls.Config) error {
 	if len(um) == 0 {
 		return nil
 	}
@@ -81,7 +87,7 @@ func CheckClusterID(localClusterID types.ID, um types.URLsMap, tlsConfig *tls.Co
 		trp := &http.Transport{
 			TLSClientConfig: tlsConfig,
 		}
-		remoteCluster, gerr := etcdserver.GetClusterFromRemotePeers(nil, []string{u}, trp, true)
+		remoteCluster, gerr := etcdserver.GetClusterFromRemotePeers(nil, []string{u}, trp)
 		trp.CloseIdleConnections()
 		if gerr != nil {
 			// Do not return error, because other members may be not ready.
@@ -112,12 +118,17 @@ func ListEtcdMembers(ctx context.Context, client *clientv3.Client) (*clientv3.Me
 		time.Sleep(time.Duration(d) * time.Second)
 	})
 	newCtx, cancel := context.WithTimeout(ctx, DefaultRequestTimeout)
-	listResp, err := client.MemberList(newCtx)
+	// After the etcd server is upgraded to v3.5.x, the MemberList API will return the member list in a linearizable way by default.
+	// It is introduced by https://github.com/etcd-io/etcd/pull/11639
+	// If Linearizable is set to false, the member list will be returned with server's local data.
+	// If Linearizable is set to true, it is served with linearizable guarantee. If the server is disconnected from quorum, `MemberList` call will fail.
+	c := clientv3.RetryClusterClient(client)
+	resp, err := c.MemberList(newCtx, &etcdserverpb.MemberListRequest{Linearizable: false})
 	cancel()
 	if err != nil {
-		return listResp, errs.ErrEtcdMemberList.Wrap(err).GenWithStackByCause()
+		return (*clientv3.MemberListResponse)(resp), errs.ErrEtcdMemberList.Wrap(err).GenWithStackByCause()
 	}
-	return listResp, nil
+	return (*clientv3.MemberListResponse)(resp), nil
 }
 
 // RemoveEtcdMember removes a member by the given id.
@@ -268,6 +279,7 @@ func CreateEtcdClient(tlsConfig *tls.Config, acURLs []url.URL, sourceOpt ...stri
 		source = sourceOpt[0]
 	}
 	initHealthChecker(tickerInterval, tlsConfig, client, source)
+
 	return client, err
 }
 
@@ -285,86 +297,11 @@ func CreateHTTPClient(tlsConfig *tls.Config) *http.Client {
 	return cli
 }
 
-// InitClusterID creates a cluster ID for the given key if it hasn't existed.
-// This function assumes the cluster ID has already existed and always use a
-// cheaper read to retrieve it; if it doesn't exist, invoke the more expensive
-// operation InitOrGetClusterID().
-func InitClusterID(c *clientv3.Client, key string) (clusterID uint64, err error) {
-	// Get any cluster key to parse the cluster ID.
-	resp, err := EtcdKVGet(c, key)
-	if err != nil {
-		return 0, err
-	}
-	// If no key exist, generate a random cluster ID.
-	if len(resp.Kvs) == 0 {
-		return InitOrGetClusterID(c, key)
-	}
-	return typeutil.BytesToUint64(resp.Kvs[0].Value)
-}
-
-// GetClusterID gets the cluster ID for the given key.
-func GetClusterID(c *clientv3.Client, key string) (clusterID uint64, err error) {
-	// Get any cluster key to parse the cluster ID.
-	resp, err := EtcdKVGet(c, key)
-	if err != nil {
-		return 0, err
-	}
-	// If no key exist, generate a random cluster ID.
-	if len(resp.Kvs) == 0 {
-		return 0, nil
-	}
-	return typeutil.BytesToUint64(resp.Kvs[0].Value)
-}
-
-// InitOrGetClusterID creates a cluster ID for the given key with a CAS operation,
-// if the cluster ID doesn't exist.
-func InitOrGetClusterID(c *clientv3.Client, key string) (uint64, error) {
-	ctx, cancel := context.WithTimeout(c.Ctx(), DefaultRequestTimeout)
-	defer cancel()
-
-	// Generate a random cluster ID.
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	ts := uint64(time.Now().Unix())
-	clusterID := (ts << 32) + uint64(r.Uint32())
-	value := typeutil.Uint64ToBytes(clusterID)
-
-	// Multiple servers may try to init the cluster ID at the same time.
-	// Only one server can commit this transaction, then other servers
-	// can get the committed cluster ID.
-	resp, err := c.Txn(ctx).
-		If(clientv3.Compare(clientv3.CreateRevision(key), "=", 0)).
-		Then(clientv3.OpPut(key, string(value))).
-		Else(clientv3.OpGet(key)).
-		Commit()
-	if err != nil {
-		return 0, errs.ErrEtcdTxnInternal.Wrap(err).GenWithStackByCause()
-	}
-
-	// Txn commits ok, return the generated cluster ID.
-	if resp.Succeeded {
-		return clusterID, nil
-	}
-
-	// Otherwise, parse the committed cluster ID.
-	if len(resp.Responses) == 0 {
-		return 0, errs.ErrEtcdTxnConflict.FastGenByArgs()
-	}
-
-	response := resp.Responses[0].GetResponseRange()
-	if response == nil || len(response.Kvs) != 1 {
-		return 0, errs.ErrEtcdTxnConflict.FastGenByArgs()
-	}
-
-	return typeutil.BytesToUint64(response.Kvs[0].Value)
-}
-
 const (
-	defaultLoadDataFromEtcdTimeout   = 30 * time.Second
-	defaultLoadFromEtcdRetryInterval = 200 * time.Millisecond
-	defaultLoadFromEtcdRetryTimes    = int(defaultLoadDataFromEtcdTimeout / defaultLoadFromEtcdRetryInterval)
-	defaultLoadBatchSize             = 400
-	defaultWatchChangeRetryInterval  = 1 * time.Second
-	defaultForceLoadMinimalInterval  = 200 * time.Millisecond
+	defaultEtcdRetryInterval      = time.Second
+	defaultLoadFromEtcdRetryTimes = 3
+	maxLoadBatchSize              = int64(10000)
+	minLoadBatchSize              = int64(100)
 
 	// RequestProgressInterval is the interval to call RequestProgress for watcher.
 	RequestProgressInterval = 1 * time.Second
@@ -381,8 +318,8 @@ type LoopWatcher struct {
 
 	// key is the etcd key to watch.
 	key string
-	// opts is used to set etcd options.
-	opts []clientv3.OpOption
+	// isWithPrefix indicates whether the watcher is with prefix.
+	isWithPrefix bool
 
 	// forceLoadCh is used to force loading data from etcd.
 	forceLoadCh chan struct{}
@@ -393,16 +330,16 @@ type LoopWatcher struct {
 	putFn func(*mvccpb.KeyValue) error
 	// deleteFn is used to handle the delete event.
 	deleteFn func(*mvccpb.KeyValue) error
-	// postEventFn is used to call after handling all events.
-	postEventFn func() error
+	// postEventsFn is used to call after handling all events.
+	postEventsFn func([]*clientv3.Event) error
+	// preEventsFn is used to call before handling all events.
+	preEventsFn func([]*clientv3.Event) error
 
 	// forceLoadMu is used to ensure two force loads have minimal interval.
 	forceLoadMu syncutil.RWMutex
 	// lastTimeForceLoad is used to record the last time force loading data from etcd.
 	lastTimeForceLoad time.Time
 
-	// loadTimeout is used to set the timeout for loading data from etcd.
-	loadTimeout time.Duration
 	// loadRetryTimes is used to set the retry times for loading data from etcd.
 	loadRetryTimes int
 	// loadBatchSize is used to set the batch size for loading data from etcd.
@@ -412,6 +349,8 @@ type LoopWatcher struct {
 	// updateClientCh is used to update the etcd client.
 	// It's only used for testing.
 	updateClientCh chan *clientv3.Client
+	// watchChTimeoutDuration is the timeout duration for a watchChan.
+	watchChTimeoutDuration time.Duration
 }
 
 // NewLoopWatcher creates a new LoopWatcher.
@@ -419,8 +358,10 @@ func NewLoopWatcher(
 	ctx context.Context, wg *sync.WaitGroup,
 	client *clientv3.Client,
 	name, key string,
-	putFn, deleteFn func(*mvccpb.KeyValue) error, postEventFn func() error,
-	opts ...clientv3.OpOption,
+	preEventsFn func([]*clientv3.Event) error,
+	putFn, deleteFn func(*mvccpb.KeyValue) error,
+	postEventsFn func([]*clientv3.Event) error,
+	isWithPrefix bool,
 ) *LoopWatcher {
 	return &LoopWatcher{
 		ctx:                      ctx,
@@ -433,13 +374,14 @@ func NewLoopWatcher(
 		updateClientCh:           make(chan *clientv3.Client, 1),
 		putFn:                    putFn,
 		deleteFn:                 deleteFn,
-		postEventFn:              postEventFn,
-		opts:                     opts,
+		postEventsFn:             postEventsFn,
+		preEventsFn:              preEventsFn,
+		isWithPrefix:             isWithPrefix,
 		lastTimeForceLoad:        time.Now(),
-		loadTimeout:              defaultLoadDataFromEtcdTimeout,
 		loadRetryTimes:           defaultLoadFromEtcdRetryTimes,
-		loadBatchSize:            defaultLoadBatchSize,
-		watchChangeRetryInterval: defaultWatchChangeRetryInterval,
+		loadBatchSize:            maxLoadBatchSize,
+		watchChangeRetryInterval: defaultEtcdRetryInterval,
+		watchChTimeoutDuration:   WatchChTimeoutDuration,
 	}
 }
 
@@ -485,21 +427,13 @@ func (lw *LoopWatcher) initFromEtcd(ctx context.Context) int64 {
 		watchStartRevision int64
 		err                error
 	)
-	ticker := time.NewTicker(defaultLoadFromEtcdRetryInterval)
+	ticker := time.NewTicker(defaultEtcdRetryInterval)
 	defer ticker.Stop()
-	ctx, cancel := context.WithTimeout(ctx, lw.loadTimeout)
-	defer cancel()
-
-	for i := 0; i < lw.loadRetryTimes; i++ {
+	for i := range lw.loadRetryTimes {
 		failpoint.Inject("loadTemporaryFail", func(val failpoint.Value) {
 			if maxFailTimes, ok := val.(int); ok && i < maxFailTimes {
 				err = errors.New("fail to read from etcd")
 				failpoint.Continue()
-			}
-		})
-		failpoint.Inject("delayLoad", func(val failpoint.Value) {
-			if sleepIntervalSeconds, ok := val.(int); ok && sleepIntervalSeconds > 0 {
-				time.Sleep(time.Duration(sleepIntervalSeconds) * time.Second)
 			}
 		})
 		watchStartRevision, err = lw.load(ctx)
@@ -550,7 +484,10 @@ func (lw *LoopWatcher) watch(ctx context.Context, revision int64) (nextRevision 
 		// make sure to wrap context with "WithRequireLeader".
 		watcherCtx, cancel := context.WithCancel(clientv3.WithRequireLeader(ctx))
 		watcherCancel = cancel
-		opts := append(lw.opts, clientv3.WithRev(revision), clientv3.WithProgressNotify())
+		opts := []clientv3.OpOption{clientv3.WithRev(revision), clientv3.WithProgressNotify()}
+		if lw.isWithPrefix {
+			opts = append(opts, clientv3.WithPrefix())
+		}
 		done := make(chan struct{})
 		go grpcutil.CheckStream(watcherCtx, watcherCancel, done)
 		watchChan := watcher.Watch(watcherCtx, lw.key, opts...)
@@ -577,7 +514,10 @@ func (lw *LoopWatcher) watch(ctx context.Context, revision int64) (nextRevision 
 			revision, err = lw.load(ctx)
 			if err != nil {
 				log.Warn("force load key failed in watch loop",
-					zap.String("name", lw.name), zap.String("key", lw.key), zap.Error(err))
+					zap.String("name", lw.name), zap.String("key", lw.key), zap.Int64("revision", revision), zap.Error(err))
+			} else {
+				log.Info("force load key successfully in watch loop",
+					zap.String("name", lw.name), zap.String("key", lw.key), zap.Int64("revision", revision))
 			}
 			continue
 		case <-ticker.C:
@@ -591,7 +531,7 @@ func (lw *LoopWatcher) watch(ctx context.Context, revision int64) (nextRevision 
 			cancel()
 			// If no message comes from an etcd watchChan for WatchChTimeoutDuration,
 			// create a new one and need not to reset lastReceivedResponseTime.
-			if time.Since(lastReceivedResponseTime) >= WatchChTimeoutDuration {
+			if time.Since(lastReceivedResponseTime) >= lw.watchChTimeoutDuration {
 				log.Warn("watch channel is blocked for a long time, recreating a new one in watch loop",
 					zap.Duration("timeout", time.Since(lastReceivedResponseTime)),
 					zap.Int64("revision", revision), zap.String("name", lw.name), zap.String("key", lw.key))
@@ -619,28 +559,34 @@ func (lw *LoopWatcher) watch(ctx context.Context, revision int64) (nextRevision 
 					zap.Int64("revision", revision), zap.String("name", lw.name), zap.String("key", lw.key))
 				goto watchChanLoop
 			}
+			if err := lw.preEventsFn(wresp.Events); err != nil {
+				log.Error("run pre event failed in watch loop", zap.Error(err),
+					zap.Int64("revision", revision), zap.String("name", lw.name), zap.String("key", lw.key))
+			}
 			for _, event := range wresp.Events {
 				switch event.Type {
 				case clientv3.EventTypePut:
 					if err := lw.putFn(event.Kv); err != nil {
 						log.Error("put failed in watch loop", zap.Error(err),
-							zap.Int64("revision", revision), zap.String("name", lw.name), zap.String("key", lw.key))
+							zap.Int64("revision", revision), zap.String("name", lw.name),
+							zap.String("watch-key", lw.key), zap.ByteString("event-kv-key", event.Kv.Key))
 					} else {
-						log.Debug("put in watch loop", zap.String("name", lw.name),
+						log.Debug("put successfully in watch loop", zap.String("name", lw.name),
 							zap.ByteString("key", event.Kv.Key),
 							zap.ByteString("value", event.Kv.Value))
 					}
 				case clientv3.EventTypeDelete:
 					if err := lw.deleteFn(event.Kv); err != nil {
 						log.Error("delete failed in watch loop", zap.Error(err),
-							zap.Int64("revision", revision), zap.String("name", lw.name), zap.String("key", lw.key))
+							zap.Int64("revision", revision), zap.String("name", lw.name),
+							zap.String("watch-key", lw.key), zap.ByteString("event-kv-key", event.Kv.Key))
 					} else {
-						log.Debug("delete in watch loop", zap.String("name", lw.name),
+						log.Debug("delete successfully in watch loop", zap.String("name", lw.name),
 							zap.ByteString("key", event.Kv.Key))
 					}
 				}
 			}
-			if err := lw.postEventFn(); err != nil {
+			if err := lw.postEventsFn(wresp.Events); err != nil {
 				log.Error("run post event failed in watch loop", zap.Error(err),
 					zap.Int64("revision", revision), zap.String("name", lw.name), zap.String("key", lw.key))
 			}
@@ -651,46 +597,94 @@ func (lw *LoopWatcher) watch(ctx context.Context, revision int64) (nextRevision 
 }
 
 func (lw *LoopWatcher) load(ctx context.Context) (nextRevision int64, err error) {
-	ctx, cancel := context.WithTimeout(ctx, DefaultRequestTimeout)
-	defer cancel()
 	startKey := lw.key
-	// If limit is 0, it means no limit.
-	// If limit is not 0, we need to add 1 to limit to get the next key.
 	limit := lw.loadBatchSize
-	if limit != 0 {
-		limit++
+	opts := lw.buildLoadingOpts(limit)
+
+	if err := lw.preEventsFn([]*clientv3.Event{}); err != nil {
+		log.Error("run pre event failed in watch loop", zap.String("name", lw.name),
+			zap.String("key", lw.key), zap.Error(err))
 	}
+	defer func() {
+		if err := lw.postEventsFn([]*clientv3.Event{}); err != nil {
+			log.Error("run post event failed in watch loop", zap.String("name", lw.name),
+				zap.String("key", lw.key), zap.Error(err))
+		}
+	}()
+
 	for {
-		// Sort by key to get the next key and we don't need to worry about the performance,
-		// Because the default sort is just SortByKey and SortAscend
-		opts := append(lw.opts, clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend), clientv3.WithLimit(limit))
-		resp, err := clientv3.NewKV(lw.client).Get(ctx, startKey, opts...)
+		select {
+		case <-ctx.Done():
+			return 0, nil
+		default:
+		}
+		resp, err := EtcdKVGet(lw.client, startKey, opts...)
+		failpoint.Inject("meetEtcdError", func() {
+			if limit > minLoadBatchSize {
+				err = errors.New(codes.ResourceExhausted.String())
+			}
+		})
 		if err != nil {
 			log.Error("load failed in watch loop", zap.String("name", lw.name),
 				zap.String("key", lw.key), zap.Error(err))
+			if strings.Contains(err.Error(), codes.ResourceExhausted.String()) ||
+				strings.Contains(err.Error(), codes.DeadlineExceeded.String()) {
+				if limit == 0 {
+					limit = maxLoadBatchSize
+				} else if limit > minLoadBatchSize {
+					limit /= 2
+				} else {
+					return 0, err
+				}
+				opts = lw.buildLoadingOpts(limit)
+				continue
+			}
 			return 0, err
 		}
 		for i, item := range resp.Kvs {
-			if resp.More && i == len(resp.Kvs)-1 {
-				// The last key is the start key of the next batch.
-				// To avoid to get the same key in the next load, we need to skip the last key.
+			if i == len(resp.Kvs)-1 && resp.More {
+				// If there are more keys, we need to load the next batch.
+				// The last key in current batch is the start key of the next batch.
 				startKey = string(item.Key)
+				// To avoid to get the same key in the next batch,
+				// we need to skip the last key for the current batch.
 				continue
 			}
 			err = lw.putFn(item)
 			if err != nil {
-				log.Error("put failed in watch loop when loading", zap.String("name", lw.name), zap.String("key", lw.key), zap.Error(err))
+				log.Error("put failed in watch loop when loading", zap.String("name", lw.name), zap.String("watch-key", lw.key),
+					zap.ByteString("key", item.Key), zap.ByteString("value", item.Value), zap.Error(err))
+			} else {
+				log.Debug("put successfully in watch loop when loading", zap.String("name", lw.name), zap.String("watch-key", lw.key),
+					zap.ByteString("key", item.Key), zap.ByteString("value", item.Value))
 			}
 		}
 		// Note: if there are no keys in etcd, the resp.More is false. It also means the load is finished.
 		if !resp.More {
-			if err := lw.postEventFn(); err != nil {
-				log.Error("run post event failed in watch loop", zap.String("name", lw.name),
-					zap.String("key", lw.key), zap.Error(err))
-			}
 			return resp.Header.Revision + 1, err
 		}
 	}
+}
+
+func (lw *LoopWatcher) buildLoadingOpts(limit int64) []clientv3.OpOption {
+	// Sort by key to get the next key and we don't need to worry about the performance,
+	// Because the default sort is just SortByKey and SortAscend
+	opts := []clientv3.OpOption{
+		clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend)}
+	// In most cases, 'Get(foo, WithPrefix())' is equivalent to 'Get(foo, WithRange(GetPrefixRangeEnd(foo))'.
+	// However, when the startKey changes, the two are no longer equivalent.
+	// For example, the end key for 'WithRange(GetPrefixRangeEnd(foo))' is consistently 'fop'.
+	// But when using 'Get(foo1, WithPrefix())', the end key becomes 'foo2', not 'fop'.
+	// So, we use 'WithRange()' to avoid this problem.
+	if lw.isWithPrefix {
+		opts = append(opts, clientv3.WithRange(clientv3.GetPrefixRangeEnd(lw.key)))
+	}
+	// If limit is 0, it means no limit.
+	// If limit is not 0, we need to add 1 to limit to get the next key.
+	if limit == 0 {
+		return opts
+	}
+	return append(opts, clientv3.WithLimit(limit+1))
 }
 
 // ForceLoad forces to load the key.
@@ -700,14 +694,14 @@ func (lw *LoopWatcher) ForceLoad() {
 	// Two-phase locking is also used to let most of the requests return directly without acquiring
 	// the write lock and causing the system to choke.
 	lw.forceLoadMu.RLock()
-	if time.Since(lw.lastTimeForceLoad) < defaultForceLoadMinimalInterval {
+	if time.Since(lw.lastTimeForceLoad) < defaultEtcdRetryInterval {
 		lw.forceLoadMu.RUnlock()
 		return
 	}
 	lw.forceLoadMu.RUnlock()
 
 	lw.forceLoadMu.Lock()
-	if time.Since(lw.lastTimeForceLoad) < defaultForceLoadMinimalInterval {
+	if time.Since(lw.lastTimeForceLoad) < defaultEtcdRetryInterval {
 		lw.forceLoadMu.Unlock()
 		return
 	}
@@ -728,11 +722,6 @@ func (lw *LoopWatcher) WaitLoad() error {
 // SetLoadRetryTimes sets the retry times when loading data from etcd.
 func (lw *LoopWatcher) SetLoadRetryTimes(times int) {
 	lw.loadRetryTimes = times
-}
-
-// SetLoadTimeout sets the timeout when loading data from etcd.
-func (lw *LoopWatcher) SetLoadTimeout(timeout time.Duration) {
-	lw.loadTimeout = timeout
 }
 
 // SetLoadBatchSize sets the batch size when loading data from etcd.

@@ -32,6 +32,7 @@ import (
 	"github.com/tikv/pd/pkg/utils/assertutil"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/tests"
@@ -83,14 +84,13 @@ func TestMemberDelete(t *testing.T) {
 		{path: fmt.Sprintf("id/%d", members[1].GetServerID()), members: []*config.Config{leader.GetConfig()}},
 	}
 
-	httpClient := &http.Client{Timeout: 15 * time.Second}
 	for _, table := range tables {
 		t.Log(time.Now(), "try to delete:", table.path)
 		testutil.Eventually(re, func() bool {
 			addr := leader.GetConfig().ClientUrls + "/pd/api/v1/members/" + table.path
-			req, err := http.NewRequest(http.MethodDelete, addr, nil)
+			req, err := http.NewRequest(http.MethodDelete, addr, http.NoBody)
 			re.NoError(err)
-			res, err := httpClient.Do(req)
+			res, err := tests.TestDialClient.Do(req)
 			re.NoError(err)
 			defer res.Body.Close()
 			// Check by status.
@@ -102,7 +102,7 @@ func TestMemberDelete(t *testing.T) {
 				return true
 			}
 			// Check by member list.
-			cluster.WaitLeader()
+			re.NotEmpty(cluster.WaitLeader())
 			if err = checkMemberList(re, leader.GetConfig().ClientUrls, table.members); err != nil {
 				t.Logf("check member fail: %v", err)
 				time.Sleep(time.Second)
@@ -121,9 +121,8 @@ func TestMemberDelete(t *testing.T) {
 }
 
 func checkMemberList(re *require.Assertions, clientURL string, configs []*config.Config) error {
-	httpClient := &http.Client{Timeout: 15 * time.Second}
 	addr := clientURL + "/pd/api/v1/members"
-	res, err := httpClient.Get(addr)
+	res, err := tests.TestDialClient.Get(addr)
 	re.NoError(err)
 	defer res.Body.Close()
 	buf, err := io.ReadAll(res.Body)
@@ -151,36 +150,50 @@ func TestLeaderPriority(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cluster, err := tests.NewTestCluster(ctx, 3)
+	cluster, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, _ string) {
+		conf.LeaderPriorityCheckInterval = typeutil.NewDuration(time.Second)
+	})
 	defer cluster.Destroy()
 	re.NoError(err)
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
 
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 
-	leader1, err := cluster.GetServer("pd1").GetEtcdLeader()
+	leader, err := cluster.GetServer("pd1").GetEtcdLeader()
 	re.NoError(err)
-	server1 := cluster.GetServer(leader1)
-	addr := server1.GetConfig().ClientUrls
+	server := cluster.GetServer(leader)
+	addr := server.GetConfig().ClientUrls
 	// PD leader should sync with etcd leader.
 	testutil.Eventually(re, func() bool {
-		return cluster.GetLeader() == leader1
+		leader, err := cluster.GetServer("pd1").GetEtcdLeader()
+		if err != nil {
+			return false
+		}
+		return cluster.GetLeader() == leader
 	})
 	// Bind a lower priority to current leader.
-	post(t, re, addr+"/pd/api/v1/members/name/"+leader1, `{"leader-priority": -1}`)
+	post(t, re, addr+"/pd/api/v1/members/name/"+leader, `{"leader-priority": -1}`)
+
 	// Wait etcd leader change.
-	leader2 := waitEtcdLeaderChange(re, server1, leader1)
+	waitEtcdLeaderChange(re, server, leader)
 	// PD leader should sync with etcd leader again.
 	testutil.Eventually(re, func() bool {
-		return cluster.GetLeader() == leader2
+		etcdLeader, err := server.GetEtcdLeader()
+		if err != nil {
+			return false
+		}
+		if cluster.GetLeader() == etcdLeader {
+			return true
+		}
+		return false
 	})
 }
 
 func post(t *testing.T, re *require.Assertions, url string, body string) {
 	testutil.Eventually(re, func() bool {
-		res, err := http.Post(url, "", bytes.NewBufferString(body)) // #nosec
+		res, err := tests.TestDialClient.Post(url, "", bytes.NewBufferString(body)) // #nosec
 		re.NoError(err)
 		b, err := io.ReadAll(res.Body)
 		res.Body.Close()
@@ -215,6 +228,7 @@ func TestLeaderResign(t *testing.T) {
 	re.NoError(err)
 
 	leader1 := cluster.WaitLeader()
+	re.NotEmpty(leader1)
 	addr1 := cluster.GetServer(leader1).GetConfig().ClientUrls
 
 	post(t, re, addr1+"/pd/api/v1/leader/resign", "")
@@ -238,6 +252,7 @@ func TestLeaderResignWithBlock(t *testing.T) {
 	re.NoError(err)
 
 	leader1 := cluster.WaitLeader()
+	re.NotEmpty(leader1)
 	addr1 := cluster.GetServer(leader1).GetConfig().ClientUrls
 
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/raftclusterIsBusy", `pause`))
@@ -260,7 +275,8 @@ func TestPDLeaderLostWhileEtcdLeaderIntact(t *testing.T) {
 	re.NoError(err)
 
 	leader1 := cluster.WaitLeader()
-	memberID := cluster.GetServer(leader1).GetLeader().GetMemberId()
+	re.NotEmpty(leader1)
+	memberID := cluster.GetLeaderServer().GetLeader().GetMemberId()
 
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/leaderLoopCheckAgain", fmt.Sprintf("return(\"%d\")", memberID)))
 	re.NoError(failpoint.Enable("github.com/tikv/pd/server/exitCampaignLeader", fmt.Sprintf("return(\"%d\")", memberID)))
@@ -294,7 +310,7 @@ func TestMoveLeader(t *testing.T) {
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 
 	var wg sync.WaitGroup
 	wg.Add(5)
@@ -339,14 +355,14 @@ func TestCampaignLeaderFrequently(t *testing.T) {
 	re.NotEmpty(cluster.GetLeader())
 
 	// need to prevent 3 times(including the above 1st time) campaign leader in 5 min.
-	for i := 0; i < 2; i++ {
-		cluster.GetServers()[cluster.GetLeader()].ResetPDLeader()
-		cluster.WaitLeader()
+	for range 2 {
+		cluster.GetLeaderServer().ResetPDLeader()
+		re.NotEmpty(cluster.WaitLeader())
 		re.Equal(leader, cluster.GetLeader())
 	}
 	// check for the 4th time.
 	cluster.GetLeaderServer().ResetPDLeader()
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	// PD leader should be different from before because etcd leader changed.
 	re.NotEmpty(cluster.GetLeader())
 	re.NotEqual(leader, cluster.GetLeader())
@@ -362,14 +378,14 @@ func TestGrantLeaseFailed(t *testing.T) {
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	leader := cluster.GetLeader()
 	re.NotEmpty(cluster.GetLeader())
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/election/skipGrantLeader", fmt.Sprintf("return(\"%s\")", leader)))
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		cluster.GetLeaderServer().ResetPDLeader()
-		cluster.WaitLeader()
+		re.NotEmpty(cluster.WaitLeader())
 	}
 	// PD leader should be different from before because etcd leader changed.
 	re.NotEmpty(cluster.GetLeader())

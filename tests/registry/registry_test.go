@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -41,22 +41,22 @@ func TestMain(m *testing.M) {
 type testServiceRegistry struct {
 }
 
-func (t *testServiceRegistry) RegisterGRPCService(g *grpc.Server) {
+func (*testServiceRegistry) RegisterGRPCService(g *grpc.Server) {
 	grpc_testing.RegisterTestServiceServer(g, &grpc_testing.UnimplementedTestServiceServer{})
 }
 
-func (t *testServiceRegistry) RegisterRESTHandler(userDefineHandlers map[string]http.Handler) {
+func (*testServiceRegistry) RegisterRESTHandler(userDefineHandlers map[string]http.Handler) error {
 	group := apiutil.APIServiceGroup{
 		Name:       "my-http-service",
 		Version:    "v1alpha1",
 		IsCore:     false,
 		PathPrefix: "/my-service",
 	}
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Hello World!"))
 	})
-	apiutil.RegisterUserDefinedHandlers(userDefineHandlers, &group, handler)
+	return apiutil.RegisterUserDefinedHandlers(userDefineHandlers, &group, handler)
 }
 
 func newTestServiceRegistry(_ bs.Server) registry.RegistrableService {

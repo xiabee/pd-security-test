@@ -16,14 +16,16 @@ package discovery
 
 import (
 	"context"
+	"os"
+	"regexp"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
 	"github.com/tikv/pd/pkg/utils/testutil"
-	"go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/embed"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/server/v3/embed"
 )
 
 func TestRegister(t *testing.T) {
@@ -33,10 +35,10 @@ func TestRegister(t *testing.T) {
 	etcd, cfg := servers[0], servers[0].Config()
 
 	// Test register with http prefix.
-	sr := NewServiceRegister(context.Background(), client, "12345", "test_service", "http://127.0.0.1:1", "http://127.0.0.1:1", 10)
+	sr := NewServiceRegister(context.Background(), client, "test_service", "http://127.0.0.1:1", "http://127.0.0.1:1", 10)
 	err := sr.Register()
 	re.NoError(err)
-	re.Equal("/ms/12345/test_service/registry/http://127.0.0.1:1", sr.key)
+	re.Equal("/ms/0/test_service/registry/http://127.0.0.1:1", sr.key)
 	resp, err := client.Get(context.Background(), sr.key)
 	re.NoError(err)
 	re.Equal("http://127.0.0.1:1", string(resp.Kvs[0].Value))
@@ -49,20 +51,31 @@ func TestRegister(t *testing.T) {
 	re.Empty(resp.Kvs)
 
 	// Test the case that ctx is canceled.
-	sr = NewServiceRegister(context.Background(), client, "12345", "test_service", "127.0.0.1:2", "127.0.0.1:2", 1)
+	sr = NewServiceRegister(context.Background(), client, "test_service", "127.0.0.1:2", "127.0.0.1:2", 1)
 	err = sr.Register()
 	re.NoError(err)
 	sr.cancel()
 	re.Empty(getKeyAfterLeaseExpired(re, client, sr.key))
 
 	// Test the case that keepalive is failed when the etcd is restarted.
-	sr = NewServiceRegister(context.Background(), client, "12345", "test_service", "127.0.0.1:2", "127.0.0.1:2", 1)
+	sr = NewServiceRegister(context.Background(), client, "test_service", "127.0.0.1:2", "127.0.0.1:2", 1)
 	err = sr.Register()
 	re.NoError(err)
-	for i := 0; i < 3; i++ {
+	fname := testutil.InitTempFileLogger("info")
+	defer os.Remove(fname)
+	for i := range 3 {
 		re.Equal("127.0.0.1:2", getKeyAfterLeaseExpired(re, client, sr.key))
-		etcd.Server.HardStop()                  // close the etcd to make the keepalive failed
-		time.Sleep(etcdutil.DefaultDialTimeout) // ensure that the request is timeout
+		etcd.Server.HardStop() // close the etcd to make the keepalive failed
+		// ensure that the request is timeout
+		testutil.Eventually(re, func() bool {
+			content, _ := os.ReadFile(fname)
+			// check log in function `ServiceRegister.Register`
+			// ref https://github.com/tikv/pd/blob/6377b26e4e879e7623fbc1d0b7f1be863dea88ad/pkg/mcs/discovery/register.go#L77
+			// need to both contain `register.go` and `keep alive failed`
+			pattern := regexp.MustCompile(`register.go.*keep alive failed`)
+			matches := pattern.FindAll(content, -1)
+			return len(matches) >= i+1
+		})
 		etcd.Close()
 		etcd, err = embed.StartEtcd(&cfg)
 		re.NoError(err)

@@ -29,7 +29,6 @@ import (
 )
 
 func TestActivity(t *testing.T) {
-	t.Parallel()
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -39,7 +38,7 @@ func TestActivity(t *testing.T) {
 	cluster.AddRegionStore(2, 0)
 	cluster.AddLeaderRegion(1, 1)
 	region := cluster.GetRegion(1)
-	hbs := hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true)
+	hbs := hbstream.NewTestHeartbeatStreams(ctx, cluster, true)
 	stream1, stream2 := NewHeartbeatStream(), NewHeartbeatStream()
 
 	// Active stream is stream1.

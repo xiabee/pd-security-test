@@ -159,7 +159,7 @@ func TestRuleFitFilterWithPlacementRule(t *testing.T) {
 	testCluster := mockcluster.NewCluster(ctx, opt)
 	testCluster.SetEnablePlacementRules(true)
 	ruleManager := testCluster.RuleManager
-	ruleManager.DeleteRule("pd", "default")
+	ruleManager.DeleteRule(placement.DefaultGroupID, placement.DefaultRuleID)
 	err := ruleManager.SetRules([]*placement.Rule{
 		{
 			GroupID: "test",
@@ -313,7 +313,7 @@ func TestStoreStateFilterReason(t *testing.T) {
 		}
 	}
 
-	// No reason catched
+	// No reason caught
 	store = store.Clone(core.SetLastHeartbeatTS(time.Now()))
 	testCases := []testCase{
 		{2, "store-state-ok-filter", "store-state-ok-filter"},

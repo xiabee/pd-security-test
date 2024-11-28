@@ -34,7 +34,7 @@ import (
 func TestLoadRegion(t *testing.T) {
 	re := require.New(t)
 	tempDir := t.TempDir()
-	rs, err := storage.NewStorageWithLevelDBBackend(context.Background(), tempDir, nil)
+	rs, err := storage.NewRegionStorageWithLevelDBBackend(context.Background(), tempDir, nil)
 	re.NoError(err)
 
 	server := &mockServer{
@@ -42,7 +42,7 @@ func TestLoadRegion(t *testing.T) {
 		storage: storage.NewCoreStorage(storage.NewStorageWithMemoryBackend(), rs),
 		bc:      core.NewBasicCluster(),
 	}
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		rs.SaveRegion(&metapb.Region{Id: uint64(i) + 1})
 	}
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/storage/endpoint/slowLoadRegion", "return(true)"))
@@ -62,7 +62,7 @@ func TestLoadRegion(t *testing.T) {
 func TestErrorCode(t *testing.T) {
 	re := require.New(t)
 	tempDir := t.TempDir()
-	rs, err := storage.NewStorageWithLevelDBBackend(context.Background(), tempDir, nil)
+	rs, err := storage.NewRegionStorageWithLevelDBBackend(context.Background(), tempDir, nil)
 	re.NoError(err)
 	server := &mockServer{
 		ctx:     context.Background(),
@@ -91,7 +91,7 @@ func (s *mockServer) LoopContext() context.Context {
 	return s.ctx
 }
 
-func (s *mockServer) ClusterID() uint64 {
+func (*mockServer) ClusterID() uint64 {
 	return 1
 }
 
@@ -107,7 +107,7 @@ func (s *mockServer) GetStorage() storage.Storage {
 	return s.storage
 }
 
-func (s *mockServer) Name() string {
+func (*mockServer) Name() string {
 	return "mock-server"
 }
 
@@ -115,7 +115,7 @@ func (s *mockServer) GetRegions() []*core.RegionInfo {
 	return s.bc.GetRegions()
 }
 
-func (s *mockServer) GetTLSConfig() *grpcutil.TLSConfig {
+func (*mockServer) GetTLSConfig() *grpcutil.TLSConfig {
 	return &grpcutil.TLSConfig{}
 }
 

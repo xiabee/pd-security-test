@@ -41,7 +41,7 @@ type SlidingWindows struct {
 // NewSlidingWindows is the construct of SlidingWindows.
 func NewSlidingWindows() *SlidingWindows {
 	windows := make([]*window, constant.PriorityLevelLen)
-	for i := 0; i < int(constant.PriorityLevelLen); i++ {
+	for i := range constant.PriorityLevelLen {
 		windows[i] = newWindow(int64(defaultWindowSize) >> i)
 	}
 	return &SlidingWindows{
@@ -50,7 +50,7 @@ func NewSlidingWindows() *SlidingWindows {
 }
 
 // Version returns v2
-func (s *SlidingWindows) Version() string {
+func (*SlidingWindows) Version() string {
 	return VersionV2
 }
 
@@ -75,8 +75,7 @@ func (s *SlidingWindows) Feedback(e float64) {
 }
 
 // Reset does nothing because the capacity depends on the feedback.
-func (s *SlidingWindows) Reset(_ float64, _ Type) {
-}
+func (*SlidingWindows) Reset(_ float64, _ Type) {}
 
 func (s *SlidingWindows) set(cap float64, typ Type) {
 	if typ != SendSnapshot {

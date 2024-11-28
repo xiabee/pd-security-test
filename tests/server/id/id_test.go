@@ -19,6 +19,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/utils/syncutil"
@@ -43,11 +44,11 @@ func TestID(t *testing.T) {
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 
 	leaderServer := cluster.GetLeaderServer()
 	var last uint64
-	for i := uint64(0); i < allocStep; i++ {
+	for range allocStep {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last)
@@ -59,12 +60,12 @@ func TestID(t *testing.T) {
 	var m syncutil.Mutex
 	ids := make(map[uint64]struct{})
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 
-			for i := 0; i < 200; i++ {
+			for range 200 {
 				id, err := leaderServer.GetAllocator().Alloc()
 				re.NoError(err)
 				m.Lock()
@@ -89,14 +90,14 @@ func TestCommand(t *testing.T) {
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 
 	leaderServer := cluster.GetLeaderServer()
 	req := &pdpb.AllocIDRequest{Header: testutil.NewRequestHeader(leaderServer.GetClusterID())}
 
 	grpcPDClient := testutil.MustNewGrpcClient(re, leaderServer.GetAddr())
 	var last uint64
-	for i := uint64(0); i < 2*allocStep; i++ {
+	for range 2 * allocStep {
 		resp, err := grpcPDClient.AllocID(context.Background(), req)
 		re.NoError(err)
 		re.Equal(pdpb.ErrorType_OK, resp.GetHeader().GetError().GetType())
@@ -107,6 +108,10 @@ func TestCommand(t *testing.T) {
 
 func TestMonotonicID(t *testing.T) {
 	re := require.New(t)
+	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/member/skipCampaignLeaderCheck", "return(true)"))
+	defer func() {
+		re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/member/skipCampaignLeaderCheck"))
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cluster, err := tests.NewTestCluster(ctx, 2)
@@ -115,11 +120,11 @@ func TestMonotonicID(t *testing.T) {
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 
 	leaderServer := cluster.GetLeaderServer()
 	var last1 uint64
-	for i := uint64(0); i < 10; i++ {
+	for range 10 {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last1)
@@ -127,10 +132,10 @@ func TestMonotonicID(t *testing.T) {
 	}
 	err = cluster.ResignLeader()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	leaderServer = cluster.GetLeaderServer()
 	var last2 uint64
-	for i := uint64(0); i < 10; i++ {
+	for range 10 {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last2)
@@ -138,13 +143,13 @@ func TestMonotonicID(t *testing.T) {
 	}
 	err = cluster.ResignLeader()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	leaderServer = cluster.GetLeaderServer()
 	id, err := leaderServer.GetAllocator().Alloc()
 	re.NoError(err)
 	re.Greater(id, last2)
 	var last3 uint64
-	for i := uint64(0); i < 1000; i++ {
+	for range 1000 {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last3)
@@ -162,11 +167,11 @@ func TestPDRestart(t *testing.T) {
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 	leaderServer := cluster.GetLeaderServer()
 
 	var last uint64
-	for i := uint64(0); i < 10; i++ {
+	for range 10 {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last)
@@ -175,9 +180,9 @@ func TestPDRestart(t *testing.T) {
 
 	re.NoError(leaderServer.Stop())
 	re.NoError(leaderServer.Run())
-	cluster.WaitLeader()
+	re.NotEmpty(cluster.WaitLeader())
 
-	for i := uint64(0); i < 10; i++ {
+	for range 10 {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last)

@@ -194,7 +194,7 @@ func TestFinished(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -224,8 +224,8 @@ func TestFinished(t *testing.T) {
 		recoveryController.HandleStoreHeartbeat(req, resp)
 		// require peer report by empty plan
 		re.NotNil(resp.RecoveryPlan)
-		re.Empty(len(resp.RecoveryPlan.Creates))
-		re.Empty(len(resp.RecoveryPlan.Demotes))
+		re.Empty(resp.RecoveryPlan.Creates)
+		re.Empty(resp.RecoveryPlan.Demotes)
 		re.Nil(resp.RecoveryPlan.ForceLeader)
 		re.Equal(uint64(1), resp.RecoveryPlan.Step)
 		applyRecoveryPlan(re, storeID, reports, resp)
@@ -274,7 +274,7 @@ func TestFailed(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -304,8 +304,8 @@ func TestFailed(t *testing.T) {
 		resp := &pdpb.StoreHeartbeatResponse{}
 		recoveryController.HandleStoreHeartbeat(req, resp)
 		re.NotNil(resp.RecoveryPlan)
-		re.Empty(len(resp.RecoveryPlan.Creates))
-		re.Empty(len(resp.RecoveryPlan.Demotes))
+		re.Empty(resp.RecoveryPlan.Creates)
+		re.Empty(resp.RecoveryPlan.Demotes)
 		re.Nil(resp.RecoveryPlan.ForceLeader)
 		applyRecoveryPlan(re, storeID, reports, resp)
 	}
@@ -367,7 +367,7 @@ func TestForceLeaderFail(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(4, "6.0.0") {
 		cluster.PutStore(store)
@@ -447,7 +447,7 @@ func TestAffectedTableID(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -488,7 +488,7 @@ func TestForceLeaderForCommitMerge(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -564,7 +564,7 @@ func TestAutoDetectMode(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(1, "6.0.0") {
 		cluster.PutStore(store)
@@ -604,7 +604,7 @@ func TestAutoDetectMode(t *testing.T) {
 		if result, ok := expects[storeID]; ok {
 			re.Equal(result.PeerReports, report.PeerReports)
 		} else {
-			re.Empty(len(report.PeerReports))
+			re.Empty(report.PeerReports)
 		}
 	}
 }
@@ -617,7 +617,7 @@ func TestAutoDetectWithOneLearner(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(1, "6.0.0") {
 		cluster.PutStore(store)
@@ -658,7 +658,7 @@ func TestOneLearner(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -701,7 +701,7 @@ func TestOneLearner(t *testing.T) {
 		if result, ok := expects[storeID]; ok {
 			re.Equal(result.PeerReports, report.PeerReports)
 		} else {
-			re.Empty(len(report.PeerReports))
+			re.Empty(report.PeerReports)
 		}
 	}
 }
@@ -713,7 +713,7 @@ func TestTiflashLearnerPeer(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(5, "6.0.0") {
 		if store.GetID() == 3 {
@@ -876,7 +876,7 @@ func TestTiflashLearnerPeer(t *testing.T) {
 		if result, ok := expects[storeID]; ok {
 			re.Equal(result.PeerReports, report.PeerReports)
 		} else {
-			re.Empty(len(report.PeerReports))
+			re.Empty(report.PeerReports)
 		}
 	}
 }
@@ -888,7 +888,7 @@ func TestUninitializedPeer(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -944,7 +944,7 @@ func TestJointState(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(5, "6.0.0") {
 		cluster.PutStore(store)
@@ -1125,7 +1125,7 @@ func TestJointState(t *testing.T) {
 		if result, ok := expects[storeID]; ok {
 			re.Equal(result.PeerReports, report.PeerReports)
 		} else {
-			re.Empty(len(report.PeerReports))
+			re.Empty(report.PeerReports)
 		}
 	}
 }
@@ -1137,7 +1137,7 @@ func TestExecutionTimeout(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -1158,7 +1158,7 @@ func TestExecutionTimeout(t *testing.T) {
 	re.Equal(Failed, recoveryController.GetStage())
 
 	output := recoveryController.Show()
-	re.Equal(len(output), 3)
+	re.Len(output, 3)
 	re.Contains(output[1].Details[0], "triggered by error: Exceeds timeout")
 }
 
@@ -1169,7 +1169,7 @@ func TestNoHeartbeatTimeout(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -1192,7 +1192,7 @@ func TestExitForceLeader(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -1258,7 +1258,7 @@ func TestExitForceLeader(t *testing.T) {
 		if result, ok := expects[storeID]; ok {
 			re.Equal(result.PeerReports, report.PeerReports)
 		} else {
-			re.Empty(len(report.PeerReports))
+			re.Empty(report.PeerReports)
 		}
 	}
 }
@@ -1270,7 +1270,7 @@ func TestStep(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -1325,7 +1325,7 @@ func TestOnHealthyRegions(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(5, "6.0.0") {
 		cluster.PutStore(store)
@@ -1375,8 +1375,8 @@ func TestOnHealthyRegions(t *testing.T) {
 		resp := &pdpb.StoreHeartbeatResponse{}
 		recoveryController.HandleStoreHeartbeat(req, resp)
 		re.NotNil(resp.RecoveryPlan)
-		re.Empty(len(resp.RecoveryPlan.Creates))
-		re.Empty(len(resp.RecoveryPlan.Demotes))
+		re.Empty(resp.RecoveryPlan.Creates)
+		re.Empty(resp.RecoveryPlan.Demotes)
 		re.Nil(resp.RecoveryPlan.ForceLeader)
 		applyRecoveryPlan(re, storeID, reports, resp)
 	}
@@ -1401,7 +1401,7 @@ func TestCreateEmptyRegion(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
@@ -1486,7 +1486,7 @@ func TestCreateEmptyRegion(t *testing.T) {
 		if expect, ok := expects[storeID]; ok {
 			re.Equal(expect.PeerReports, report.PeerReports)
 		} else {
-			re.Empty(len(report.PeerReports))
+			re.Empty(report.PeerReports)
 		}
 	}
 }
@@ -1510,7 +1510,7 @@ func TestRangeOverlap1(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(5, "6.0.0") {
 		cluster.PutStore(store)
@@ -1593,7 +1593,7 @@ func TestRangeOverlap1(t *testing.T) {
 		if result, ok := expects[storeID]; ok {
 			re.Equal(result.PeerReports, report.PeerReports)
 		} else {
-			re.Empty(len(report.PeerReports))
+			re.Empty(report.PeerReports)
 		}
 	}
 }
@@ -1605,7 +1605,7 @@ func TestRangeOverlap2(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(5, "6.0.0") {
 		cluster.PutStore(store)
@@ -1699,7 +1699,7 @@ func TestRemoveFailedStores(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	stores := newTestStores(2, "5.3.0")
 	stores[1] = stores[1].Clone(core.SetLastHeartbeatTS(time.Now()))
@@ -1740,7 +1740,7 @@ func TestRunning(t *testing.T) {
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	stores := newTestStores(2, "5.3.0")
 	stores[1] = stores[1].Clone(core.SetLastHeartbeatTS(time.Now()))
@@ -1755,20 +1755,20 @@ func TestRunning(t *testing.T) {
 	re.True(recoveryController.IsRunning())
 }
 
-func TestEpochComparsion(t *testing.T) {
+func TestEpochComparison(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	opts := mockconfig.NewTestOptions()
 	cluster := mockcluster.NewCluster(ctx, opts)
-	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster.ID, cluster, true))
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
 	coordinator.Run()
 	for _, store := range newTestStores(3, "6.0.0") {
 		cluster.PutStore(store)
 	}
 	recoveryController := NewController(cluster)
-	re.Nil(recoveryController.RemoveFailedStores(map[uint64]struct{}{
+	re.NoError(recoveryController.RemoveFailedStores(map[uint64]struct{}{
 		2: {},
 		3: {},
 	}, 60, false))
@@ -1829,7 +1829,7 @@ func TestEpochComparsion(t *testing.T) {
 		if expect, ok := expects[storeID]; ok {
 			re.Equal(expect.PeerReports, report.PeerReports)
 		} else {
-			re.Empty(len(report.PeerReports))
+			re.Empty(report.PeerReports)
 		}
 	}
 }
@@ -1855,4 +1855,106 @@ func newTestStores(n uint64, version string) []*core.StoreInfo {
 
 func getTestDeployPath(storeID uint64) string {
 	return fmt.Sprintf("test/store%d", storeID)
+}
+
+func TestSelectLeader(t *testing.T) {
+	re := require.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opts := mockconfig.NewTestOptions()
+	cluster := mockcluster.NewCluster(ctx, opts)
+	coordinator := schedule.NewCoordinator(ctx, cluster, hbstream.NewTestHeartbeatStreams(ctx, cluster, true))
+	coordinator.Run()
+	stores := newTestStores(6, "6.0.0")
+	labels := []*metapb.StoreLabel{
+		{
+			Key:   core.EngineKey,
+			Value: core.EngineTiFlash,
+		},
+	}
+	stores[5].IsTiFlash()
+	core.SetStoreLabels(labels)(stores[5])
+	for _, store := range stores {
+		cluster.PutStore(store)
+	}
+	recoveryController := NewController(cluster)
+
+	cases := []struct {
+		peers    []*regionItem
+		leaderID uint64
+	}{
+		{
+			peers: []*regionItem{
+				newPeer(1, 1, 10, 5, 4),
+				newPeer(2, 2, 9, 9, 8),
+			},
+			leaderID: 2,
+		},
+		{
+			peers: []*regionItem{
+				newPeer(1, 1, 10, 10, 9),
+				newPeer(2, 1, 8, 8, 15),
+				newPeer(3, 1, 12, 11, 11),
+			},
+			leaderID: 2,
+		},
+		{
+			peers: []*regionItem{
+				newPeer(1, 1, 9, 9, 11),
+				newPeer(2, 1, 10, 8, 7),
+				newPeer(3, 1, 11, 7, 6),
+			},
+			leaderID: 3,
+		},
+		{
+			peers: []*regionItem{
+				newPeer(1, 1, 11, 11, 8),
+				newPeer(2, 1, 11, 10, 10),
+				newPeer(3, 1, 11, 9, 8),
+			},
+			leaderID: 1,
+		},
+		{
+			peers: []*regionItem{
+				newPeer(6, 1, 11, 11, 9),
+				newPeer(1, 1, 11, 11, 8),
+				newPeer(2, 1, 11, 10, 10),
+				newPeer(3, 1, 11, 9, 8),
+			},
+			leaderID: 1,
+		},
+	}
+
+	for i, c := range cases {
+		peersMap := map[uint64][]*regionItem{
+			1: c.peers,
+		}
+		region := &metapb.Region{
+			Id: 1,
+		}
+		leader := recoveryController.selectLeader(peersMap, region)
+		re.Equal(leader.region().Id, c.leaderID, "case: %d", i)
+	}
+}
+
+func newPeer(storeID, term, lastIndex, committedIndex, appliedIndex uint64) *regionItem {
+	return &regionItem{
+		storeID: storeID,
+		report: &pdpb.PeerReport{
+			RaftState: &raft_serverpb.RaftLocalState{
+				HardState: &eraftpb.HardState{
+					Term:   term,
+					Commit: committedIndex,
+				},
+				LastIndex: lastIndex,
+			},
+			RegionState: &raft_serverpb.RegionLocalState{
+				Region: &metapb.Region{
+					Id: storeID,
+				},
+			},
+			AppliedIndex: appliedIndex,
+		},
+	}
 }
