@@ -81,7 +81,7 @@ func buildRuleList(rules ruleContainer) (ruleList, error) {
 	rl := ruleList{
 		rangeList: rangeList,
 	}
-	for i := range rangeList.Len() {
+	for i := 0; i < rangeList.Len(); i++ {
 		start, data := rangeList.Get(i)
 		var end []byte
 		if i < rangeList.Len()-1 {

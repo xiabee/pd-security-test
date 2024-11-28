@@ -116,16 +116,16 @@ func main() {
 		return
 	}
 	pdClis := make([]pd.Client, cfg.Client)
-	for i := range cfg.Client {
+	for i := int64(0); i < cfg.Client; i++ {
 		pdClis[i] = newPDClient(ctx, cfg)
 		pdClis[i].UpdateOption(pd.EnableFollowerHandle, true)
 	}
 	etcdClis := make([]*clientv3.Client, cfg.Client)
-	for i := range cfg.Client {
+	for i := int64(0); i < cfg.Client; i++ {
 		etcdClis[i] = newEtcdClient(cfg)
 	}
 	httpClis := make([]pdHttp.Client, cfg.Client)
-	for i := range cfg.Client {
+	for i := int64(0); i < cfg.Client; i++ {
 		sd := pdClis[i].GetServiceDiscovery()
 		httpClis[i] = pdHttp.NewClientWithServiceDiscovery("tools-api-bench", sd, pdHttp.WithTLSConfig(loadTLSConfig(cfg)), pdHttp.WithMetrics(pdAPIRequestCounter, pdAPIExecutionHistogram))
 	}

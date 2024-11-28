@@ -28,7 +28,6 @@ import (
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 	"go.uber.org/zap"
@@ -62,7 +61,7 @@ func (h *memberHandler) GetMembers(w http.ResponseWriter, _ *http.Request) {
 }
 
 func getMembers(svr *server.Server) (*pdpb.GetMembersResponse, error) {
-	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: keypath.ClusterID()}}
+	req := &pdpb.GetMembersRequest{Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()}}
 	grpcServer := &server.GrpcServer{Server: svr}
 	members, err := grpcServer.GetMembers(context.Background(), req)
 	if err != nil {

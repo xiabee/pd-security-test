@@ -23,8 +23,10 @@ import (
 type RegionStatInformer interface {
 	GetHotPeerStat(rw utils.RWType, regionID, storeID uint64) *HotPeerStat
 	IsRegionHot(region *core.RegionInfo) bool
-	// GetHotPeerStats return the read or write statistics for hot regions.
-	// It returns a map where the keys are store IDs and the values are slices of HotPeerStat.
+	// RegionWriteStats return the storeID -> write stat of peers on this store.
 	// The result only includes peers that are hot enough.
-	GetHotPeerStats(rw utils.RWType) map[uint64][]*HotPeerStat
+	RegionWriteStats() map[uint64][]*HotPeerStat
+	// RegionReadStats return the storeID -> read stat of peers on this store.
+	// The result only includes peers that are hot enough.
+	RegionReadStats() map[uint64][]*HotPeerStat
 }

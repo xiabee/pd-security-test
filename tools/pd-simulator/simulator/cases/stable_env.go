@@ -32,7 +32,7 @@ func newStableEnv(config *sc.SimConfig) *Case {
 	allStores := make(map[uint64]struct{}, totalStore)
 	arrStoresID := make([]uint64, 0, totalStore)
 	replica := int(config.ServerConfig.Replication.MaxReplicas)
-	for range totalStore {
+	for i := 0; i < totalStore; i++ {
 		id := simutil.IDAllocator.NextID()
 		simCase.Stores = append(simCase.Stores, &Store{
 			ID:     id,
@@ -42,9 +42,9 @@ func newStableEnv(config *sc.SimConfig) *Case {
 		arrStoresID = append(arrStoresID, id)
 	}
 
-	for i := range totalRegion {
+	for i := 0; i < totalRegion; i++ {
 		peers := make([]*metapb.Peer, 0, replica)
-		for j := range replica {
+		for j := 0; j < replica; j++ {
 			peers = append(peers, &metapb.Peer{
 				Id:      simutil.IDAllocator.NextID(),
 				StoreId: arrStoresID[(i+j)%totalStore],

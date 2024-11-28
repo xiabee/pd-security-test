@@ -26,7 +26,7 @@ func TestRandBuckets(t *testing.T) {
 	re := require.New(t)
 	rb := newRandBuckets()
 	addOperators(rb)
-	for range priorityWeight {
+	for i := 0; i < len(priorityWeight); i++ {
 		op := rb.GetOperator()
 		re.NotNil(op)
 	}
@@ -67,7 +67,7 @@ func TestRandomBucketsWithMergeRegion(t *testing.T) {
 	re := require.New(t)
 	rb := newRandBuckets()
 	descs := []string{"merge-region", "admin-merge-region", "random-merge"}
-	for j := range 100 {
+	for j := 0; j < 100; j++ {
 		// adds operators
 		desc := descs[j%3]
 		op := NewTestOperator(uint64(1), &metapb.RegionEpoch{}, OpRegion|OpMerge, []OpStep{
@@ -109,7 +109,7 @@ func TestRandomBucketsWithMergeRegion(t *testing.T) {
 		op.SetPriorityLevel(constant.High)
 		rb.PutOperator(op)
 
-		for range 2 {
+		for i := 0; i < 2; i++ {
 			op := rb.GetOperator()
 			re.NotNil(op)
 		}

@@ -70,7 +70,7 @@ func newBenchCluster(ruleEnable, labelEnable bool, tombstoneEnable bool) (contex
 				tc.AddLabelsStore(storeID, regionCount-int(storeID), label)
 				storeID++
 			}
-			for range regionCount {
+			for j := 0; j < regionCount; j++ {
 				if ruleEnable {
 					learnID := regionID%uint64(tiflashCount) + uint64(storeCount)
 					tc.AddRegionWithLearner(regionID, storeID-1, []uint64{storeID - 2, storeID - 3}, []uint64{learnID})
@@ -82,7 +82,7 @@ func newBenchCluster(ruleEnable, labelEnable bool, tombstoneEnable bool) (contex
 		}
 	}
 	if tombstoneEnable {
-		for i := range uint64(storeCount * 2 / 3) {
+		for i := uint64(0); i < uint64(storeCount*2/3); i++ {
 			s := tc.GetStore(i)
 			s.GetMeta().State = metapb.StoreState_Tombstone
 		}
@@ -105,7 +105,7 @@ func newBenchBigCluster(storeNumInOneRack, regionNum int) (context.CancelFunc, *
 
 	storeID, regionID := uint64(0), uint64(0)
 	hosts := make([]string, 0)
-	for i := range storeNumInOneRack {
+	for i := 0; i < storeNumInOneRack; i++ {
 		hosts = append(hosts, fmt.Sprintf("host%d", i+1))
 	}
 	for _, host := range hosts {
@@ -118,7 +118,7 @@ func newBenchBigCluster(storeNumInOneRack, regionNum int) (context.CancelFunc, *
 				storeID++
 				tc.AddLabelsStore(storeID, regionNum, label)
 			}
-			for range regionCount {
+			for j := 0; j < regionCount; j++ {
 				tc.AddRegionWithLearner(regionID, storeID, []uint64{storeID - 1, storeID - 2}, nil)
 				regionID++
 			}
@@ -129,7 +129,7 @@ func newBenchBigCluster(storeNumInOneRack, regionNum int) (context.CancelFunc, *
 
 func addTiflash(tc *mockcluster.Cluster) {
 	tc.SetPlacementRuleEnabled(true)
-	for i := range tiflashCount {
+	for i := 0; i < tiflashCount; i++ {
 		label := make(map[string]string, 3)
 		label["engine"] = "tiflash"
 		if i == tiflashCount-1 {

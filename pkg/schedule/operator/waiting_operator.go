@@ -47,7 +47,7 @@ type randBuckets struct {
 // newRandBuckets creates a random buckets.
 func newRandBuckets() *randBuckets {
 	var buckets []*bucket
-	for i := range priorityWeight {
+	for i := 0; i < len(priorityWeight); i++ {
 		buckets = append(buckets, &bucket{
 			weight: priorityWeight[i],
 		})

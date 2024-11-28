@@ -168,7 +168,7 @@ func (td *tsoDispatcher) scheduleUpdateConnectionCtxs() {
 }
 
 func (td *tsoDispatcher) revokePendingRequests(err error) {
-	for range len(td.tsoRequestCh) {
+	for i := 0; i < len(td.tsoRequestCh); i++ {
 		req := <-td.tsoRequestCh
 		req.tryDone(err)
 	}

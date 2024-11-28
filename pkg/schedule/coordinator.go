@@ -253,7 +253,7 @@ func (c *Coordinator) InitSchedulers(needRun bool) {
 		configs       []string
 		err           error
 	)
-	for i := range maxLoadConfigRetries {
+	for i := 0; i < maxLoadConfigRetries; i++ {
 		scheduleNames, configs, err = c.cluster.GetStorage().LoadAllSchedulerConfigs()
 		select {
 		case <-c.ctx.Done():
@@ -432,8 +432,16 @@ func (c *Coordinator) GetHotRegionsByType(typ utils.RWType) *statistics.StoreHot
 	isTraceFlow := c.cluster.GetSchedulerConfig().IsTraceRegionFlow()
 	storeLoads := c.cluster.GetStoresLoads()
 	stores := c.cluster.GetStores()
-	hotPeerStats := c.cluster.GetHotPeerStats(typ)
-	infos := statistics.GetHotStatus(stores, storeLoads, hotPeerStats, typ, isTraceFlow)
+	var infos *statistics.StoreHotPeersInfos
+	switch typ {
+	case utils.Write:
+		regionStats := c.cluster.RegionWriteStats()
+		infos = statistics.GetHotStatus(stores, storeLoads, regionStats, utils.Write, isTraceFlow)
+	case utils.Read:
+		regionStats := c.cluster.RegionReadStats()
+		infos = statistics.GetHotStatus(stores, storeLoads, regionStats, utils.Read, isTraceFlow)
+	default:
+	}
 	// update params `IsLearner` and `LastUpdateTime`
 	s := []statistics.StoreHotPeersStat{infos.AsLeader, infos.AsPeer}
 	for i, stores := range s {
@@ -497,9 +505,20 @@ func (c *Coordinator) CollectHotSpotMetrics() {
 }
 
 func collectHotMetrics(cluster sche.ClusterInformer, stores []*core.StoreInfo, typ utils.RWType) {
-	kind := typ.String()
-	hotPeerStats := cluster.GetHotPeerStats(typ)
-	status := statistics.CollectHotPeerInfos(stores, hotPeerStats) // only returns TotalBytesRate,TotalKeysRate,TotalQueryRate,Count
+	var (
+		kind        string
+		regionStats map[uint64][]*statistics.HotPeerStat
+	)
+
+	switch typ {
+	case utils.Read:
+		regionStats = cluster.RegionReadStats()
+		kind = utils.Read.String()
+	case utils.Write:
+		regionStats = cluster.RegionWriteStats()
+		kind = utils.Write.String()
+	}
+	status := statistics.CollectHotPeerInfos(stores, regionStats) // only returns TotalBytesRate,TotalKeysRate,TotalQueryRate,Count
 
 	for _, s := range stores {
 		// TODO: pre-allocate gauge metrics

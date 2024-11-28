@@ -366,7 +366,7 @@ func (s *testTSOStreamSuite) TestTSOStreamBasic() {
 func (s *testTSOStreamSuite) testTSOStreamBrokenImpl(err error, pendingRequests int) {
 	var resultCh []<-chan callbackInvocation
 
-	for range pendingRequests {
+	for i := 0; i < pendingRequests; i++ {
 		ch := s.mustProcessRequestWithResultCh(1)
 		resultCh = append(resultCh, ch)
 		s.noResult(ch)
@@ -414,7 +414,7 @@ func (s *testTSOStreamSuite) TestTSOStreamCanceledWithPendingReq() {
 func (s *testTSOStreamSuite) TestTSOStreamFIFO() {
 	var resultChs []<-chan callbackInvocation
 	const count = 5
-	for i := range count {
+	for i := 0; i < count; i++ {
 		ch := s.mustProcessRequestWithResultCh(int64(i + 1))
 		resultChs = append(resultChs, ch)
 	}
@@ -423,7 +423,7 @@ func (s *testTSOStreamSuite) TestTSOStreamFIFO() {
 		s.noResult(ch)
 	}
 
-	for i := range count {
+	for i := 0; i < count; i++ {
 		s.inner.returnResult(int64((i+1)*10), int64(i), uint32(i+1))
 	}
 
@@ -505,7 +505,7 @@ func (s *testTSOStreamSuite) TestEstimatedLatency() {
 	reqStartTimeCh := make(chan time.Time, maxPendingRequestsInTSOStream)
 	// Limit concurrent requests to be less than the capacity of tsoStream.pendingRequests.
 	tokenCh := make(chan struct{}, maxPendingRequestsInTSOStream-1)
-	for range 40 {
+	for i := 0; i < 40; i++ {
 		tokenCh <- struct{}{}
 	}
 	// Return a result after 50ms delay for each requests
@@ -594,7 +594,7 @@ func TestRCFilter(t *testing.T) {
 	re.Equal(0.0, f.update(now, 0))
 	lastOutput := 0.0
 	// 10000 even samples in 1 second.
-	for range 10000 {
+	for i := 0; i < 10000; i++ {
 		now = now.Add(time.Microsecond * 100)
 		output := f.update(now, 1.0)
 		re.Greater(output, lastOutput)

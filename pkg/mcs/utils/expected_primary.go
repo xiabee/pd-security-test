@@ -154,6 +154,11 @@ func TransferPrimary(client *clientv3.Client, lease *election.Lease, serviceName
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	nextPrimaryID := r.Intn(len(primaryIDs))
 
+	clusterID, err := etcdutil.GetClusterID(client, constant.ClusterIDPath)
+	if err != nil {
+		return errors.Errorf("failed to get cluster ID: %v", err)
+	}
+
 	// update expected primary flag
 	grantResp, err := client.Grant(client.Ctx(), constant.DefaultLeaderLease)
 	if err != nil {
@@ -168,9 +173,9 @@ func TransferPrimary(client *clientv3.Client, lease *election.Lease, serviceName
 	var primaryPath string
 	switch serviceName {
 	case constant.SchedulingServiceName:
-		primaryPath = keypath.SchedulingPrimaryPath()
+		primaryPath = keypath.SchedulingPrimaryPath(clusterID)
 	case constant.TSOServiceName:
-		tsoRootPath := keypath.TSOSvcRootPath()
+		tsoRootPath := keypath.TSOSvcRootPath(clusterID)
 		primaryPath = keypath.KeyspaceGroupPrimaryPath(tsoRootPath, keyspaceGroupID)
 	}
 	_, err = markExpectedPrimaryFlag(client, primaryPath, primaryIDs[nextPrimaryID], grantResp.ID)

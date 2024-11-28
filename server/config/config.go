@@ -133,14 +133,14 @@ type Config struct {
 	AutoCompactionRetention string `toml:"auto-compaction-retention" json:"auto-compaction-retention-v2"`
 
 	// TickInterval is the interval for etcd Raft tick.
-	TickInterval typeutil.Duration `toml:"tick-interval" json:"tick-interval"`
+	TickInterval typeutil.Duration `toml:"tick-interval"`
 	// ElectionInterval is the interval for etcd Raft election.
-	ElectionInterval typeutil.Duration `toml:"election-interval" json:"election-interval"`
+	ElectionInterval typeutil.Duration `toml:"election-interval"`
 	// Prevote is true to enable Raft Pre-Vote.
 	// If enabled, Raft runs an additional election phase
 	// to check whether it would get enough votes to win
 	// an election, thus minimizing disruptions.
-	PreVote bool `toml:"enable-prevote" json:"enable-prevote"`
+	PreVote bool `toml:"enable-prevote"`
 
 	MaxRequestBytes uint `toml:"max-request-bytes" json:"max-request-bytes"`
 
@@ -149,12 +149,12 @@ type Config struct {
 	LabelProperty LabelPropertyConfig `toml:"label-property" json:"label-property"`
 
 	// For all warnings during parsing.
-	WarningMsgs []string `json:"-"`
+	WarningMsgs []string
 
-	DisableStrictReconfigCheck bool `json:"-"`
+	DisableStrictReconfigCheck bool
 
-	HeartbeatStreamBindInterval typeutil.Duration `json:"-"`
-	LeaderPriorityCheckInterval typeutil.Duration `json:"-"`
+	HeartbeatStreamBindInterval typeutil.Duration
+	LeaderPriorityCheckInterval typeutil.Duration
 
 	Logger   *zap.Logger        `json:"-"`
 	LogProps *log.ZapProperties `json:"-"`

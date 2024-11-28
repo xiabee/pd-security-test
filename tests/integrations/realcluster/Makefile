@@ -28,17 +28,9 @@ tidy:
 	git diff go.mod go.sum | cat
 	git diff --quiet go.mod go.sum
 
-check: tiup test
+check: deploy test kill_cluster
 
-tiup:
-	# if tiup binary not exist, download it
-	if ! which tiup > /dev/null 2>&1; then \
-        curl --proto '=https' --tlsv1.2 -sSf https://tiup-mirrors.pingcap.com/install.sh | sh; \
-    fi
-
-deploy: kill_cluster deploy_only
-
-deploy_only:
+deploy: kill_cluster
 	@ echo "deploying..."
 	./deploy.sh
 	@ echo "wait cluster ready..."

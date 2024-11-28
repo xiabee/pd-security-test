@@ -274,7 +274,7 @@ func TestCampaignTimes(t *testing.T) {
 	defer func() {
 		campaignTimesRecordTimeout = 5 * time.Minute
 	}()
-	for range 3 {
+	for i := 0; i < 3; i++ {
 		leadership.AddCampaignTimes()
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -282,7 +282,7 @@ func TestCampaignTimes(t *testing.T) {
 
 	// only the last 2 records are valid.
 	campaignTimesRecordTimeout = 200 * time.Millisecond
-	for range 3 {
+	for i := 0; i < 3; i++ {
 		leadership.AddCampaignTimes()
 		time.Sleep(100 * time.Millisecond)
 	}

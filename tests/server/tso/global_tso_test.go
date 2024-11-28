@@ -99,7 +99,6 @@ func TestDelaySyncTimestamp(t *testing.T) {
 	var leaderServer, nextLeaderServer *tests.TestServer
 	leaderServer = cluster.GetLeaderServer()
 	re.NotNil(leaderServer)
-	leaderServer.BootstrapCluster()
 	for _, s := range cluster.GetServers() {
 		if s.GetConfig().Name != cluster.GetLeader() {
 			nextLeaderServer = s
@@ -147,8 +146,6 @@ func TestLogicalOverflow(t *testing.T) {
 		re.NotEmpty(cluster.WaitLeader())
 
 		leaderServer := cluster.GetLeaderServer()
-		re.NotNil(leaderServer)
-		leaderServer.BootstrapCluster()
 		grpcPDClient := testutil.MustNewGrpcClient(re, leaderServer.GetAddr())
 		clusterID := leaderServer.GetClusterID()
 
@@ -157,7 +154,7 @@ func TestLogicalOverflow(t *testing.T) {
 		defer tsoClient.CloseSend()
 
 		begin := time.Now()
-		for i := range 3 {
+		for i := 0; i < 3; i++ {
 			req := &pdpb.TsoRequest{
 				Header:     testutil.NewRequestHeader(clusterID),
 				Count:      150000,

@@ -100,7 +100,7 @@ func TestLevelDBBackend(t *testing.T) {
 	backend.flushRate = defaultFlushRate
 	// Test the flush when the cache is full.
 	backend.flushRate = time.Minute
-	for i := range backend.batchSize {
+	for i := 0; i < backend.batchSize; i++ {
 		key, value = fmt.Sprintf("k%d", i), fmt.Sprintf("v%d", i)
 		err = backend.SaveIntoBatch(key, []byte(value))
 		re.NoError(err)

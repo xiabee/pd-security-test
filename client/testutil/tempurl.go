@@ -31,7 +31,7 @@ var (
 
 // Alloc allocates a local URL for testing.
 func Alloc() string {
-	for range 10 {
+	for i := 0; i < 10; i++ {
 		if u := tryAllocTestURL(); u != "" {
 			return u
 		}

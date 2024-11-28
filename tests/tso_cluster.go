@@ -46,7 +46,7 @@ func NewTestTSOCluster(ctx context.Context, initialServerCount int, backendEndpo
 		servers:          make(map[string]*tso.Server, initialServerCount),
 		cleanupFuncs:     make(map[string]testutil.CleanupFunc, initialServerCount),
 	}
-	for range initialServerCount {
+	for i := 0; i < initialServerCount; i++ {
 		err = tc.AddServer(tempurl.Alloc())
 		if err != nil {
 			return nil, err

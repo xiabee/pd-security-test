@@ -400,6 +400,7 @@ func NewKeyspaceGroupManager(
 	etcdClient *clientv3.Client,
 	httpClient *http.Client,
 	electionNamePrefix string,
+	clusterID uint64,
 	legacySvcRootPath string,
 	tsoSvcRootPath string,
 	cfg ServiceConfig,
@@ -418,7 +419,7 @@ func NewKeyspaceGroupManager(
 		etcdClient:                   etcdClient,
 		httpClient:                   httpClient,
 		electionNamePrefix:           electionNamePrefix,
-		tsoServiceKey:                keypath.TSOPath(),
+		tsoServiceKey:                discovery.TSOPath(clusterID),
 		legacySvcRootPath:            legacySvcRootPath,
 		tsoSvcRootPath:               tsoSvcRootPath,
 		primaryPriorityCheckInterval: defaultPrimaryPriorityCheckInterval,
@@ -789,8 +790,7 @@ func (kgm *KeyspaceGroupManager) updateKeyspaceGroup(group *endpoint.KeyspaceGro
 		storage = kgm.tsoSvcStorage
 	}
 	// Initialize all kinds of maps.
-	am := NewAllocatorManager(kgm.ctx, group.ID, participant, tsRootPath, storage, kgm.cfg)
-	am.startGlobalAllocatorLoop()
+	am := NewAllocatorManager(kgm.ctx, group.ID, participant, tsRootPath, storage, kgm.cfg, true)
 	log.Info("created allocator manager",
 		zap.Uint32("keyspace-group-id", group.ID),
 		zap.String("timestamp-path", am.GetTimestampPath("")))
@@ -867,7 +867,7 @@ func (kgm *KeyspaceGroupManager) updateKeyspaceGroupMembership(
 	if oldLen != newLen {
 		sameMembership = false
 	} else {
-		for i := range oldLen {
+		for i := 0; i < oldLen; i++ {
 			if oldKeyspaces[i] != newKeyspaces[i] {
 				sameMembership = false
 				break

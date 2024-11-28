@@ -30,16 +30,16 @@ func newMakeupDownReplicas(config *sc.SimConfig) *Case {
 	replica := int(config.ServerConfig.Replication.MaxReplicas)
 
 	noEmptyStoreNum := totalStore - 1
-	for range totalStore {
+	for i := 0; i < totalStore; i++ {
 		simCase.Stores = append(simCase.Stores, &Store{
 			ID:     simutil.IDAllocator.NextID(),
 			Status: metapb.StoreState_Up,
 		})
 	}
 
-	for i := range totalRegion {
+	for i := 0; i < totalRegion; i++ {
 		peers := make([]*metapb.Peer, 0, replica)
-		for j := range replica {
+		for j := 0; j < replica; j++ {
 			peers = append(peers, &metapb.Peer{
 				Id:      simutil.IDAllocator.NextID(),
 				StoreId: uint64((i+j)%totalStore + 1),

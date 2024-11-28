@@ -355,7 +355,7 @@ func TestCampaignLeaderFrequently(t *testing.T) {
 	re.NotEmpty(cluster.GetLeader())
 
 	// need to prevent 3 times(including the above 1st time) campaign leader in 5 min.
-	for range 2 {
+	for i := 0; i < 2; i++ {
 		cluster.GetLeaderServer().ResetPDLeader()
 		re.NotEmpty(cluster.WaitLeader())
 		re.Equal(leader, cluster.GetLeader())
@@ -383,7 +383,7 @@ func TestGrantLeaseFailed(t *testing.T) {
 	re.NotEmpty(cluster.GetLeader())
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/election/skipGrantLeader", fmt.Sprintf("return(\"%s\")", leader)))
 
-	for range 3 {
+	for i := 0; i < 3; i++ {
 		cluster.GetLeaderServer().ResetPDLeader()
 		re.NotEmpty(cluster.WaitLeader())
 	}

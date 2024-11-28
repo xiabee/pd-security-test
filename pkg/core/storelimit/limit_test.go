@@ -85,7 +85,7 @@ func TestSlidingWindow(t *testing.T) {
 	re.Equal([]int64{capacity - minSnapSize, 0, 0, 0}, s.GetUsed())
 
 	// case 3: skip the type is not the SendSnapshot
-	for range 10 {
+	for i := 0; i < 10; i++ {
 		re.True(s.Take(capacity, AddPeer, constant.Low))
 	}
 }

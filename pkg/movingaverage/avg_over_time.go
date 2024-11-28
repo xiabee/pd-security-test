@@ -115,7 +115,7 @@ func (aot *AvgOverTime) IsFull() bool {
 // Clone returns a copy of AvgOverTime
 func (aot *AvgOverTime) Clone() *AvgOverTime {
 	q := queue.New()
-	for range aot.que.Len() {
+	for i := 0; i < aot.que.Len(); i++ {
 		v := aot.que.PopFront()
 		aot.que.PushBack(v)
 		q.PushBack(v)

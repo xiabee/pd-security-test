@@ -1347,7 +1347,7 @@ func (gc *groupCostController) acquireTokens(ctx context.Context, delta *rmpb.Co
 		d   time.Duration
 	)
 retryLoop:
-	for range gc.mainCfg.WaitRetryTimes {
+	for i := 0; i < gc.mainCfg.WaitRetryTimes; i++ {
 		now := time.Now()
 		switch gc.mode {
 		case rmpb.GroupMode_RawMode:

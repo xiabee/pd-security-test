@@ -389,7 +389,7 @@ func createTransferLeaderOperator(cs *candidateStores, dir string, s *balanceLea
 		creator = s.transferLeaderIn
 	}
 	var op *operator.Operator
-	for range retryLimit {
+	for i := 0; i < retryLimit; i++ {
 		if op = creator(ssolver, collector); op != nil {
 			if _, ok := usedRegions[op.RegionID()]; !ok {
 				break

@@ -49,7 +49,7 @@ var podNameTemplate = map[ComponentType]string{
 func generatePodNames(component ComponentType) []string {
 	names := make([]string, 0, instanceCount)
 	pattern := podNameTemplate[component]
-	for i := range instanceCount {
+	for i := 0; i < instanceCount; i++ {
 		names = append(names, fmt.Sprintf(pattern, mockClusterName, i))
 	}
 	return names
@@ -119,7 +119,7 @@ func (c *normalClient) buildCPUMockData(component ComponentType) {
 	cpuQuotaQuery := cpuQuotaPromQLTemplate[component]
 
 	var results []result
-	for i := range instanceCount {
+	for i := 0; i < instanceCount; i++ {
 		results = append(results, result{
 			Value: []any{time.Now().Unix(), fmt.Sprintf("%f", mockResultValue)},
 			Metric: metric{
@@ -192,7 +192,7 @@ func TestRetrieveCPUMetrics(t *testing.T) {
 			options := NewQueryOptions(component, metric, addresses[:len(addresses)-1], time.Now(), mockDuration)
 			result, err := querier.Query(options)
 			re.NoError(err)
-			for i := range len(addresses) - 1 {
+			for i := 0; i < len(addresses)-1; i++ {
 				value, ok := result[addresses[i]]
 				re.True(ok)
 				re.Less(math.Abs(value-mockResultValue), 1e-6)

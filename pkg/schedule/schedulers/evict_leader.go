@@ -313,7 +313,7 @@ type evictLeaderStoresConf interface {
 func scheduleEvictLeaderBatch(r *rand.Rand, name string, cluster sche.SchedulerCluster, conf evictLeaderStoresConf) []*operator.Operator {
 	var ops []*operator.Operator
 	batchSize := conf.getBatch()
-	for range batchSize {
+	for i := 0; i < batchSize; i++ {
 		once := scheduleEvictLeaderOnce(r, name, cluster, conf)
 		// no more regions
 		if len(once) == 0 {

@@ -111,7 +111,7 @@ func (w *Window) ResetBucket(offset int) {
 
 // ResetBuckets empties the buckets based on the given offsets.
 func (w *Window) ResetBuckets(offset int, count int) {
-	for i := range count {
+	for i := 0; i < count; i++ {
 		w.ResetBucket(offset + i)
 	}
 }

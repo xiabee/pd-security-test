@@ -59,7 +59,7 @@ func (m *MockPackHotRegionInfo) IsLeader() bool {
 
 // GenHistoryHotRegions generate history hot region for test.
 func (m *MockPackHotRegionInfo) GenHistoryHotRegions(num int, updateTime time.Time) {
-	for i := range num {
+	for i := 0; i < num; i++ {
 		historyHotRegion := HistoryHotRegion{
 			UpdateTime:    updateTime.UnixNano() / int64(time.Millisecond),
 			RegionID:      uint64(i),
@@ -180,7 +180,7 @@ func TestHotRegionDelete(t *testing.T) {
 	re.NoError(err)
 	defer clean()
 	historyHotRegions := make([]HistoryHotRegion, 0)
-	for range defaultDeleteData {
+	for i := 0; i < defaultDeleteData; i++ {
 		historyHotRegion := HistoryHotRegion{
 			UpdateTime:    deleteDate.UnixNano() / int64(time.Millisecond),
 			RegionID:      1,
@@ -273,7 +273,7 @@ func BenchmarkRead(b *testing.B) {
 }
 
 func newTestHotRegions(storage *HotRegionStorage, mock *MockPackHotRegionInfo, cycleTimes, num int, updateTime time.Time) time.Time {
-	for range cycleTimes {
+	for i := 0; i < cycleTimes; i++ {
 		mock.GenHistoryHotRegions(num, updateTime)
 		storage.pullHotRegionInfo()
 		storage.flush()

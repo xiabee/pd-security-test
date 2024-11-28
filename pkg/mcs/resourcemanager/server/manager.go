@@ -344,7 +344,7 @@ func (m *Manager) persistResourceGroupRunningState() {
 		keys = append(keys, k)
 	}
 	m.RUnlock()
-	for idx := range keys {
+	for idx := 0; idx < len(keys); idx++ {
 		m.RLock()
 		group, ok := m.groups[keys[idx]]
 		if ok {
@@ -451,7 +451,7 @@ func (m *Manager) backgroundMetricsFlush(ctx context.Context) {
 					sqlCPUCost.DeleteLabelValues(r.name, r.name, r.ruType)
 					requestCount.DeleteLabelValues(r.name, r.name, readTypeLabel)
 					requestCount.DeleteLabelValues(r.name, r.name, writeTypeLabel)
-					availableRUCounter.DeleteLabelValues(r.name, r.name)
+					availableRUCounter.DeleteLabelValues(r.name, r.name, r.ruType)
 					delete(m.consumptionRecord, r)
 					delete(maxPerSecTrackers, r.name)
 					readRequestUnitMaxPerSecCost.DeleteLabelValues(r.name)

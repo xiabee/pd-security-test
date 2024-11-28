@@ -42,7 +42,7 @@ func TestLoadRegion(t *testing.T) {
 		storage: storage.NewCoreStorage(storage.NewStorageWithMemoryBackend(), rs),
 		bc:      core.NewBasicCluster(),
 	}
-	for i := range 30 {
+	for i := 0; i < 30; i++ {
 		rs.SaveRegion(&metapb.Region{Id: uint64(i) + 1})
 	}
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/storage/endpoint/slowLoadRegion", "return(true)"))

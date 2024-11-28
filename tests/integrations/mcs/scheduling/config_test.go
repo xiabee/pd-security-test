@@ -86,6 +86,7 @@ func (suite *configTestSuite) TestConfigWatch() {
 	watcher, err := config.NewWatcher(
 		suite.ctx,
 		suite.pdLeaderServer.GetEtcdClient(),
+		suite.cluster.GetCluster().GetId(),
 		config.NewPersistConfig(config.NewConfig(), cache.NewStringTTL(suite.ctx, sc.DefaultGCInterval, sc.DefaultTTL)),
 		endpoint.NewStorageEndpoint(kv.NewMemoryKV(), nil),
 	)
@@ -145,6 +146,7 @@ func (suite *configTestSuite) TestSchedulerConfigWatch() {
 	watcher, err := config.NewWatcher(
 		suite.ctx,
 		suite.pdLeaderServer.GetEtcdClient(),
+		suite.cluster.GetCluster().GetId(),
 		config.NewPersistConfig(config.NewConfig(), cache.NewStringTTL(suite.ctx, sc.DefaultGCInterval, sc.DefaultTTL)),
 		storage,
 	)

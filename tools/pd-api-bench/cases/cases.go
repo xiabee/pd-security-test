@@ -452,7 +452,7 @@ func newGetKV() func() EtcdCase {
 }
 
 func (*getKV) init(ctx context.Context, cli *clientv3.Client) error {
-	for i := range 100 {
+	for i := 0; i < 100; i++ {
 		_, err := cli.Put(ctx, fmt.Sprintf("/test/0001/%4d", i), fmt.Sprintf("%4d", i))
 		if err != nil {
 			return err

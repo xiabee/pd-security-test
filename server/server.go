@@ -17,6 +17,7 @@ package server
 import (
 	"bytes"
 	"context"
+	errorspkg "errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -63,7 +64,6 @@ import (
 	"github.com/tikv/pd/pkg/schedule/hbstream"
 	"github.com/tikv/pd/pkg/schedule/placement"
 	"github.com/tikv/pd/pkg/storage"
-	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/storage/kv"
 	"github.com/tikv/pd/pkg/syncer"
 	"github.com/tikv/pd/pkg/systimemon"
@@ -91,8 +91,9 @@ import (
 const (
 	serverMetricsInterval = time.Minute
 	// pdRootPath for all pd servers.
-	pdRootPath  = "/pd"
-	pdAPIPrefix = "/pd/"
+	pdRootPath      = "/pd"
+	pdAPIPrefix     = "/pd/"
+	pdClusterIDPath = "/pd/cluster_id"
 	// idAllocPath for idAllocator to save persistent window's end.
 	idAllocPath  = "alloc_id"
 	idAllocLabel = "idalloc"
@@ -155,7 +156,9 @@ type Server struct {
 	electionClient *clientv3.Client
 	// http client
 	httpClient *http.Client
-	rootPath   string
+	// PD cluster ID.
+	clusterID atomic.Uint64
+	rootPath  string
 
 	// Server services.
 	// for id allocator, we can use one allocator for
@@ -298,7 +301,7 @@ func CreateServer(ctx context.Context, cfg *config.Config, services []string, le
 	failpoint.Inject("useGlobalRegistry", func() {
 		s.registry = registry.ServerServiceRegistry
 	})
-	s.registry.RegisterService("MetaStorage", ms_server.NewService)
+	s.registry.RegisterService("MetaStorage", ms_server.NewService[*Server])
 	s.registry.RegisterService("ResourceManager", rm_server.NewService[*Server])
 	// Register the micro services REST path.
 	s.registry.InstallAllRESTHandler(s, etcdCfg.UserHandlers)
@@ -425,16 +428,18 @@ func (s *Server) AddStartCallback(callbacks ...func()) {
 }
 
 func (s *Server) startServer(ctx context.Context) error {
-	clusterID, err := endpoint.InitClusterID(s.client)
+	clusterID, err := etcdutil.InitClusterID(s.client, pdClusterIDPath)
 	if err != nil {
 		log.Error("failed to init cluster id", errs.ZapError(err))
 		return err
 	}
+	s.clusterID.Store(clusterID)
+	log.Info("init cluster id", zap.Uint64("cluster-id", clusterID))
 	// It may lose accuracy if use float64 to store uint64. So we store the cluster id in label.
 	metadataGauge.WithLabelValues(fmt.Sprintf("cluster%d", clusterID)).Set(0)
 	bs.ServerInfoGauge.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
 
-	s.rootPath = keypath.PDRootPath()
+	s.rootPath = keypath.PDRootPath(clusterID)
 	s.member.InitMemberInfo(s.cfg.AdvertiseClientUrls, s.cfg.AdvertisePeerUrls, s.Name(), s.rootPath)
 	if err := s.member.SetMemberDeployPath(s.member.ID()); err != nil {
 		return err
@@ -470,7 +475,7 @@ func (s *Server) startServer(ctx context.Context) error {
 	s.tsoDispatcher = tsoutil.NewTSODispatcher(tsoProxyHandleDuration, tsoProxyBatchSize)
 	s.tsoProtoFactory = &tsoutil.TSOProtoFactory{}
 	s.pdProtoFactory = &tsoutil.PDProtoFactory{}
-	s.tsoAllocatorManager = tso.NewAllocatorManager(s.ctx, constant.DefaultKeyspaceGroupID, s.member, s.rootPath, s.storage, s)
+	s.tsoAllocatorManager = tso.NewAllocatorManager(s.ctx, constant.DefaultKeyspaceGroupID, s.member, s.rootPath, s.storage, s, false)
 	// When disabled the Local TSO, we should clean up the Local TSO Allocator's meta info written in etcd if it exists.
 	if !s.cfg.EnableLocalTSO {
 		if err = s.tsoAllocatorManager.CleanUpDCLocation(); err != nil {
@@ -485,7 +490,7 @@ func (s *Server) startServer(ctx context.Context) error {
 
 	s.gcSafePointManager = gc.NewSafePointManager(s.storage, s.cfg.PDServerCfg)
 	s.basicCluster = core.NewBasicCluster()
-	s.cluster = cluster.NewRaftCluster(ctx, s.GetMember(), s.GetBasicCluster(), s.GetStorage(), syncer.NewRegionSyncer(s), s.client, s.httpClient, s.tsoAllocatorManager)
+	s.cluster = cluster.NewRaftCluster(ctx, clusterID, s.GetBasicCluster(), s.GetStorage(), syncer.NewRegionSyncer(s), s.client, s.httpClient)
 	keyspaceIDAllocator := id.NewAllocator(&id.AllocatorParams{
 		Client:    s.client,
 		RootPath:  s.rootPath,
@@ -495,11 +500,11 @@ func (s *Server) startServer(ctx context.Context) error {
 		Step:      keyspace.AllocStep,
 	})
 	if s.IsAPIServiceMode() {
-		s.keyspaceGroupManager = keyspace.NewKeyspaceGroupManager(s.ctx, s.storage, s.client)
+		s.keyspaceGroupManager = keyspace.NewKeyspaceGroupManager(s.ctx, s.storage, s.client, clusterID)
 	}
 	s.keyspaceManager = keyspace.NewKeyspaceManager(s.ctx, s.storage, s.cluster, keyspaceIDAllocator, &s.cfg.Keyspace, s.keyspaceGroupManager)
 	s.safePointV2Manager = gc.NewSafePointManagerV2(s.ctx, s.storage, s.storage, s.storage)
-	s.hbStreams = hbstream.NewHeartbeatStreams(ctx, "", s.cluster)
+	s.hbStreams = hbstream.NewHeartbeatStreams(ctx, clusterID, "", s.cluster)
 	// initial hot_region_storage in here.
 
 	s.hotRegionStorage, err = storage.NewHotRegionsStorage(
@@ -704,13 +709,13 @@ func (s *Server) collectEtcdStateMetrics() {
 }
 
 func (s *Server) bootstrapCluster(req *pdpb.BootstrapRequest) (*pdpb.BootstrapResponse, error) {
-	clusterID := keypath.ClusterID()
+	clusterID := s.ClusterID()
 
 	log.Info("try to bootstrap raft cluster",
 		zap.Uint64("cluster-id", clusterID),
 		zap.String("request", fmt.Sprintf("%v", req)))
 
-	if err := checkBootstrapRequest(req); err != nil {
+	if err := checkBootstrapRequest(clusterID, req); err != nil {
 		return nil, err
 	}
 
@@ -931,6 +936,11 @@ func (s *Server) GetKeyspaceGroupManager() *keyspace.GroupManager {
 // Name returns the unique etcd Name for this server in etcd cluster.
 func (s *Server) Name() string {
 	return s.cfg.Name
+}
+
+// ClusterID returns the cluster ID of this server.
+func (s *Server) ClusterID() uint64 {
+	return s.clusterID.Load()
 }
 
 // StartTimestamp returns the start timestamp of this server
@@ -1408,17 +1418,6 @@ func (s *Server) GetRaftCluster() *cluster.RaftCluster {
 	return s.cluster
 }
 
-// IsServiceIndependent returns whether the service is independent.
-func (s *Server) IsServiceIndependent(name string) bool {
-	if s.mode == APIServiceMode && !s.IsClosed() {
-		if name == constant.TSOServiceName && !cluster.IsTSODynamicSwitchingEnabled {
-			return true
-		}
-		return s.cluster.IsServiceIndependent(name)
-	}
-	return false
-}
-
 // DirectlyGetRaftCluster returns raft cluster directly.
 // Only used for test.
 func (s *Server) DirectlyGetRaftCluster() *cluster.RaftCluster {
@@ -1428,7 +1427,7 @@ func (s *Server) DirectlyGetRaftCluster() *cluster.RaftCluster {
 // GetCluster gets cluster.
 func (s *Server) GetCluster() *metapb.Cluster {
 	return &metapb.Cluster{
-		Id:           keypath.ClusterID(),
+		Id:           s.ClusterID(),
 		MaxPeerCount: uint32(s.persistOptions.GetMaxReplicas()),
 	}
 }
@@ -1716,6 +1715,29 @@ func (s *Server) campaignLeader() {
 	s.member.KeepLeader(ctx)
 	log.Info(fmt.Sprintf("campaign %s leader ok", s.mode), zap.String("campaign-leader-name", s.Name()))
 
+	if !s.IsAPIServiceMode() {
+		allocator, err := s.tsoAllocatorManager.GetAllocator(tso.GlobalDCLocation)
+		if err != nil {
+			log.Error("failed to get the global TSO allocator", errs.ZapError(err))
+			return
+		}
+		log.Info("initializing the global TSO allocator")
+		if err := allocator.Initialize(0); err != nil {
+			log.Error("failed to initialize the global TSO allocator", errs.ZapError(err))
+			return
+		}
+		defer func() {
+			s.tsoAllocatorManager.ResetAllocatorGroup(tso.GlobalDCLocation, false)
+			failpoint.Inject("updateAfterResetTSO", func() {
+				if err = allocator.UpdateTSO(); !errorspkg.Is(err, errs.ErrUpdateTimestamp) {
+					log.Panic("the tso update after reset should return ErrUpdateTimestamp as expected", zap.Error(err))
+				}
+				if allocator.IsInitialize() {
+					log.Panic("the allocator should be uninitialized after reset")
+				}
+			})
+		}()
+	}
 	if err := s.reloadConfigFromKV(); err != nil {
 		log.Error("failed to reload configuration", errs.ZapError(err))
 		return
@@ -1974,7 +1996,7 @@ func (s *Server) UnmarkSnapshotRecovering(ctx context.Context) error {
 func (s *Server) GetServicePrimaryAddr(ctx context.Context, serviceName string) (string, bool) {
 	ticker := time.NewTicker(retryIntervalGetServicePrimary)
 	defer ticker.Stop()
-	for range maxRetryTimesGetServicePrimary {
+	for i := 0; i < maxRetryTimesGetServicePrimary; i++ {
 		if v, ok := s.servicePrimaryMap.Load(serviceName); ok {
 			return v.(string), true
 		}
@@ -1997,7 +2019,7 @@ func (s *Server) SetServicePrimaryAddr(serviceName, addr string) {
 
 func (s *Server) initTSOPrimaryWatcher() {
 	serviceName := constant.TSOServiceName
-	tsoRootPath := keypath.TSOSvcRootPath()
+	tsoRootPath := keypath.TSOSvcRootPath(s.ClusterID())
 	tsoServicePrimaryKey := keypath.KeyspaceGroupPrimaryPath(tsoRootPath, constant.DefaultKeyspaceGroupID)
 	s.tsoPrimaryWatcher = s.initServicePrimaryWatcher(serviceName, tsoServicePrimaryKey)
 	s.tsoPrimaryWatcher.StartWatchLoop()
@@ -2005,7 +2027,7 @@ func (s *Server) initTSOPrimaryWatcher() {
 
 func (s *Server) initSchedulingPrimaryWatcher() {
 	serviceName := constant.SchedulingServiceName
-	primaryKey := keypath.SchedulingPrimaryPath()
+	primaryKey := keypath.SchedulingPrimaryPath(s.ClusterID())
 	s.schedulingPrimaryWatcher = s.initServicePrimaryWatcher(serviceName, primaryKey)
 	s.schedulingPrimaryWatcher.StartWatchLoop()
 }

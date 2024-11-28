@@ -430,7 +430,7 @@ func (o *Operator) TotalInfluence(opInfluence OpInfluence, region *core.RegionIn
 	}
 	if o.influence == nil {
 		o.influence = NewOpInfluence()
-		for step := range o.steps {
+		for step := 0; step < len(o.steps); step++ {
 			o.steps[step].Influence(*o.influence, region)
 		}
 	}

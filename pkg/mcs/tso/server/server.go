@@ -72,7 +72,8 @@ type Server struct {
 	serverLoopCancel func()
 	serverLoopWg     sync.WaitGroup
 
-	cfg *Config
+	cfg       *Config
+	clusterID uint64
 
 	service              *Service
 	keyspaceGroupManager *tso.KeyspaceGroupManager
@@ -155,7 +156,7 @@ func (s *Server) Run() (err error) {
 		return err
 	}
 
-	if s.serviceID, s.serviceRegister, err = utils.Register(s, constant.TSOServiceName); err != nil {
+	if s.clusterID, s.serviceID, s.serviceRegister, err = utils.Register(s, constant.TSOServiceName); err != nil {
 		return err
 	}
 
@@ -257,6 +258,11 @@ func (*Server) AddServiceReadyCallback(...func(context.Context) error) {
 
 // Implement the other methods
 
+// ClusterID returns the cluster ID of this server.
+func (s *Server) ClusterID() uint64 {
+	return s.clusterID
+}
+
 // IsClosed checks if the server loop is closed
 func (s *Server) IsClosed() bool {
 	return atomic.LoadInt64(&s.isRunning) == 0
@@ -297,9 +303,8 @@ func (s *Server) ValidateRequest(header *tsopb.RequestHeader) error {
 	if s.IsClosed() {
 		return ErrNotStarted
 	}
-	if header.GetClusterId() != keypath.ClusterID() {
-		return status.Errorf(codes.FailedPrecondition, "mismatch cluster id, need %d but got %d",
-			keypath.ClusterID(), header.GetClusterId())
+	if header.GetClusterId() != s.clusterID {
+		return status.Errorf(codes.FailedPrecondition, "mismatch cluster id, need %d but got %d", s.clusterID, header.GetClusterId())
 	}
 	return nil
 }
@@ -349,9 +354,8 @@ func (s *Server) GetTLSConfig() *grpcutil.TLSConfig {
 }
 
 func (s *Server) startServer() (err error) {
-	clusterID := keypath.ClusterID()
 	// It may lose accuracy if use float64 to store uint64. So we store the cluster id in label.
-	metaDataGauge.WithLabelValues(fmt.Sprintf("cluster%d", clusterID)).Set(0)
+	metaDataGauge.WithLabelValues(fmt.Sprintf("cluster%d", s.clusterID)).Set(0)
 	// The independent TSO service still reuses PD version info since PD and TSO are just
 	// different service modes provided by the same pd-server binary
 	bs.ServerInfoGauge.WithLabelValues(versioninfo.PDReleaseVersion, versioninfo.PDGitHash).Set(float64(time.Now().Unix()))
@@ -359,11 +363,11 @@ func (s *Server) startServer() (err error) {
 
 	// Initialize the TSO service.
 	s.serverLoopCtx, s.serverLoopCancel = context.WithCancel(s.Context())
-	legacySvcRootPath := keypath.LegacyRootPath()
-	tsoSvcRootPath := keypath.TSOSvcRootPath()
+	legacySvcRootPath := keypath.LegacyRootPath(s.clusterID)
+	tsoSvcRootPath := keypath.TSOSvcRootPath(s.clusterID)
 	s.keyspaceGroupManager = tso.NewKeyspaceGroupManager(
-		s.serverLoopCtx, s.serviceID, s.GetClient(), s.GetHTTPClient(),
-		s.cfg.AdvertiseListenAddr, legacySvcRootPath, tsoSvcRootPath, s.cfg)
+		s.serverLoopCtx, s.serviceID, s.GetClient(), s.GetHTTPClient(), s.cfg.AdvertiseListenAddr,
+		s.clusterID, legacySvcRootPath, tsoSvcRootPath, s.cfg)
 	if err := s.keyspaceGroupManager.Initialize(); err != nil {
 		return err
 	}

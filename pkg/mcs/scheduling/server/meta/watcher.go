@@ -33,9 +33,10 @@ import (
 
 // Watcher is used to watch the PD API server for any meta changes.
 type Watcher struct {
-	wg     sync.WaitGroup
-	ctx    context.Context
-	cancel context.CancelFunc
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	clusterID uint64
 	// storePathPrefix is the path of the store in etcd:
 	//  - Key: /pd/{cluster_id}/raft/s/
 	//  - Value: meta store proto.
@@ -50,13 +51,15 @@ type Watcher struct {
 func NewWatcher(
 	ctx context.Context,
 	etcdClient *clientv3.Client,
+	clusterID uint64,
 	basicCluster *core.BasicCluster,
 ) (*Watcher, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	w := &Watcher{
 		ctx:             ctx,
 		cancel:          cancel,
-		storePathPrefix: keypath.StorePathPrefix(),
+		clusterID:       clusterID,
+		storePathPrefix: keypath.StorePathPrefix(clusterID),
 		etcdClient:      etcdClient,
 		basicCluster:    basicCluster,
 	}
@@ -92,7 +95,7 @@ func (w *Watcher) initializeStoreWatcher() error {
 	}
 	deleteFn := func(kv *mvccpb.KeyValue) error {
 		key := string(kv.Key)
-		storeID, err := keypath.ExtractStoreIDFromPath(key)
+		storeID, err := keypath.ExtractStoreIDFromPath(w.clusterID, key)
 		if err != nil {
 			return err
 		}

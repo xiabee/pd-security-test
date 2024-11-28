@@ -382,7 +382,7 @@ func (c *client) tryResourceManagerConnect(ctx context.Context, connection *reso
 	)
 	ticker := time.NewTicker(retryInterval)
 	defer ticker.Stop()
-	for range maxRetryTimes {
+	for i := 0; i < maxRetryTimes; i++ {
 		cc, err := c.resourceManagerClient()
 		if err != nil {
 			continue
@@ -406,7 +406,7 @@ func (c *client) tryResourceManagerConnect(ctx context.Context, connection *reso
 }
 
 func (tbc *tokenBatchController) revokePendingTokenRequest(err error) {
-	for range len(tbc.tokenRequestCh) {
+	for i := 0; i < len(tbc.tokenRequestCh); i++ {
 		req := <-tbc.tokenRequestCh
 		req.done <- err
 	}

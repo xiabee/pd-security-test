@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -251,10 +252,11 @@ func (suite *APIServerForward) ShutDown() {
 	re := suite.re
 
 	etcdClient := suite.pdLeader.GetEtcdClient()
-	endpoints, err := discovery.Discover(etcdClient, constant.TSOServiceName)
+	clusterID := strconv.FormatUint(suite.pdLeader.GetClusterID(), 10)
+	endpoints, err := discovery.Discover(etcdClient, clusterID, constant.TSOServiceName)
 	re.NoError(err)
 	if len(endpoints) != 0 {
-		endpoints, err = discovery.Discover(etcdClient, constant.TSOServiceName)
+		endpoints, err = discovery.Discover(etcdClient, clusterID, constant.TSOServiceName)
 		re.NoError(err)
 		re.Empty(endpoints)
 	}
@@ -326,11 +328,11 @@ func TestResignTSOPrimaryForward(t *testing.T) {
 	defer tc.Destroy()
 	tc.WaitForDefaultPrimaryServing(re)
 
-	for range 10 {
+	for j := 0; j < 10; j++ {
 		tc.ResignPrimary(constant.DefaultKeyspaceID, constant.DefaultKeyspaceGroupID)
 		tc.WaitForDefaultPrimaryServing(re)
 		var err error
-		for range 3 { // try 3 times
+		for i := 0; i < 3; i++ { // try 3 times
 			_, _, err = suite.pdClient.GetTS(suite.ctx)
 			if err == nil {
 				break
@@ -357,7 +359,7 @@ func TestResignAPIPrimaryForward(t *testing.T) {
 		re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/member/skipCampaignLeaderCheck"))
 	}()
 
-	for range 10 {
+	for j := 0; j < 10; j++ {
 		suite.pdLeader.ResignLeader()
 		suite.pdLeader = suite.cluster.GetServer(suite.cluster.WaitLeader())
 		suite.backendEndpoints = suite.pdLeader.GetAddr()
@@ -442,7 +444,7 @@ func (suite *APIServerForward) checkForwardTSOUnexpectedToFollower(checkTSO func
 func (suite *APIServerForward) addRegions() {
 	leader := suite.cluster.GetServer(suite.cluster.WaitLeader())
 	rc := leader.GetServer().GetRaftCluster()
-	for i := range 3 {
+	for i := 0; i < 3; i++ {
 		region := &metapb.Region{
 			Id:       uint64(i*4 + 1),
 			Peers:    []*metapb.Peer{{Id: uint64(i*4 + 2), StoreId: uint64(i*4 + 3)}},
@@ -522,10 +524,11 @@ func (suite *CommonTestSuite) TearDownSuite() {
 	re := suite.Require()
 	suite.tsoCluster.Destroy()
 	etcdClient := suite.pdLeader.GetEtcdClient()
-	endpoints, err := discovery.Discover(etcdClient, constant.TSOServiceName)
+	clusterID := strconv.FormatUint(suite.pdLeader.GetClusterID(), 10)
+	endpoints, err := discovery.Discover(etcdClient, clusterID, constant.TSOServiceName)
 	re.NoError(err)
 	if len(endpoints) != 0 {
-		endpoints, err = discovery.Discover(etcdClient, constant.TSOServiceName)
+		endpoints, err = discovery.Discover(etcdClient, clusterID, constant.TSOServiceName)
 		re.NoError(err)
 		re.Empty(endpoints)
 	}

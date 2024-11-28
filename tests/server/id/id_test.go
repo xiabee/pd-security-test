@@ -48,7 +48,7 @@ func TestID(t *testing.T) {
 
 	leaderServer := cluster.GetLeaderServer()
 	var last uint64
-	for range allocStep {
+	for i := uint64(0); i < allocStep; i++ {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last)
@@ -60,12 +60,12 @@ func TestID(t *testing.T) {
 	var m syncutil.Mutex
 	ids := make(map[uint64]struct{})
 
-	for range 10 {
+	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 
-			for range 200 {
+			for i := 0; i < 200; i++ {
 				id, err := leaderServer.GetAllocator().Alloc()
 				re.NoError(err)
 				m.Lock()
@@ -97,7 +97,7 @@ func TestCommand(t *testing.T) {
 
 	grpcPDClient := testutil.MustNewGrpcClient(re, leaderServer.GetAddr())
 	var last uint64
-	for range 2 * allocStep {
+	for i := uint64(0); i < 2*allocStep; i++ {
 		resp, err := grpcPDClient.AllocID(context.Background(), req)
 		re.NoError(err)
 		re.Equal(pdpb.ErrorType_OK, resp.GetHeader().GetError().GetType())
@@ -124,7 +124,7 @@ func TestMonotonicID(t *testing.T) {
 
 	leaderServer := cluster.GetLeaderServer()
 	var last1 uint64
-	for range 10 {
+	for i := uint64(0); i < 10; i++ {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last1)
@@ -135,7 +135,7 @@ func TestMonotonicID(t *testing.T) {
 	re.NotEmpty(cluster.WaitLeader())
 	leaderServer = cluster.GetLeaderServer()
 	var last2 uint64
-	for range 10 {
+	for i := uint64(0); i < 10; i++ {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last2)
@@ -149,7 +149,7 @@ func TestMonotonicID(t *testing.T) {
 	re.NoError(err)
 	re.Greater(id, last2)
 	var last3 uint64
-	for range 1000 {
+	for i := uint64(0); i < 1000; i++ {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last3)
@@ -171,7 +171,7 @@ func TestPDRestart(t *testing.T) {
 	leaderServer := cluster.GetLeaderServer()
 
 	var last uint64
-	for range 10 {
+	for i := uint64(0); i < 10; i++ {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last)
@@ -182,7 +182,7 @@ func TestPDRestart(t *testing.T) {
 	re.NoError(leaderServer.Run())
 	re.NotEmpty(cluster.WaitLeader())
 
-	for range 10 {
+	for i := uint64(0); i < 10; i++ {
 		id, err := leaderServer.GetAllocator().Alloc()
 		re.NoError(err)
 		re.Greater(id, last)

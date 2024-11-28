@@ -67,7 +67,7 @@ func TestGetCgroupCPU(t *testing.T) {
 	re := require.New(t)
 	exit := make(chan struct{})
 	var wg sync.WaitGroup
-	for range 10 {
+	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

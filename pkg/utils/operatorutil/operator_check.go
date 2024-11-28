@@ -51,7 +51,7 @@ func CheckMultiTargetTransferLeader(re *require.Assertions, op *operator.Operato
 }
 
 func trimTransferLeaders(op *operator.Operator) (steps []operator.OpStep, lastLeader uint64) {
-	for i := range op.Len() {
+	for i := 0; i < op.Len(); i++ {
 		step := op.Step(i)
 		if s, ok := step.(operator.TransferLeader); ok {
 			lastLeader = s.ToStore

@@ -205,7 +205,7 @@ func (suite *resourceManagerClientTestSuite) TestWatchResourceGroup() {
 	// Mock add resource groups
 	var meta *rmpb.ResourceGroup
 	groupsNum := 10
-	for i := range groupsNum {
+	for i := 0; i < groupsNum; i++ {
 		group.Name = groupNamePrefix + strconv.Itoa(i)
 		resp, err := cli.AddResourceGroup(suite.ctx, group)
 		re.NoError(err)
@@ -228,14 +228,14 @@ func (suite *resourceManagerClientTestSuite) TestWatchResourceGroup() {
 			},
 		}
 	}
-	for i := range groupsNum {
+	for i := 0; i < groupsNum; i++ {
 		group.Name = groupNamePrefix + strconv.Itoa(i)
 		modifySettings(group, 20000)
 		resp, err := cli.ModifyResourceGroup(suite.ctx, group)
 		re.NoError(err)
 		re.Contains(resp, "Success!")
 	}
-	for i := range groupsNum {
+	for i := 0; i < groupsNum; i++ {
 		testutil.Eventually(re, func() bool {
 			name := groupNamePrefix + strconv.Itoa(i)
 			meta = controller.GetActiveResourceGroup(name)
@@ -268,7 +268,7 @@ func (suite *resourceManagerClientTestSuite) TestWatchResourceGroup() {
 
 	// Mock delete resource groups
 	suite.cleanupResourceGroups(re)
-	for i := range groupsNum {
+	for i := 0; i < groupsNum; i++ {
 		testutil.Eventually(re, func() bool {
 			name := groupNamePrefix + strconv.Itoa(i)
 			meta = controller.GetActiveResourceGroup(name)
@@ -439,7 +439,7 @@ func (suite *resourceManagerClientTestSuite) TestResourceGroupController() {
 			}
 			v = true
 			sum := time.Duration(0)
-			for range cas.tcs[i].times {
+			for j := 0; j < cas.tcs[i].times; j++ {
 				rreq := cas.tcs[i].makeReadRequest()
 				wreq := cas.tcs[i].makeWriteRequest()
 				rres := cas.tcs[i].makeReadResponse()
@@ -539,7 +539,7 @@ func (suite *resourceManagerClientTestSuite) TestSwitchBurst() {
 	controller.Start(suite.ctx)
 	resourceGroupName := suite.initGroups[1].Name
 	tcs := tokenConsumptionPerSecond{rruTokensAtATime: 1, wruTokensAtATime: 2, times: 100, waitDuration: 0}
-	for range tcs.times {
+	for j := 0; j < tcs.times; j++ {
 		rreq := tcs.makeReadRequest()
 		wreq := tcs.makeWriteRequest()
 		rres := tcs.makeReadResponse()
@@ -577,7 +577,7 @@ func (suite *resourceManagerClientTestSuite) TestSwitchBurst() {
 			}
 			v = true
 			sum := time.Duration(0)
-			for range cas.tcs[i].times {
+			for j := 0; j < cas.tcs[i].times; j++ {
 				rreq := cas.tcs[i].makeReadRequest()
 				wreq := cas.tcs[i].makeWriteRequest()
 				rres := cas.tcs[i].makeReadResponse()
@@ -615,7 +615,7 @@ func (suite *resourceManagerClientTestSuite) TestSwitchBurst() {
 	time.Sleep(110 * time.Millisecond)
 	tcs = tokenConsumptionPerSecond{rruTokensAtATime: 1, wruTokensAtATime: 10, times: 1010, waitDuration: 0}
 	duration := time.Duration(0)
-	for range tcs.times {
+	for i := 0; i < tcs.times; i++ {
 		wreq = tcs.makeWriteRequest()
 		startTime := time.Now()
 		_, _, _, _, err = controller.OnRequestWait(suite.ctx, resourceGroupName3, wreq)
@@ -750,7 +750,7 @@ func (suite *resourceManagerClientTestSuite) TestAcquireTokenBucket() {
 	}
 	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/mcs/resourcemanager/server/fastPersist", `return(true)`))
 	suite.resignAndWaitLeader(re)
-	for range 3 {
+	for i := 0; i < 3; i++ {
 		for _, group := range groups {
 			requests := make([]*rmpb.RequestUnitItem, 0)
 			requests = append(requests, &rmpb.RequestUnitItem{
@@ -1179,7 +1179,7 @@ func (suite *resourceManagerClientTestSuite) TestResourceManagerClientFailover()
 	re.Equal(*group, *getResp)
 
 	// Change the leader after each time we modify the resource group.
-	for i := range 4 {
+	for i := 0; i < 4; i++ {
 		group.RUSettings.RU.Settings.FillRate += uint64(i)
 		modifyResp, err := cli.ModifyResourceGroup(suite.ctx, group)
 		re.NoError(err)
@@ -1237,10 +1237,10 @@ func (suite *resourceManagerClientTestSuite) TestResourceManagerClientDegradedMo
 	time.Sleep(time.Second * 2)
 	beginTime := time.Now()
 	// This is used to make sure resource group in lowRU.
-	for range 100 {
+	for i := 0; i < 100; i++ {
 		controller.OnRequestWait(suite.ctx, groupName, tc2.makeWriteRequest())
 	}
-	for range 100 {
+	for i := 0; i < 100; i++ {
 		controller.OnRequestWait(suite.ctx, groupName, tc.makeWriteRequest())
 	}
 	endTime := time.Now()
@@ -1326,7 +1326,7 @@ func (suite *resourceManagerClientTestSuite) TestRemoveStaleResourceGroup() {
 	// Mock client binds one resource group and then closed
 	rreq := testConfig.tcs.makeReadRequest()
 	rres := testConfig.tcs.makeReadResponse()
-	for range testConfig.times {
+	for j := 0; j < testConfig.times; j++ {
 		controller.OnRequestWait(suite.ctx, group.Name, rreq)
 		controller.OnResponse(group.Name, rreq, rres)
 		time.Sleep(100 * time.Microsecond)

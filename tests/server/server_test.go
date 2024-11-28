@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/tempurl"
 	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server/config"
@@ -88,23 +87,29 @@ func TestClusterID(t *testing.T) {
 	err = cluster.RunInitialServers()
 	re.NoError(err)
 
-	clusterID := keypath.ClusterID()
-	keypath.ResetClusterID()
+	clusterID := cluster.GetServer("pd1").GetClusterID()
+	for _, s := range cluster.GetServers() {
+		re.Equal(clusterID, s.GetClusterID())
+	}
 
 	// Restart all PDs.
-	re.NoError(cluster.StopAll())
-	re.NoError(cluster.RunInitialServers())
+	err = cluster.StopAll()
+	re.NoError(err)
+	err = cluster.RunInitialServers()
+	re.NoError(err)
 
-	// PD should have the same cluster ID as before.
-	re.Equal(clusterID, keypath.ClusterID())
-	keypath.ResetClusterID()
+	// All PDs should have the same cluster ID as before.
+	for _, s := range cluster.GetServers() {
+		re.Equal(clusterID, s.GetClusterID())
+	}
 
 	cluster2, err := tests.NewTestCluster(ctx, 3, func(conf *config.Config, _ string) { conf.InitialClusterToken = "foobar" })
 	defer cluster2.Destroy()
 	re.NoError(err)
 	err = cluster2.RunInitialServers()
 	re.NoError(err)
-	re.NotEqual(clusterID, keypath.ClusterID())
+	clusterID2 := cluster2.GetServer("pd1").GetClusterID()
+	re.NotEqual(clusterID, clusterID2)
 }
 
 func TestLeader(t *testing.T) {
@@ -146,7 +151,7 @@ func TestGRPCRateLimit(t *testing.T) {
 	addr := leaderServer.GetAddr()
 	grpcPDClient := testutil.MustNewGrpcClient(re, addr)
 	leaderServer.BootstrapCluster()
-	for range 100 {
+	for i := 0; i < 100; i++ {
 		resp, err := grpcPDClient.GetRegion(context.Background(), &pdpb.GetRegionRequest{
 			Header:    &pdpb.RequestHeader{ClusterId: clusterID},
 			RegionKey: []byte(""),
@@ -165,7 +170,7 @@ func TestGRPCRateLimit(t *testing.T) {
 	err = testutil.CheckPostJSON(tests.TestDialClient, urlPrefix, jsonBody,
 		testutil.StatusOK(re), testutil.StringContain(re, "gRPC limiter is updated"))
 	re.NoError(err)
-	for i := range 2 {
+	for i := 0; i < 2; i++ {
 		resp, err := grpcPDClient.GetRegion(context.Background(), &pdpb.GetRegionRequest{
 			Header:    &pdpb.RequestHeader{ClusterId: leaderServer.GetClusterID()},
 			RegionKey: []byte(""),
@@ -185,7 +190,7 @@ func TestGRPCRateLimit(t *testing.T) {
 	err = testutil.CheckPostJSON(tests.TestDialClient, urlPrefix, jsonBody,
 		testutil.StatusOK(re), testutil.StringContain(re, "gRPC limiter is deleted"))
 	re.NoError(err)
-	for range 100 {
+	for i := 0; i < 100; i++ {
 		resp, err := grpcPDClient.GetRegion(context.Background(), &pdpb.GetRegionRequest{
 			Header:    &pdpb.RequestHeader{ClusterId: leaderServer.GetClusterID()},
 			RegionKey: []byte(""),

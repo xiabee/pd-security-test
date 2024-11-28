@@ -97,6 +97,7 @@ type GlobalTSOAllocator struct {
 func NewGlobalTSOAllocator(
 	ctx context.Context,
 	am *AllocatorManager,
+	startGlobalLeaderLoop bool,
 ) Allocator {
 	ctx, cancel := context.WithCancel(ctx)
 	gta := &GlobalTSOAllocator{
@@ -106,6 +107,11 @@ func NewGlobalTSOAllocator(
 		member:                am.member,
 		timestampOracle:       newGlobalTimestampOracle(am),
 		tsoAllocatorRoleGauge: tsoAllocatorRole.WithLabelValues(am.getGroupIDStr(), GlobalDCLocation),
+	}
+
+	if startGlobalLeaderLoop {
+		gta.wg.Add(1)
+		go gta.primaryElectionLoop()
 	}
 
 	return gta
@@ -233,7 +239,7 @@ func (gta *GlobalTSOAllocator) GenerateTSO(ctx context.Context, count uint32) (p
 	// (whit synchronization with other Local TSO Allocators)
 	ctx, cancel := context.WithCancel(gta.ctx)
 	defer cancel()
-	for range maxRetryCount {
+	for i := 0; i < maxRetryCount; i++ {
 		var (
 			err                    error
 			shouldRetry, skipCheck bool
@@ -366,7 +372,7 @@ func (gta *GlobalTSOAllocator) SyncMaxTS(
 ) error {
 	defer trace.StartRegion(ctx, "GlobalTSOAllocator.SyncMaxTS").End()
 	originalMaxTSO := *maxTSO
-	for i := range syncMaxRetryCount {
+	for i := 0; i < syncMaxRetryCount; i++ {
 		// Collect all allocator leaders' client URLs
 		allocatorLeaders := make(map[string]*pdpb.Member)
 		for dcLocation := range dcLocationMap {
@@ -531,8 +537,6 @@ func (gta *GlobalTSOAllocator) Reset() {
 	gta.timestampOracle.ResetTimestamp()
 }
 
-// primaryElectionLoop is used to maintain the TSO primary election and TSO's
-// running allocator. It is only used in API mode.
 func (gta *GlobalTSOAllocator) primaryElectionLoop() {
 	defer logutil.LogPanic()
 	defer gta.wg.Done()

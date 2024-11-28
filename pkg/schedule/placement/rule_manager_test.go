@@ -480,7 +480,7 @@ func TestCacheManager(t *testing.T) {
 		re.Nil(cache.bestFit)
 	}
 	// Store bestFit when the total number of hits is sufficient.
-	for range minHitCountToCacheHit {
+	for i := 0; i < minHitCountToCacheHit; i++ {
 		manager.FitRegion(stores, region)
 	}
 	cache := manager.cache.regionCaches[1]

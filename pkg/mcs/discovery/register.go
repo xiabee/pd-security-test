@@ -21,7 +21,6 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
-	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
@@ -41,9 +40,9 @@ type ServiceRegister struct {
 }
 
 // NewServiceRegister creates a new ServiceRegister.
-func NewServiceRegister(ctx context.Context, cli *clientv3.Client, serviceName, serviceAddr, serializedValue string, ttl int64) *ServiceRegister {
+func NewServiceRegister(ctx context.Context, cli *clientv3.Client, clusterID, serviceName, serviceAddr, serializedValue string, ttl int64) *ServiceRegister {
 	cctx, cancel := context.WithCancel(ctx)
-	serviceKey := keypath.RegistryPath(serviceName, serviceAddr)
+	serviceKey := RegistryPath(clusterID, serviceName, serviceAddr)
 	return &ServiceRegister{
 		ctx:    cctx,
 		cancel: cancel,

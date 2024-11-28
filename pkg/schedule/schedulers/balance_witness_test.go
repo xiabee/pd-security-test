@@ -114,7 +114,7 @@ func (suite *balanceWitnessSchedulerTestSuite) TestTransferWitnessOut() {
 		1: 2,
 		2: 1,
 	}
-	for range 20 {
+	for i := 0; i < 20; i++ {
 		if len(suite.schedule()) == 0 {
 			continue
 		}

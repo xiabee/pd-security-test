@@ -30,7 +30,6 @@ import (
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/mcs/registry"
 	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/versioninfo"
 	"go.uber.org/zap"
@@ -146,7 +145,7 @@ func (s *Service) RegionHeartbeat(stream schedulingpb.Scheduling_RegionHeartbeat
 
 		c := s.GetCluster()
 		if c == nil {
-			resp := &schedulingpb.RegionHeartbeatResponse{Header: notBootstrappedHeader()}
+			resp := &schedulingpb.RegionHeartbeatResponse{Header: s.notBootstrappedHeader()}
 			err := server.Send(resp)
 			return errors.WithStack(err)
 		}
@@ -178,7 +177,7 @@ func (s *Service) StoreHeartbeat(_ context.Context, request *schedulingpb.StoreH
 	if c == nil {
 		// TODO: add metrics
 		log.Info("cluster isn't initialized")
-		return &schedulingpb.StoreHeartbeatResponse{Header: notBootstrappedHeader()}, nil
+		return &schedulingpb.StoreHeartbeatResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 
 	if c.GetStore(request.GetStats().GetStoreId()) == nil {
@@ -189,18 +188,18 @@ func (s *Service) StoreHeartbeat(_ context.Context, request *schedulingpb.StoreH
 	if err := c.HandleStoreHeartbeat(request); err != nil {
 		log.Error("handle store heartbeat failed", zap.Error(err))
 	}
-	return &schedulingpb.StoreHeartbeatResponse{Header: wrapHeader()}, nil
+	return &schedulingpb.StoreHeartbeatResponse{Header: &schedulingpb.ResponseHeader{ClusterId: s.clusterID}}, nil
 }
 
 // SplitRegions split regions by the given split keys
 func (s *Service) SplitRegions(ctx context.Context, request *schedulingpb.SplitRegionsRequest) (*schedulingpb.SplitRegionsResponse, error) {
 	c := s.GetCluster()
 	if c == nil {
-		return &schedulingpb.SplitRegionsResponse{Header: notBootstrappedHeader()}, nil
+		return &schedulingpb.SplitRegionsResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 	finishedPercentage, newRegionIDs := c.GetRegionSplitter().SplitRegions(ctx, request.GetSplitKeys(), int(request.GetRetryLimit()))
 	return &schedulingpb.SplitRegionsResponse{
-		Header:             wrapHeader(),
+		Header:             s.header(),
 		RegionsId:          newRegionIDs,
 		FinishedPercentage: uint64(finishedPercentage),
 	}, nil
@@ -210,12 +209,12 @@ func (s *Service) SplitRegions(ctx context.Context, request *schedulingpb.SplitR
 func (s *Service) ScatterRegions(_ context.Context, request *schedulingpb.ScatterRegionsRequest) (*schedulingpb.ScatterRegionsResponse, error) {
 	c := s.GetCluster()
 	if c == nil {
-		return &schedulingpb.ScatterRegionsResponse{Header: notBootstrappedHeader()}, nil
+		return &schedulingpb.ScatterRegionsResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 
 	opsCount, failures, err := c.GetRegionScatterer().ScatterRegionsByID(request.GetRegionsId(), request.GetGroup(), int(request.GetRetryLimit()), request.GetSkipStoreLimit())
 	if err != nil {
-		header := errorHeader(&schedulingpb.Error{
+		header := s.errorHeader(&schedulingpb.Error{
 			Type:    schedulingpb.ErrorType_UNKNOWN,
 			Message: err.Error(),
 		})
@@ -233,7 +232,7 @@ func (s *Service) ScatterRegions(_ context.Context, request *schedulingpb.Scatte
 		}()))
 	}
 	return &schedulingpb.ScatterRegionsResponse{
-		Header:             wrapHeader(),
+		Header:             s.header(),
 		FinishedPercentage: uint64(percentage),
 	}, nil
 }
@@ -242,14 +241,14 @@ func (s *Service) ScatterRegions(_ context.Context, request *schedulingpb.Scatte
 func (s *Service) GetOperator(_ context.Context, request *schedulingpb.GetOperatorRequest) (*schedulingpb.GetOperatorResponse, error) {
 	c := s.GetCluster()
 	if c == nil {
-		return &schedulingpb.GetOperatorResponse{Header: notBootstrappedHeader()}, nil
+		return &schedulingpb.GetOperatorResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 
 	opController := c.GetCoordinator().GetOperatorController()
 	requestID := request.GetRegionId()
 	r := opController.GetOperatorStatus(requestID)
 	if r == nil {
-		header := errorHeader(&schedulingpb.Error{
+		header := s.errorHeader(&schedulingpb.Error{
 			Type:    schedulingpb.ErrorType_UNKNOWN,
 			Message: "region not found",
 		})
@@ -257,7 +256,7 @@ func (s *Service) GetOperator(_ context.Context, request *schedulingpb.GetOperat
 	}
 
 	return &schedulingpb.GetOperatorResponse{
-		Header:   wrapHeader(),
+		Header:   s.header(),
 		RegionId: requestID,
 		Desc:     []byte(r.Desc()),
 		Kind:     []byte(r.Kind().String()),
@@ -269,12 +268,12 @@ func (s *Service) GetOperator(_ context.Context, request *schedulingpb.GetOperat
 func (s *Service) AskBatchSplit(_ context.Context, request *schedulingpb.AskBatchSplitRequest) (*schedulingpb.AskBatchSplitResponse, error) {
 	c := s.GetCluster()
 	if c == nil {
-		return &schedulingpb.AskBatchSplitResponse{Header: notBootstrappedHeader()}, nil
+		return &schedulingpb.AskBatchSplitResponse{Header: s.notBootstrappedHeader()}, nil
 	}
 
 	if request.GetRegion() == nil {
 		return &schedulingpb.AskBatchSplitResponse{
-			Header: wrapErrorToHeader(schedulingpb.ErrorType_UNKNOWN,
+			Header: s.wrapErrorToHeader(schedulingpb.ErrorType_UNKNOWN,
 				"missing region for split"),
 		}, nil
 	}
@@ -328,7 +327,7 @@ func (s *Service) AskBatchSplit(_ context.Context, request *schedulingpb.AskBatc
 	c.GetCoordinator().GetCheckerController().AddPendingProcessedRegions(false, recordRegions...)
 
 	return &schedulingpb.AskBatchSplitResponse{
-		Header: wrapHeader(),
+		Header: s.header(),
 		Ids:    splitIDs,
 	}, nil
 }
@@ -344,28 +343,28 @@ func (s *Service) RegisterRESTHandler(userDefineHandlers map[string]http.Handler
 	return apiutil.RegisterUserDefinedHandlers(userDefineHandlers, &group, handler)
 }
 
-func errorHeader(err *schedulingpb.Error) *schedulingpb.ResponseHeader {
+func (s *Service) errorHeader(err *schedulingpb.Error) *schedulingpb.ResponseHeader {
 	return &schedulingpb.ResponseHeader{
-		ClusterId: keypath.ClusterID(),
+		ClusterId: s.clusterID,
 		Error:     err,
 	}
 }
 
-func notBootstrappedHeader() *schedulingpb.ResponseHeader {
-	return errorHeader(&schedulingpb.Error{
+func (s *Service) notBootstrappedHeader() *schedulingpb.ResponseHeader {
+	return s.errorHeader(&schedulingpb.Error{
 		Type:    schedulingpb.ErrorType_NOT_BOOTSTRAPPED,
 		Message: "cluster is not initialized",
 	})
 }
 
-func wrapHeader() *schedulingpb.ResponseHeader {
-	if keypath.ClusterID() == 0 {
-		return wrapErrorToHeader(schedulingpb.ErrorType_NOT_BOOTSTRAPPED, "cluster id is not ready")
+func (s *Service) header() *schedulingpb.ResponseHeader {
+	if s.clusterID == 0 {
+		return s.wrapErrorToHeader(schedulingpb.ErrorType_NOT_BOOTSTRAPPED, "cluster id is not ready")
 	}
-	return &schedulingpb.ResponseHeader{ClusterId: keypath.ClusterID()}
+	return &schedulingpb.ResponseHeader{ClusterId: s.clusterID}
 }
 
-func wrapErrorToHeader(
+func (s *Service) wrapErrorToHeader(
 	errorType schedulingpb.ErrorType, message string) *schedulingpb.ResponseHeader {
-	return errorHeader(&schedulingpb.Error{Type: errorType, Message: message})
+	return s.errorHeader(&schedulingpb.Error{Type: errorType, Message: message})
 }

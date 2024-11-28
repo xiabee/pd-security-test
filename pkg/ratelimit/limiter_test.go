@@ -49,7 +49,7 @@ func TestWithConcurrencyLimiter(t *testing.T) {
 	successCount, failedCount := 0, 0
 	var wg sync.WaitGroup
 	r := &releaseUtil{}
-	for range 15 {
+	for i := 0; i < 15; i++ {
 		wg.Add(1)
 		go func() {
 			countSingleLimiterHandleResult(limiter, &successCount, &failedCount, &lock, &wg, r)
@@ -58,7 +58,7 @@ func TestWithConcurrencyLimiter(t *testing.T) {
 	wg.Wait()
 	re.Equal(5, failedCount)
 	re.Equal(10, successCount)
-	for range 10 {
+	for i := 0; i < 10; i++ {
 		r.release()
 	}
 
@@ -73,14 +73,14 @@ func TestWithConcurrencyLimiter(t *testing.T) {
 	re.NotZero(status & LimiterUpdated)
 	failedCount = 0
 	successCount = 0
-	for range 15 {
+	for i := 0; i < 15; i++ {
 		wg.Add(1)
 		go countSingleLimiterHandleResult(limiter, &successCount, &failedCount, &lock, &wg, r)
 	}
 	wg.Wait()
 	re.Equal(10, failedCount)
 	re.Equal(5, successCount)
-	for range 5 {
+	for i := 0; i < 5; i++ {
 		r.release()
 	}
 
@@ -88,7 +88,7 @@ func TestWithConcurrencyLimiter(t *testing.T) {
 	re.NotZero(status & LimiterDeleted)
 	failedCount = 0
 	successCount = 0
-	for range 15 {
+	for i := 0; i < 15; i++ {
 		wg.Add(1)
 		go countSingleLimiterHandleResult(limiter, &successCount, &failedCount, &lock, &wg, r)
 	}
@@ -112,7 +112,7 @@ func TestWithQPSLimiter(t *testing.T) {
 	var wg sync.WaitGroup
 	r := &releaseUtil{}
 	wg.Add(3)
-	for range 3 {
+	for i := 0; i < 3; i++ {
 		go countSingleLimiterHandleResult(limiter, &successCount, &failedCount, &lock, &wg, r)
 	}
 	wg.Wait()
@@ -133,7 +133,7 @@ func TestWithQPSLimiter(t *testing.T) {
 	re.Equal(5, burst)
 	time.Sleep(time.Second)
 
-	for i := range 10 {
+	for i := 0; i < 10; i++ {
 		if i < 5 {
 			_, err := limiter.allow()
 			re.NoError(err)
@@ -146,7 +146,7 @@ func TestWithQPSLimiter(t *testing.T) {
 
 	status = limiter.updateQPSConfig(0, 0)
 	re.NotZero(status & LimiterDeleted)
-	for range 10 {
+	for i := 0; i < 10; i++ {
 		_, err := limiter.allow()
 		re.NoError(err)
 	}
@@ -159,7 +159,7 @@ func TestWithQPSLimiter(t *testing.T) {
 	status = limiter.updateQPSConfig(float64(rate.Every(3*time.Second)), 100)
 	re.NotZero(status & LimiterUpdated)
 	wg.Add(200)
-	for range 200 {
+	for i := 0; i < 200; i++ {
 		go countSingleLimiterHandleResult(limiter, &successCount, &failedCount, &lock, &wg, r)
 	}
 	wg.Wait()
@@ -191,7 +191,7 @@ func TestWithTwoLimiters(t *testing.T) {
 	var wg sync.WaitGroup
 	r := &releaseUtil{}
 	wg.Add(200)
-	for range 200 {
+	for i := 0; i < 200; i++ {
 		go countSingleLimiterHandleResult(limiter, &successCount, &failedCount, &lock, &wg, r)
 	}
 	wg.Wait()
@@ -200,20 +200,20 @@ func TestWithTwoLimiters(t *testing.T) {
 	time.Sleep(time.Second)
 
 	wg.Add(100)
-	for range 100 {
+	for i := 0; i < 100; i++ {
 		go countSingleLimiterHandleResult(limiter, &successCount, &failedCount, &lock, &wg, r)
 	}
 	wg.Wait()
 	re.Equal(200, failedCount)
 	re.Equal(100, successCount)
 
-	for range 100 {
+	for i := 0; i < 100; i++ {
 		r.release()
 	}
 	status = limiter.updateQPSConfig(float64(rate.Every(10*time.Second)), 1)
 	re.NotZero(status & LimiterUpdated)
 	wg.Add(100)
-	for range 100 {
+	for i := 0; i < 100; i++ {
 		go countSingleLimiterHandleResult(limiter, &successCount, &failedCount, &lock, &wg, r)
 	}
 	wg.Wait()

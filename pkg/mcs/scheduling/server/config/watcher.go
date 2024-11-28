@@ -78,6 +78,7 @@ type persistedConfig struct {
 func NewWatcher(
 	ctx context.Context,
 	etcdClient *clientv3.Client,
+	clusterID uint64,
 	persistConfig *PersistConfig,
 	storage storage.Storage,
 ) (*Watcher, error) {
@@ -85,9 +86,9 @@ func NewWatcher(
 	cw := &Watcher{
 		ctx:                       ctx,
 		cancel:                    cancel,
-		configPath:                keypath.ConfigPath(),
+		configPath:                keypath.ConfigPath(clusterID),
 		ttlConfigPrefix:           sc.TTLConfigPrefix,
-		schedulerConfigPathPrefix: keypath.SchedulerConfigPathPrefix(),
+		schedulerConfigPathPrefix: keypath.SchedulerConfigPathPrefix(clusterID),
 		etcdClient:                etcdClient,
 		PersistConfig:             persistConfig,
 		storage:                   storage,

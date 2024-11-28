@@ -29,7 +29,6 @@ import (
 	"github.com/tikv/pd/pkg/ratelimit"
 	"github.com/tikv/pd/pkg/storage"
 	"github.com/tikv/pd/pkg/utils/grpcutil"
-	"github.com/tikv/pd/pkg/utils/keypath"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -68,7 +67,7 @@ func (s *RegionSyncer) syncRegion(ctx context.Context, conn *grpc.ClientConn) (C
 		return nil, err
 	}
 	err = syncStream.Send(&pdpb.SyncRegionRequest{
-		Header:     &pdpb.RequestHeader{ClusterId: keypath.ClusterID()},
+		Header:     &pdpb.RequestHeader{ClusterId: s.server.ClusterID()},
 		Member:     s.server.GetMemberInfo(),
 		StartIndex: s.history.getNextIndex(),
 	})
@@ -105,10 +104,9 @@ func (s *RegionSyncer) StartSyncWithLeader(addr string) {
 		log.Info("region syncer start load region")
 		start := time.Now()
 		err := storage.TryLoadRegionsOnce(ctx, regionStorage, bc.CheckAndPutRegion)
+		log.Info("region syncer finished load regions", zap.Duration("time-cost", time.Since(start)))
 		if err != nil {
-			log.Warn("region syncer failed to load regions", errs.ZapError(err), zap.Duration("time-cost", time.Since(start)))
-		} else {
-			log.Info("region syncer finished load regions", zap.Duration("time-cost", time.Since(start)))
+			log.Warn("failed to load regions", errs.ZapError(err))
 		}
 		// establish client.
 		conn := grpcutil.CreateClientConn(ctx, addr, s.tlsConfig,

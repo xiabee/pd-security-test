@@ -66,7 +66,7 @@ func (s *transferWitnessLeaderScheduler) Schedule(cluster sche.SchedulerCluster,
 func (s *transferWitnessLeaderScheduler) scheduleTransferWitnessLeaderBatch(name string, cluster sche.SchedulerCluster, batchSize int) []*operator.Operator {
 	var ops []*operator.Operator
 batchLoop:
-	for range batchSize {
+	for i := 0; i < batchSize; i++ {
 		select {
 		case region := <-s.regions:
 			op, err := scheduleTransferWitnessLeader(s.R, name, cluster, region)

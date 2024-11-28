@@ -222,7 +222,7 @@ func convertToBucketTreeItem(buckets *metapb.Buckets) *BucketTreeItem {
 	if interval == 0 {
 		interval = 10 * 1000
 	}
-	for i := range len(buckets.Keys) - 1 {
+	for i := 0; i < len(buckets.Keys)-1; i++ {
 		loads := []uint64{
 			buckets.Stats.ReadBytes[i] * 1000 / interval,
 			buckets.Stats.ReadKeys[i] * 1000 / interval,
