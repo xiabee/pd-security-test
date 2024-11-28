@@ -135,7 +135,7 @@ func (suite *dashboardTestSuite) testDashboard(internalProxy bool) {
 
 	cluster.WaitLeader()
 	servers := cluster.GetServers()
-	leader := cluster.GetServer(cluster.GetLeader())
+	leader := cluster.GetLeaderServer()
 	leaderAddr := leader.GetAddr()
 
 	// auto select node

@@ -35,14 +35,18 @@ import (
 
 func createTestGroupCostController(re *require.Assertions) *groupCostController {
 	group := &rmpb.ResourceGroup{
-		Name: "test",
-		Mode: rmpb.GroupMode_RUMode,
+		Name:     "test",
+		Mode:     rmpb.GroupMode_RUMode,
+		Priority: 1,
 		RUSettings: &rmpb.GroupRequestUnitSettings{
 			RU: &rmpb.TokenBucket{
 				Settings: &rmpb.TokenLimitSettings{
 					FillRate: 1000,
 				},
 			},
+		},
+		BackgroundSettings: &rmpb.BackgroundSettings{
+			JobTypes: []string{"lightning", "br"},
 		},
 	}
 	ch1 := make(chan notifyMsg)
@@ -102,8 +106,9 @@ func TestRequestAndResponseConsumption(t *testing.T) {
 	kvCalculator := gc.getKVCalculator()
 	for idx, testCase := range testCases {
 		caseNum := fmt.Sprintf("case %d", idx)
-		consumption, _, err := gc.onRequestWait(context.TODO(), testCase.req)
+		consumption, _, _, priority, err := gc.onRequestWait(context.TODO(), testCase.req)
 		re.NoError(err, caseNum)
+		re.Equal(priority, gc.meta.Priority)
 		expectedConsumption := &rmpb.Consumption{}
 		if testCase.req.IsWrite() {
 			kvCalculator.calculateWriteCost(expectedConsumption, testCase.req)
@@ -127,7 +132,7 @@ func TestResourceGroupThrottledError(t *testing.T) {
 		writeBytes: 10000000,
 	}
 	// The group is throttled
-	_, _, err := gc.onRequestWait(context.TODO(), req)
+	_, _, _, _, err := gc.onRequestWait(context.TODO(), req)
 	re.Error(err)
 	re.True(errs.ErrClientResourceGroupThrottled.Equal(err))
 }

@@ -32,6 +32,7 @@ import (
 	"github.com/tikv/pd/pkg/cache"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/core/storelimit"
+	sc "github.com/tikv/pd/pkg/schedule/config"
 	"github.com/tikv/pd/pkg/slice"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
@@ -50,6 +51,8 @@ type PersistOptions struct {
 	pdServerConfig  atomic.Value
 	replicationMode atomic.Value
 	labelProperty   atomic.Value
+	keyspace        atomic.Value
+	storeConfig     atomic.Value
 	clusterVersion  unsafe.Pointer
 }
 
@@ -61,28 +64,32 @@ func NewPersistOptions(cfg *Config) *PersistOptions {
 	o.pdServerConfig.Store(&cfg.PDServerCfg)
 	o.replicationMode.Store(&cfg.ReplicationMode)
 	o.labelProperty.Store(cfg.LabelProperty)
+	o.keyspace.Store(&cfg.Keyspace)
+	// storeConfig will be fetched from TiKV later,
+	// set it to an empty config here first.
+	o.storeConfig.Store(&sc.StoreConfig{})
 	o.SetClusterVersion(&cfg.ClusterVersion)
 	o.ttl = nil
 	return o
 }
 
 // GetScheduleConfig returns scheduling configurations.
-func (o *PersistOptions) GetScheduleConfig() *ScheduleConfig {
-	return o.schedule.Load().(*ScheduleConfig)
+func (o *PersistOptions) GetScheduleConfig() *sc.ScheduleConfig {
+	return o.schedule.Load().(*sc.ScheduleConfig)
 }
 
 // SetScheduleConfig sets the PD scheduling configuration.
-func (o *PersistOptions) SetScheduleConfig(cfg *ScheduleConfig) {
+func (o *PersistOptions) SetScheduleConfig(cfg *sc.ScheduleConfig) {
 	o.schedule.Store(cfg)
 }
 
 // GetReplicationConfig returns replication configurations.
-func (o *PersistOptions) GetReplicationConfig() *ReplicationConfig {
-	return o.replication.Load().(*ReplicationConfig)
+func (o *PersistOptions) GetReplicationConfig() *sc.ReplicationConfig {
+	return o.replication.Load().(*sc.ReplicationConfig)
 }
 
 // SetReplicationConfig sets the PD replication configuration.
-func (o *PersistOptions) SetReplicationConfig(cfg *ReplicationConfig) {
+func (o *PersistOptions) SetReplicationConfig(cfg *sc.ReplicationConfig) {
 	o.replication.Store(cfg)
 }
 
@@ -114,6 +121,26 @@ func (o *PersistOptions) GetLabelPropertyConfig() LabelPropertyConfig {
 // SetLabelPropertyConfig sets the label property configuration.
 func (o *PersistOptions) SetLabelPropertyConfig(cfg LabelPropertyConfig) {
 	o.labelProperty.Store(cfg)
+}
+
+// GetKeyspaceConfig returns the keyspace config.
+func (o *PersistOptions) GetKeyspaceConfig() *KeyspaceConfig {
+	return o.keyspace.Load().(*KeyspaceConfig)
+}
+
+// SetKeyspaceConfig sets the keyspace configuration.
+func (o *PersistOptions) SetKeyspaceConfig(cfg *KeyspaceConfig) {
+	o.keyspace.Store(cfg)
+}
+
+// GetStoreConfig returns the store config.
+func (o *PersistOptions) GetStoreConfig() *sc.StoreConfig {
+	return o.storeConfig.Load().(*sc.StoreConfig)
+}
+
+// SetStoreConfig sets the store configuration.
+func (o *PersistOptions) SetStoreConfig(cfg *sc.StoreConfig) {
+	o.storeConfig.Store(cfg)
 }
 
 // GetClusterVersion returns the cluster version.
@@ -172,13 +199,6 @@ func (o *PersistOptions) SetPlacementRulesCacheEnabled(enabled bool) {
 	o.SetReplicationConfig(v)
 }
 
-// SetWitnessEnabled set EanbleWitness
-func (o *PersistOptions) SetWitnessEnabled(enabled bool) {
-	v := o.GetScheduleConfig().Clone()
-	v.EnableWitness = enabled
-	o.SetScheduleConfig(v)
-}
-
 // GetStrictlyMatchLabel returns whether check label strict.
 func (o *PersistOptions) GetStrictlyMatchLabel() bool {
 	return o.GetReplicationConfig().StrictlyMatchLabel
@@ -194,15 +214,6 @@ func (o *PersistOptions) SetMaxReplicas(replicas int) {
 	v := o.GetReplicationConfig().Clone()
 	v.MaxReplicas = uint64(replicas)
 	o.SetReplicationConfig(v)
-}
-
-// UseRaftV2 set some config for raft store v2 by default temporary.
-// todo: remove this after raft store support this.
-// disable merge check
-func (o *PersistOptions) UseRaftV2() {
-	v := o.GetScheduleConfig().Clone()
-	v.MaxMergeRegionSize = 0
-	o.SetScheduleConfig(v)
 }
 
 const (
@@ -343,25 +354,25 @@ func (o *PersistOptions) SetMaxMergeRegionKeys(maxMergeRegionKeys uint64) {
 // SetStoreLimit sets a store limit for a given type and rate.
 func (o *PersistOptions) SetStoreLimit(storeID uint64, typ storelimit.Type, ratePerMin float64) {
 	v := o.GetScheduleConfig().Clone()
-	var sc StoreLimitConfig
+	var slc sc.StoreLimitConfig
 	var rate float64
 	switch typ {
 	case storelimit.AddPeer:
 		if _, ok := v.StoreLimit[storeID]; !ok {
-			rate = DefaultStoreLimit.GetDefaultStoreLimit(storelimit.RemovePeer)
+			rate = sc.DefaultStoreLimit.GetDefaultStoreLimit(storelimit.RemovePeer)
 		} else {
 			rate = v.StoreLimit[storeID].RemovePeer
 		}
-		sc = StoreLimitConfig{AddPeer: ratePerMin, RemovePeer: rate}
+		slc = sc.StoreLimitConfig{AddPeer: ratePerMin, RemovePeer: rate}
 	case storelimit.RemovePeer:
 		if _, ok := v.StoreLimit[storeID]; !ok {
-			rate = DefaultStoreLimit.GetDefaultStoreLimit(storelimit.AddPeer)
+			rate = sc.DefaultStoreLimit.GetDefaultStoreLimit(storelimit.AddPeer)
 		} else {
 			rate = v.StoreLimit[storeID].AddPeer
 		}
-		sc = StoreLimitConfig{AddPeer: rate, RemovePeer: ratePerMin}
+		slc = sc.StoreLimitConfig{AddPeer: rate, RemovePeer: ratePerMin}
 	}
-	v.StoreLimit[storeID] = sc
+	v.StoreLimit[storeID] = slc
 	o.SetScheduleConfig(v)
 }
 
@@ -370,15 +381,15 @@ func (o *PersistOptions) SetAllStoresLimit(typ storelimit.Type, ratePerMin float
 	v := o.GetScheduleConfig().Clone()
 	switch typ {
 	case storelimit.AddPeer:
-		DefaultStoreLimit.SetDefaultStoreLimit(storelimit.AddPeer, ratePerMin)
+		sc.DefaultStoreLimit.SetDefaultStoreLimit(storelimit.AddPeer, ratePerMin)
 		for storeID := range v.StoreLimit {
-			sc := StoreLimitConfig{AddPeer: ratePerMin, RemovePeer: v.StoreLimit[storeID].RemovePeer}
+			sc := sc.StoreLimitConfig{AddPeer: ratePerMin, RemovePeer: v.StoreLimit[storeID].RemovePeer}
 			v.StoreLimit[storeID] = sc
 		}
 	case storelimit.RemovePeer:
-		DefaultStoreLimit.SetDefaultStoreLimit(storelimit.RemovePeer, ratePerMin)
+		sc.DefaultStoreLimit.SetDefaultStoreLimit(storelimit.RemovePeer, ratePerMin)
 		for storeID := range v.StoreLimit {
-			sc := StoreLimitConfig{AddPeer: v.StoreLimit[storeID].AddPeer, RemovePeer: ratePerMin}
+			sc := sc.StoreLimitConfig{AddPeer: v.StoreLimit[storeID].AddPeer, RemovePeer: ratePerMin}
 			v.StoreLimit[storeID] = sc
 		}
 	}
@@ -442,7 +453,7 @@ func (o *PersistOptions) GetHotRegionScheduleLimit() uint64 {
 }
 
 // GetStoreLimit returns the limit of a store.
-func (o *PersistOptions) GetStoreLimit(storeID uint64) (returnSC StoreLimitConfig) {
+func (o *PersistOptions) GetStoreLimit(storeID uint64) (returnSC sc.StoreLimitConfig) {
 	defer func() {
 		returnSC.RemovePeer = o.getTTLFloatOr(fmt.Sprintf("remove-peer-%v", storeID), returnSC.RemovePeer)
 		returnSC.AddPeer = o.getTTLFloatOr(fmt.Sprintf("add-peer-%v", storeID), returnSC.AddPeer)
@@ -451,9 +462,9 @@ func (o *PersistOptions) GetStoreLimit(storeID uint64) (returnSC StoreLimitConfi
 		return limit
 	}
 	cfg := o.GetScheduleConfig().Clone()
-	sc := StoreLimitConfig{
-		AddPeer:    DefaultStoreLimit.GetDefaultStoreLimit(storelimit.AddPeer),
-		RemovePeer: DefaultStoreLimit.GetDefaultStoreLimit(storelimit.RemovePeer),
+	sc := sc.StoreLimitConfig{
+		AddPeer:    sc.DefaultStoreLimit.GetDefaultStoreLimit(storelimit.AddPeer),
+		RemovePeer: sc.DefaultStoreLimit.GetDefaultStoreLimit(storelimit.RemovePeer),
 	}
 	v, ok1, err := o.getTTLFloat("default-add-peer")
 	if err != nil {
@@ -505,13 +516,8 @@ func (o *PersistOptions) GetStoreLimitByType(storeID uint64, typ storelimit.Type
 }
 
 // GetAllStoresLimit returns the limit of all stores.
-func (o *PersistOptions) GetAllStoresLimit() map[uint64]StoreLimitConfig {
+func (o *PersistOptions) GetAllStoresLimit() map[uint64]sc.StoreLimitConfig {
 	return o.GetScheduleConfig().StoreLimit
-}
-
-// GetStoreLimitMode returns the limit mode of store.
-func (o *PersistOptions) GetStoreLimitMode() string {
-	return o.GetScheduleConfig().StoreLimitMode
 }
 
 // GetStoreLimitVersion returns the limit version of store.
@@ -614,23 +620,19 @@ func (o *PersistOptions) IsRemoveExtraReplicaEnabled() bool {
 	return o.GetScheduleConfig().EnableRemoveExtraReplica
 }
 
-// IsTikvRegionSplitEnabled returns whether tikv split region is disabled.
-func (o *PersistOptions) IsTikvRegionSplitEnabled() bool {
-	return o.getTTLBoolOr(enableTiKVSplitRegion, o.GetScheduleConfig().EnableTiKVSplitRegion)
-}
-
 // IsLocationReplacementEnabled returns if location replace is enabled.
 func (o *PersistOptions) IsLocationReplacementEnabled() bool {
 	return o.getTTLBoolOr(enableLocationReplacement, o.GetScheduleConfig().EnableLocationReplacement)
 }
 
+// IsTikvRegionSplitEnabled returns whether tikv split region is disabled.
+func (o *PersistOptions) IsTikvRegionSplitEnabled() bool {
+	return o.getTTLBoolOr(enableTiKVSplitRegion, o.GetScheduleConfig().EnableTiKVSplitRegion)
+}
+
 // GetMaxMovableHotPeerSize returns the max movable hot peer size.
 func (o *PersistOptions) GetMaxMovableHotPeerSize() int64 {
-	size := o.GetScheduleConfig().MaxMovableHotPeerSize
-	if size <= 0 {
-		size = defaultMaxMovableHotPeerSize
-	}
-	return size
+	return o.GetScheduleConfig().MaxMovableHotPeerSize
 }
 
 // IsDebugMetricsEnabled returns if debug metrics is enabled.
@@ -638,7 +640,7 @@ func (o *PersistOptions) IsDebugMetricsEnabled() bool {
 	return o.GetScheduleConfig().EnableDebugMetrics
 }
 
-// IsUseJointConsensus returns if using joint consensus as a operator step is enabled.
+// IsUseJointConsensus returns if using joint consensus as an operator step is enabled.
 func (o *PersistOptions) IsUseJointConsensus() bool {
 	return o.GetScheduleConfig().EnableJointConsensus
 }
@@ -662,13 +664,24 @@ func (o *PersistOptions) GetHotRegionCacheHitsThreshold() int {
 }
 
 // GetStoresLimit gets the stores' limit.
-func (o *PersistOptions) GetStoresLimit() map[uint64]StoreLimitConfig {
+func (o *PersistOptions) GetStoresLimit() map[uint64]sc.StoreLimitConfig {
 	return o.GetScheduleConfig().StoreLimit
 }
 
 // GetSchedulers gets the scheduler configurations.
-func (o *PersistOptions) GetSchedulers() SchedulerConfigs {
+func (o *PersistOptions) GetSchedulers() sc.SchedulerConfigs {
 	return o.GetScheduleConfig().Schedulers
+}
+
+// IsSchedulerDisabled returns if the scheduler is disabled.
+func (o *PersistOptions) IsSchedulerDisabled(t string) bool {
+	schedulers := o.GetScheduleConfig().Schedulers
+	for _, s := range schedulers {
+		if t == s.Type {
+			return s.Disable
+		}
+	}
+	return false
 }
 
 // GetHotRegionsWriteInterval gets interval for PD to store Hot Region information.
@@ -688,19 +701,36 @@ func (o *PersistOptions) AddSchedulerCfg(tp string, args []string) {
 		// comparing args is to cover the case that there are schedulers in same type but not with same name
 		// such as two schedulers of type "evict-leader",
 		// one name is "evict-leader-scheduler-1" and the other is "evict-leader-scheduler-2"
-		if reflect.DeepEqual(schedulerCfg, SchedulerConfig{Type: tp, Args: args, Disable: false}) {
+		if reflect.DeepEqual(schedulerCfg, sc.SchedulerConfig{Type: tp, Args: args, Disable: false}) {
 			return
 		}
 
-		if reflect.DeepEqual(schedulerCfg, SchedulerConfig{Type: tp, Args: args, Disable: true}) {
+		if reflect.DeepEqual(schedulerCfg, sc.SchedulerConfig{Type: tp, Args: args, Disable: true}) {
 			schedulerCfg.Disable = false
 			v.Schedulers[i] = schedulerCfg
 			o.SetScheduleConfig(v)
 			return
 		}
 	}
-	v.Schedulers = append(v.Schedulers, SchedulerConfig{Type: tp, Args: args, Disable: false})
+	v.Schedulers = append(v.Schedulers, sc.SchedulerConfig{Type: tp, Args: args, Disable: false})
 	o.SetScheduleConfig(v)
+}
+
+// RemoveSchedulerCfg removes the scheduler configurations.
+func (o *PersistOptions) RemoveSchedulerCfg(tp string) {
+	v := o.GetScheduleConfig().Clone()
+	for i, schedulerCfg := range v.Schedulers {
+		if tp == schedulerCfg.Type {
+			if sc.IsDefaultScheduler(tp) {
+				schedulerCfg.Disable = true
+				v.Schedulers[i] = schedulerCfg
+			} else {
+				v.Schedulers = append(v.Schedulers[:i], v.Schedulers[i+1:]...)
+			}
+			o.SetScheduleConfig(v)
+			return
+		}
+	}
 }
 
 // SetLabelProperty sets the label property.
@@ -732,15 +762,32 @@ func (o *PersistOptions) DeleteLabelProperty(typ, labelKey, labelValue string) {
 	o.labelProperty.Store(cfg)
 }
 
+// persistedConfig is used to merge all configs into one before saving to storage.
+type persistedConfig struct {
+	*Config
+	// StoreConfig is injected into Config to avoid breaking the original API.
+	StoreConfig sc.StoreConfig `json:"store"`
+}
+
+// SwitchRaftV2 update some config if tikv raft engine switch into partition raft v2
+func (o *PersistOptions) SwitchRaftV2(storage endpoint.ConfigStorage) error {
+	o.GetScheduleConfig().StoreLimitVersion = "v2"
+	return o.Persist(storage)
+}
+
 // Persist saves the configuration to the storage.
 func (o *PersistOptions) Persist(storage endpoint.ConfigStorage) error {
-	cfg := &Config{
-		Schedule:        *o.GetScheduleConfig(),
-		Replication:     *o.GetReplicationConfig(),
-		PDServerCfg:     *o.GetPDServerConfig(),
-		ReplicationMode: *o.GetReplicationModeConfig(),
-		LabelProperty:   o.GetLabelPropertyConfig(),
-		ClusterVersion:  *o.GetClusterVersion(),
+	cfg := &persistedConfig{
+		Config: &Config{
+			Schedule:        *o.GetScheduleConfig(),
+			Replication:     *o.GetReplicationConfig(),
+			PDServerCfg:     *o.GetPDServerConfig(),
+			ReplicationMode: *o.GetReplicationModeConfig(),
+			LabelProperty:   o.GetLabelPropertyConfig(),
+			Keyspace:        *o.GetKeyspaceConfig(),
+			ClusterVersion:  *o.GetClusterVersion(),
+		},
+		StoreConfig: *o.GetStoreConfig(),
 	}
 	err := storage.SaveConfig(cfg)
 	failpoint.Inject("persistFail", func() {
@@ -751,8 +798,8 @@ func (o *PersistOptions) Persist(storage endpoint.ConfigStorage) error {
 
 // Reload reloads the configuration from the storage.
 func (o *PersistOptions) Reload(storage endpoint.ConfigStorage) error {
-	cfg := &Config{}
-	// pass nil to initialize cfg to default values (all items undefined)
+	cfg := &persistedConfig{Config: &Config{}}
+	// Pass nil to initialize cfg to default values (all items undefined)
 	cfg.Adjust(nil, true)
 
 	isExist, err := storage.LoadConfig(cfg)
@@ -760,6 +807,8 @@ func (o *PersistOptions) Reload(storage endpoint.ConfigStorage) error {
 		return err
 	}
 	o.adjustScheduleCfg(&cfg.Schedule)
+	// Some fields may not be stored in the storage, we need to calculate them manually.
+	cfg.StoreConfig.Adjust()
 	cfg.PDServerCfg.MigrateDeprecatedFlags()
 	if isExist {
 		o.schedule.Store(&cfg.Schedule)
@@ -767,14 +816,16 @@ func (o *PersistOptions) Reload(storage endpoint.ConfigStorage) error {
 		o.pdServerConfig.Store(&cfg.PDServerCfg)
 		o.replicationMode.Store(&cfg.ReplicationMode)
 		o.labelProperty.Store(cfg.LabelProperty)
+		o.keyspace.Store(&cfg.Keyspace)
+		o.storeConfig.Store(&cfg.StoreConfig)
 		o.SetClusterVersion(&cfg.ClusterVersion)
 	}
 	return nil
 }
 
-func (o *PersistOptions) adjustScheduleCfg(scheduleCfg *ScheduleConfig) {
+func (o *PersistOptions) adjustScheduleCfg(scheduleCfg *sc.ScheduleConfig) {
 	// In case we add new default schedulers.
-	for _, ps := range DefaultSchedulers {
+	for _, ps := range sc.DefaultSchedulers {
 		if slice.NoneOf(scheduleCfg.Schedulers, func(i int) bool {
 			return scheduleCfg.Schedulers[i].Type == ps.Type
 		}) {
@@ -918,4 +969,85 @@ func (o *PersistOptions) SetAllStoresLimitTTL(ctx context.Context, client *clien
 		err = o.SetTTLData(ctx, client, "default-remove-peer", fmt.Sprint(ratePerMin), ttl)
 	}
 	return err
+}
+
+var haltSchedulingStatus = schedulingAllowanceStatusGauge.WithLabelValues("halt-scheduling")
+
+// SetSchedulingAllowanceStatus sets the scheduling allowance status to help distinguish the source of the halt.
+func (*PersistOptions) SetSchedulingAllowanceStatus(halt bool, source string) {
+	if halt {
+		haltSchedulingStatus.Set(1)
+		schedulingAllowanceStatusGauge.WithLabelValues(source).Set(1)
+	} else {
+		haltSchedulingStatus.Set(0)
+		schedulingAllowanceStatusGauge.WithLabelValues(source).Set(0)
+	}
+}
+
+// SetHaltScheduling set HaltScheduling.
+func (o *PersistOptions) SetHaltScheduling(halt bool, source string) {
+	v := o.GetScheduleConfig().Clone()
+	v.HaltScheduling = halt
+	o.SetScheduleConfig(v)
+	o.SetSchedulingAllowanceStatus(halt, source)
+}
+
+// IsSchedulingHalted returns if PD scheduling is halted.
+func (o *PersistOptions) IsSchedulingHalted() bool {
+	if o == nil {
+		return false
+	}
+	return o.GetScheduleConfig().HaltScheduling
+}
+
+// GetRegionMaxSize returns the max region size in MB
+func (o *PersistOptions) GetRegionMaxSize() uint64 {
+	return o.GetStoreConfig().GetRegionMaxSize()
+}
+
+// GetRegionMaxKeys returns the max region keys
+func (o *PersistOptions) GetRegionMaxKeys() uint64 {
+	return o.GetStoreConfig().GetRegionMaxKeys()
+}
+
+// GetRegionSplitSize returns the region split size in MB
+func (o *PersistOptions) GetRegionSplitSize() uint64 {
+	return o.GetStoreConfig().GetRegionSplitSize()
+}
+
+// GetRegionSplitKeys returns the region split keys
+func (o *PersistOptions) GetRegionSplitKeys() uint64 {
+	return o.GetStoreConfig().GetRegionSplitKeys()
+}
+
+// CheckRegionSize return error if the smallest region's size is less than mergeSize
+func (o *PersistOptions) CheckRegionSize(size, mergeSize uint64) error {
+	return o.GetStoreConfig().CheckRegionSize(size, mergeSize)
+}
+
+// CheckRegionKeys return error if the smallest region's keys is less than mergeKeys
+func (o *PersistOptions) CheckRegionKeys(keys, mergeKeys uint64) error {
+	return o.GetStoreConfig().CheckRegionKeys(keys, mergeKeys)
+}
+
+// IsEnableRegionBucket return true if the region bucket is enabled.
+func (o *PersistOptions) IsEnableRegionBucket() bool {
+	return o.GetStoreConfig().IsEnableRegionBucket()
+}
+
+// IsRaftKV2 returns true if the raft kv is v2.
+func (o *PersistOptions) IsRaftKV2() bool {
+	return o.GetStoreConfig().IsRaftKV2()
+}
+
+// SetRegionBucketEnabled sets if the region bucket is enabled.
+func (o *PersistOptions) SetRegionBucketEnabled(enabled bool) {
+	cfg := o.GetStoreConfig().Clone()
+	cfg.SetRegionBucketEnabled(enabled)
+	o.SetStoreConfig(cfg)
+}
+
+// GetRegionBucketSize returns the region bucket size.
+func (o *PersistOptions) GetRegionBucketSize() uint64 {
+	return o.GetStoreConfig().GetRegionBucketSize()
 }

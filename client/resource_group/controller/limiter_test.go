@@ -123,11 +123,19 @@ func TestReconfig(t *testing.T) {
 	args := tokenBucketReconfigureArgs{
 		NewTokens: 6.,
 		NewRate:   2,
-		NewBurst:  -1,
 	}
 	lim.Reconfigure(t1, args)
 	checkTokens(re, lim, t1, 5)
 	checkTokens(re, lim, t2, 7)
+
+	args = tokenBucketReconfigureArgs{
+		NewTokens: 6.,
+		NewRate:   2,
+		NewBurst:  -1,
+	}
+	lim.Reconfigure(t1, args)
+	checkTokens(re, lim, t1, 6)
+	checkTokens(re, lim, t2, 6)
 	re.Equal(int64(-1), lim.GetBurst())
 }
 
@@ -170,6 +178,7 @@ func TestCancel(t *testing.T) {
 	d, err := WaitReservations(ctx, t2, []*Reservation{r1, r2})
 	re.Error(err)
 	re.Equal(4*time.Second, d)
+	re.Contains(err.Error(), "estimated wait time 4s, ltb state is 1.00:-4.00")
 	checkTokens(re, lim1, t3, 13)
 	checkTokens(re, lim2, t3, 3)
 	cancel1()

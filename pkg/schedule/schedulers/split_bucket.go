@@ -23,12 +23,12 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/schedule"
+	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
 	"github.com/tikv/pd/pkg/statistics/buckets"
 	"github.com/tikv/pd/pkg/storage/endpoint"
+	"github.com/tikv/pd/pkg/utils/reflectutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
 	"github.com/unrolled/render"
 )
@@ -80,11 +80,11 @@ func (conf *splitBucketSchedulerConfig) Clone() *splitBucketSchedulerConfig {
 }
 
 func (conf *splitBucketSchedulerConfig) persistLocked() error {
-	data, err := schedule.EncodeConfig(conf)
+	data, err := EncodeConfig(conf)
 	if err != nil {
 		return err
 	}
-	return conf.storage.SaveScheduleConfig(SplitBucketName, data)
+	return conf.storage.SaveSchedulerConfig(SplitBucketName, data)
 }
 
 type splitBucketScheduler struct {
@@ -122,10 +122,22 @@ func (h *splitBucketHandler) UpdateConfig(w http.ResponseWriter, r *http.Request
 	newc, _ := json.Marshal(h.conf)
 	if !bytes.Equal(oldc, newc) {
 		h.conf.persistLocked()
-		rd.Text(w, http.StatusOK, "success")
+		rd.Text(w, http.StatusOK, "Config is updated.")
+		return
 	}
 
-	rd.Text(w, http.StatusBadRequest, "config item not found")
+	m := make(map[string]interface{})
+	if err := json.Unmarshal(data, &m); err != nil {
+		rd.JSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ok := reflectutil.FindSameFieldByJSON(h.conf, m)
+	if ok {
+		rd.Text(w, http.StatusOK, "Config is the same with origin, so do nothing.")
+		return
+	}
+
+	rd.Text(w, http.StatusBadRequest, "Config item is not found.")
 }
 
 func newSplitBucketHandler(conf *splitBucketSchedulerConfig) http.Handler {
@@ -139,7 +151,7 @@ func newSplitBucketHandler(conf *splitBucketSchedulerConfig) http.Handler {
 	return router
 }
 
-func newSplitBucketScheduler(opController *schedule.OperatorController, conf *splitBucketSchedulerConfig) *splitBucketScheduler {
+func newSplitBucketScheduler(opController *operator.Controller, conf *splitBucketSchedulerConfig) *splitBucketScheduler {
 	base := NewBaseScheduler(opController)
 	handler := newSplitBucketHandler(conf)
 	ret := &splitBucketScheduler{
@@ -160,13 +172,26 @@ func (s *splitBucketScheduler) GetType() string {
 	return SplitBucketType
 }
 
+func (s *splitBucketScheduler) ReloadConfig() error {
+	s.conf.mu.Lock()
+	defer s.conf.mu.Unlock()
+	cfgData, err := s.conf.storage.LoadSchedulerConfig(s.GetName())
+	if err != nil {
+		return err
+	}
+	if len(cfgData) == 0 {
+		return nil
+	}
+	return DecodeConfig([]byte(cfgData), s.conf)
+}
+
 // ServerHTTP implement Http server.
 func (s *splitBucketScheduler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
 
 // IsScheduleAllowed return true if the sum of executing opSplit operator is less  .
-func (s *splitBucketScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
+func (s *splitBucketScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
 	if !cluster.GetStoreConfig().IsEnableRegionBucket() {
 		splitBucketDisableCounter.Inc()
 		return false
@@ -181,20 +206,20 @@ func (s *splitBucketScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool 
 
 type splitBucketPlan struct {
 	hotBuckets         map[uint64][]*buckets.BucketStat
-	cluster            schedule.Cluster
+	cluster            sche.SchedulerCluster
 	conf               *splitBucketSchedulerConfig
 	hotRegionSplitSize int64
 }
 
 // Schedule return operators if some bucket is too hot.
-func (s *splitBucketScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (s *splitBucketScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	splitBucketScheduleCounter.Inc()
 	conf := s.conf.Clone()
 	plan := &splitBucketPlan{
 		conf:               conf,
 		cluster:            cluster,
 		hotBuckets:         cluster.BucketsStats(conf.Degree),
-		hotRegionSplitSize: cluster.GetOpts().GetMaxMovableHotPeerSize(),
+		hotRegionSplitSize: cluster.GetSchedulerConfig().GetMaxMovableHotPeerSize(),
 	}
 	return s.splitBucket(plan), nil
 }
@@ -237,6 +262,9 @@ func (s *splitBucketScheduler) splitBucket(plan *splitBucketPlan) []*operator.Op
 	}
 	if splitBucket != nil {
 		region := plan.cluster.GetRegion(splitBucket.RegionID)
+		if region == nil {
+			return nil
+		}
 		splitKey := make([][]byte, 0)
 		if bytes.Compare(region.GetStartKey(), splitBucket.StartKey) < 0 {
 			splitKey = append(splitKey, splitBucket.StartKey)
@@ -244,15 +272,13 @@ func (s *splitBucketScheduler) splitBucket(plan *splitBucketPlan) []*operator.Op
 		if bytes.Compare(region.GetEndKey(), splitBucket.EndKey) > 0 {
 			splitKey = append(splitKey, splitBucket.EndKey)
 		}
-		op, err := operator.CreateSplitRegionOperator(SplitBucketType, plan.cluster.GetRegion(splitBucket.RegionID), operator.OpSplit,
+		op, err := operator.CreateSplitRegionOperator(SplitBucketType, region, operator.OpSplit,
 			pdpb.CheckPolicy_USEKEY, splitKey)
 		if err != nil {
 			splitBucketCreateOpeartorFailCounter.Inc()
 			return nil
 		}
 		splitBucketNewOperatorCounter.Inc()
-		op.AdditionalInfos["region-start-key"] = core.HexRegionKeyStr(region.GetStartKey())
-		op.AdditionalInfos["region-end-key"] = core.HexRegionKeyStr(region.GetEndKey())
 		op.AdditionalInfos["hot-degree"] = strconv.FormatInt(int64(splitBucket.HotDegree), 10)
 		return []*operator.Operator{op}
 	}

@@ -22,8 +22,8 @@ import (
 	"github.com/tikv/pd/pkg/cache"
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/schedule"
 	"github.com/tikv/pd/pkg/schedule/config"
+	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/labeler"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/placement"
@@ -33,13 +33,13 @@ import (
 // DefaultCacheSize is the default length of waiting list.
 const DefaultCacheSize = 1000
 
-var denyCheckersByLabelerCounter = schedule.LabelerEventCounter.WithLabelValues("checkers", "deny")
+var denyCheckersByLabelerCounter = labeler.LabelerEventCounter.WithLabelValues("checkers", "deny")
 
 // Controller is used to manage all checkers.
 type Controller struct {
-	cluster           schedule.Cluster
-	conf              config.Config
-	opController      *schedule.OperatorController
+	cluster           sche.CheckerCluster
+	conf              config.CheckerConfigProvider
+	opController      *operator.Controller
 	learnerChecker    *LearnerChecker
 	replicaChecker    *ReplicaChecker
 	ruleChecker       *RuleChecker
@@ -53,7 +53,7 @@ type Controller struct {
 }
 
 // NewController create a new Controller.
-func NewController(ctx context.Context, cluster schedule.Cluster, conf config.Config, ruleManager *placement.RuleManager, labeler *labeler.RegionLabeler, opController *schedule.OperatorController) *Controller {
+func NewController(ctx context.Context, cluster sche.CheckerCluster, conf config.CheckerConfigProvider, ruleManager *placement.RuleManager, labeler *labeler.RegionLabeler, opController *operator.Controller) *Controller {
 	regionWaitingList := cache.NewDefaultCache(DefaultCacheSize)
 	return &Controller{
 		cluster:           cluster,
@@ -87,7 +87,7 @@ func (c *Controller) CheckRegion(region *core.RegionInfo) []*operator.Operator {
 	}
 
 	if c.conf.IsPlacementRulesEnabled() {
-		skipRuleCheck := c.cluster.GetOpts().IsPlacementRulesCacheEnabled() &&
+		skipRuleCheck := c.cluster.GetCheckerConfig().IsPlacementRulesCacheEnabled() &&
 			c.cluster.GetRuleManager().IsRegionFitCached(c.cluster, region)
 		if skipRuleCheck {
 			// If the fit is fetched from cache, it seems that the region doesn't need check
@@ -121,7 +121,7 @@ func (c *Controller) CheckRegion(region *core.RegionInfo) []*operator.Operator {
 		}
 	}
 	// skip the joint checker, split checker and rule checker when region label is set to "schedule=deny".
-	// those checkers is help to make region health, it's necessary to skip them when region is set to deny.
+	// those checkers are help to make region health, it's necessary to skip them when region is set to deny.
 	if cl, ok := c.cluster.(interface{ GetRegionLabeler() *labeler.RegionLabeler }); ok {
 		l := cl.GetRegionLabeler()
 		if l.ScheduleDisabled(region) {

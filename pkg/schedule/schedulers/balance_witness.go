@@ -28,7 +28,7 @@ import (
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/core/constant"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/schedule"
+	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/schedule/filter"
 	"github.com/tikv/pd/pkg/schedule/operator"
 	"github.com/tikv/pd/pkg/schedule/plan"
@@ -76,7 +76,8 @@ func (conf *balanceWitnessSchedulerConfig) Update(data []byte) (int, interface{}
 			return http.StatusBadRequest, "invalid batch size which should be an integer between 1 and 10"
 		}
 		conf.persistLocked()
-		return http.StatusOK, "success"
+		log.Info("balance-witness-scheduler config is updated", zap.ByteString("old", oldc), zap.ByteString("new", newc))
+		return http.StatusOK, "Config is updated."
 	}
 	m := make(map[string]interface{})
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -84,9 +85,9 @@ func (conf *balanceWitnessSchedulerConfig) Update(data []byte) (int, interface{}
 	}
 	ok := reflectutil.FindSameFieldByJSON(conf, m)
 	if ok {
-		return http.StatusOK, "no changed"
+		return http.StatusOK, "Config is the same with origin, so do nothing."
 	}
-	return http.StatusBadRequest, "config item not found"
+	return http.StatusBadRequest, "Config item is not found."
 }
 
 func (conf *balanceWitnessSchedulerConfig) validate() bool {
@@ -105,11 +106,11 @@ func (conf *balanceWitnessSchedulerConfig) Clone() *balanceWitnessSchedulerConfi
 }
 
 func (conf *balanceWitnessSchedulerConfig) persistLocked() error {
-	data, err := schedule.EncodeConfig(conf)
+	data, err := EncodeConfig(conf)
 	if err != nil {
 		return err
 	}
-	return conf.storage.SaveScheduleConfig(BalanceWitnessName, data)
+	return conf.storage.SaveSchedulerConfig(BalanceWitnessName, data)
 }
 
 type balanceWitnessHandler struct {
@@ -117,7 +118,7 @@ type balanceWitnessHandler struct {
 	config *balanceWitnessSchedulerConfig
 }
 
-func newbalanceWitnessHandler(conf *balanceWitnessSchedulerConfig) http.Handler {
+func newBalanceWitnessHandler(conf *balanceWitnessSchedulerConfig) http.Handler {
 	handler := &balanceWitnessHandler{
 		config: conf,
 		rd:     render.New(render.Options{IndentJSON: true}),
@@ -146,7 +147,6 @@ type balanceWitnessScheduler struct {
 	name          string
 	conf          *balanceWitnessSchedulerConfig
 	handler       http.Handler
-	opController  *schedule.OperatorController
 	filters       []filter.Filter
 	counter       *prometheus.CounterVec
 	filterCounter *filter.Counter
@@ -154,15 +154,14 @@ type balanceWitnessScheduler struct {
 
 // newBalanceWitnessScheduler creates a scheduler that tends to keep witnesses on
 // each store balanced.
-func newBalanceWitnessScheduler(opController *schedule.OperatorController, conf *balanceWitnessSchedulerConfig, options ...BalanceWitnessCreateOption) schedule.Scheduler {
+func newBalanceWitnessScheduler(opController *operator.Controller, conf *balanceWitnessSchedulerConfig, options ...BalanceWitnessCreateOption) Scheduler {
 	base := NewBaseScheduler(opController)
 	s := &balanceWitnessScheduler{
 		BaseScheduler: base,
 		retryQuota:    newRetryQuota(),
 		name:          BalanceWitnessName,
 		conf:          conf,
-		handler:       newbalanceWitnessHandler(conf),
-		opController:  opController,
+		handler:       newBalanceWitnessHandler(conf),
 		counter:       balanceWitnessCounter,
 		filterCounter: filter.NewCounter(filter.BalanceWitness.String()),
 	}
@@ -208,21 +207,40 @@ func (b *balanceWitnessScheduler) GetType() string {
 func (b *balanceWitnessScheduler) EncodeConfig() ([]byte, error) {
 	b.conf.mu.RLock()
 	defer b.conf.mu.RUnlock()
-	return schedule.EncodeConfig(b.conf)
+	return EncodeConfig(b.conf)
 }
 
-func (b *balanceWitnessScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
-	allowed := b.opController.OperatorCount(operator.OpWitness) < cluster.GetOpts().GetWitnessScheduleLimit()
+func (b *balanceWitnessScheduler) ReloadConfig() error {
+	b.conf.mu.Lock()
+	defer b.conf.mu.Unlock()
+	cfgData, err := b.conf.storage.LoadSchedulerConfig(b.GetName())
+	if err != nil {
+		return err
+	}
+	if len(cfgData) == 0 {
+		return nil
+	}
+	newCfg := &balanceWitnessSchedulerConfig{}
+	if err = DecodeConfig([]byte(cfgData), newCfg); err != nil {
+		return err
+	}
+	b.conf.Ranges = newCfg.Ranges
+	b.conf.Batch = newCfg.Batch
+	return nil
+}
+
+func (b *balanceWitnessScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
+	allowed := b.OpController.OperatorCount(operator.OpWitness) < cluster.GetSchedulerConfig().GetWitnessScheduleLimit()
 	if !allowed {
 		operator.OperatorLimitCounter.WithLabelValues(b.GetType(), operator.OpWitness.String()).Inc()
 	}
 	return allowed
 }
 
-func (b *balanceWitnessScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
+func (b *balanceWitnessScheduler) Schedule(cluster sche.SchedulerCluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	b.conf.mu.RLock()
 	defer b.conf.mu.RUnlock()
-	basePlan := NewBalanceSchedulerPlan()
+	basePlan := plan.NewBalanceSchedulerPlan()
 	var collector *plan.Collector
 	if dryRun {
 		collector = plan.NewCollector(basePlan)
@@ -230,7 +248,7 @@ func (b *balanceWitnessScheduler) Schedule(cluster schedule.Cluster, dryRun bool
 	batch := b.conf.Batch
 	schedulerCounter.WithLabelValues(b.GetName(), "schedule").Inc()
 
-	opInfluence := b.opController.GetOpInfluence(cluster)
+	opInfluence := b.OpController.GetOpInfluence(cluster.GetBasicCluster())
 	kind := constant.NewScheduleKind(constant.WitnessKind, constant.ByCount)
 	solver := newSolver(basePlan, kind, cluster, opInfluence)
 
@@ -238,7 +256,7 @@ func (b *balanceWitnessScheduler) Schedule(cluster schedule.Cluster, dryRun bool
 	scoreFunc := func(store *core.StoreInfo) float64 {
 		return store.WitnessScore(solver.GetOpInfluence(store.GetID()))
 	}
-	sourceCandidate := newCandidateStores(filter.SelectSourceStores(stores, b.filters, cluster.GetOpts(), collector, b.filterCounter), false, scoreFunc)
+	sourceCandidate := newCandidateStores(filter.SelectSourceStores(stores, b.filters, cluster.GetSchedulerConfig(), collector, b.filterCounter), false, scoreFunc)
 	usedRegions := make(map[uint64]struct{})
 
 	result := make([]*operator.Operator, 0, batch)
@@ -259,10 +277,10 @@ func (b *balanceWitnessScheduler) Schedule(cluster schedule.Cluster, dryRun bool
 func createTransferWitnessOperator(cs *candidateStores, b *balanceWitnessScheduler,
 	ssolver *solver, usedRegions map[uint64]struct{}, collector *plan.Collector) *operator.Operator {
 	store := cs.getStore()
-	ssolver.step++
-	defer func() { ssolver.step-- }()
+	ssolver.Step++
+	defer func() { ssolver.Step-- }()
 	retryLimit := b.retryQuota.GetLimit(store)
-	ssolver.source, ssolver.target = store, nil
+	ssolver.Source, ssolver.Target = store, nil
 	var op *operator.Operator
 	for i := 0; i < retryLimit; i++ {
 		schedulerCounter.WithLabelValues(b.GetName(), "total").Inc()
@@ -287,33 +305,33 @@ func createTransferWitnessOperator(cs *candidateStores, b *balanceWitnessSchedul
 // It randomly selects a health region from the source store, then picks
 // the best follower peer and transfers the witness.
 func (b *balanceWitnessScheduler) transferWitnessOut(solver *solver, collector *plan.Collector) *operator.Operator {
-	solver.region = filter.SelectOneRegion(solver.RandWitnessRegions(solver.SourceStoreID(), b.conf.Ranges),
+	solver.Region = filter.SelectOneRegion(solver.RandWitnessRegions(solver.SourceStoreID(), b.conf.Ranges),
 		collector, filter.NewRegionPendingFilter(), filter.NewRegionDownFilter())
-	if solver.region == nil {
+	if solver.Region == nil {
 		log.Debug("store has no witness", zap.String("scheduler", b.GetName()), zap.Uint64("store-id", solver.SourceStoreID()))
 		schedulerCounter.WithLabelValues(b.GetName(), "no-witness-region").Inc()
 		return nil
 	}
-	solver.step++
-	defer func() { solver.step-- }()
-	targets := solver.GetNonWitnessVoterStores(solver.region)
+	solver.Step++
+	defer func() { solver.Step-- }()
+	targets := solver.GetNonWitnessVoterStores(solver.Region)
 	finalFilters := b.filters
-	opts := solver.GetOpts()
-	if witnessFilter := filter.NewPlacementWitnessSafeguard(b.GetName(), opts, solver.GetBasicCluster(), solver.GetRuleManager(), solver.region, solver.source, solver.fit); witnessFilter != nil {
+	conf := solver.GetSchedulerConfig()
+	if witnessFilter := filter.NewPlacementWitnessSafeguard(b.GetName(), conf, solver.GetBasicCluster(), solver.GetRuleManager(), solver.Region, solver.Source, solver.fit); witnessFilter != nil {
 		finalFilters = append(b.filters, witnessFilter)
 	}
-	targets = filter.SelectTargetStores(targets, finalFilters, opts, collector, b.filterCounter)
+	targets = filter.SelectTargetStores(targets, finalFilters, conf, collector, b.filterCounter)
 	sort.Slice(targets, func(i, j int) bool {
 		iOp := solver.GetOpInfluence(targets[i].GetID())
 		jOp := solver.GetOpInfluence(targets[j].GetID())
 		return targets[i].WitnessScore(iOp) < targets[j].WitnessScore(jOp)
 	})
-	for _, solver.target = range targets {
+	for _, solver.Target = range targets {
 		if op := b.createOperator(solver, collector); op != nil {
 			return op
 		}
 	}
-	log.Debug("region has no target store", zap.String("scheduler", b.GetName()), zap.Uint64("region-id", solver.region.GetID()))
+	log.Debug("region has no target store", zap.String("scheduler", b.GetName()), zap.Uint64("region-id", solver.Region.GetID()))
 	schedulerCounter.WithLabelValues(b.GetName(), "no-target-store").Inc()
 	return nil
 }
@@ -323,8 +341,8 @@ func (b *balanceWitnessScheduler) transferWitnessOut(solver *solver, collector *
 // no new operator need to be created, otherwise create an operator that transfers
 // the witness from the source store to the target store for the region.
 func (b *balanceWitnessScheduler) createOperator(solver *solver, collector *plan.Collector) *operator.Operator {
-	solver.step++
-	defer func() { solver.step-- }()
+	solver.Step++
+	defer func() { solver.Step-- }()
 	solver.sourceScore, solver.targetScore = solver.sourceStoreScore(b.GetName()), solver.targetStoreScore(b.GetName())
 	if !solver.shouldBalance(b.GetName()) {
 		schedulerCounter.WithLabelValues(b.GetName(), "skip").Inc()
@@ -333,9 +351,9 @@ func (b *balanceWitnessScheduler) createOperator(solver *solver, collector *plan
 		}
 		return nil
 	}
-	solver.step++
-	defer func() { solver.step-- }()
-	op, err := operator.CreateMoveWitnessOperator(BalanceWitnessType, solver, solver.region, solver.SourceStoreID(), solver.TargetStoreID())
+	solver.Step++
+	defer func() { solver.Step-- }()
+	op, err := operator.CreateMoveWitnessOperator(BalanceWitnessType, solver, solver.Region, solver.SourceStoreID(), solver.TargetStoreID())
 	if err != nil {
 		log.Debug("fail to create balance witness operator", errs.ZapError(err))
 		return nil

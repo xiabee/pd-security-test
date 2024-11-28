@@ -45,7 +45,7 @@ func (suite *keyspaceGroupTestSuite) SetupTest() {
 	suite.NoError(err)
 	suite.NoError(cluster.RunInitialServers())
 	suite.NotEmpty(cluster.WaitLeader())
-	suite.server = cluster.GetServer(cluster.GetLeader())
+	suite.server = cluster.GetLeaderServer()
 	suite.NoError(suite.server.BootstrapCluster())
 }
 
@@ -126,7 +126,7 @@ func (suite *keyspaceGroupTestSuite) TestLoadKeyspaceGroup() {
 	}}
 
 	MustCreateKeyspaceGroup(re, suite.server, kgs)
-	resp := sendLoadKeyspaceGroupRequest(re, suite.server, "0", "0")
+	resp := MustLoadKeyspaceGroups(re, suite.server, "0", "0")
 	re.Len(resp, 3)
 }
 
@@ -137,17 +137,18 @@ func (suite *keyspaceGroupTestSuite) TestSplitKeyspaceGroup() {
 			ID:        uint32(1),
 			UserKind:  endpoint.Standard.String(),
 			Keyspaces: []uint32{111, 222, 333},
+			Members:   make([]endpoint.KeyspaceGroupMember, utils.DefaultKeyspaceGroupReplicaCount),
 		},
 	}}
 
 	MustCreateKeyspaceGroup(re, suite.server, kgs)
-	resp := sendLoadKeyspaceGroupRequest(re, suite.server, "0", "0")
+	resp := MustLoadKeyspaceGroups(re, suite.server, "0", "0")
 	re.Len(resp, 2)
 	MustSplitKeyspaceGroup(re, suite.server, 1, &handlers.SplitKeyspaceGroupByIDParams{
 		NewID:     uint32(2),
 		Keyspaces: []uint32{111, 222},
 	})
-	resp = sendLoadKeyspaceGroupRequest(re, suite.server, "0", "0")
+	resp = MustLoadKeyspaceGroups(re, suite.server, "0", "0")
 	re.Len(resp, 3)
 	// Check keyspace group 1.
 	kg1 := MustLoadKeyspaceGroupByID(re, suite.server, 1)

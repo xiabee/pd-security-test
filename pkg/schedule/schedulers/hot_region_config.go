@@ -24,9 +24,9 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/schedule"
+	sche "github.com/tikv/pd/pkg/schedule/core"
 	"github.com/tikv/pd/pkg/slice"
-	"github.com/tikv/pd/pkg/statistics"
+	"github.com/tikv/pd/pkg/statistics/utils"
 	"github.com/tikv/pd/pkg/storage/endpoint"
 	"github.com/tikv/pd/pkg/utils/reflectutil"
 	"github.com/tikv/pd/pkg/utils/syncutil"
@@ -43,16 +43,16 @@ const (
 )
 
 var defaultPrioritiesConfig = prioritiesConfig{
-	read:        []string{statistics.QueryPriority, statistics.BytePriority},
-	writeLeader: []string{statistics.QueryPriority, statistics.BytePriority},
-	writePeer:   []string{statistics.BytePriority, statistics.KeyPriority},
+	read:        []string{utils.QueryPriority, utils.BytePriority},
+	writeLeader: []string{utils.QueryPriority, utils.BytePriority},
+	writePeer:   []string{utils.BytePriority, utils.KeyPriority},
 }
 
 // because tikv below 5.2.0 does not report query information, we will use byte and key as the scheduling dimensions
 var compatiblePrioritiesConfig = prioritiesConfig{
-	read:        []string{statistics.BytePriority, statistics.KeyPriority},
-	writeLeader: []string{statistics.KeyPriority, statistics.BytePriority},
-	writePeer:   []string{statistics.BytePriority, statistics.KeyPriority},
+	read:        []string{utils.BytePriority, utils.KeyPriority},
+	writeLeader: []string{utils.KeyPriority, utils.BytePriority},
+	writePeer:   []string{utils.BytePriority, utils.KeyPriority},
 }
 
 // params about hot region.
@@ -75,6 +75,7 @@ func initHotRegionScheduleConfig() *hotRegionSchedulerConfig {
 		EnableForTiFlash:       true,
 		RankFormulaVersion:     "v2",
 		ForbidRWType:           "none",
+		SplitThresholds:        0.2,
 	}
 	cfg.applyPrioritiesConfig(defaultPrioritiesConfig)
 	return cfg
@@ -102,6 +103,7 @@ func (conf *hotRegionSchedulerConfig) getValidConf() *hotRegionSchedulerConfig {
 		EnableForTiFlash:       conf.EnableForTiFlash,
 		RankFormulaVersion:     conf.getRankFormulaVersionLocked(),
 		ForbidRWType:           conf.getForbidRWTypeLocked(),
+		SplitThresholds:        conf.SplitThresholds,
 	}
 }
 
@@ -143,24 +145,26 @@ type hotRegionSchedulerConfig struct {
 	RankFormulaVersion string `json:"rank-formula-version"`
 	// forbid read or write scheduler, only for test
 	ForbidRWType string `json:"forbid-rw-type,omitempty"`
+	// SplitThresholds is the threshold to split hot region if the first priority flow of on hot region exceeds it.
+	SplitThresholds float64 `json:"split-thresholds"`
 }
 
 func (conf *hotRegionSchedulerConfig) EncodeConfig() ([]byte, error) {
 	conf.RLock()
 	defer conf.RUnlock()
-	return schedule.EncodeConfig(conf)
+	return EncodeConfig(conf)
 }
 
 func (conf *hotRegionSchedulerConfig) GetStoreStatZombieDuration() time.Duration {
 	conf.RLock()
 	defer conf.RUnlock()
-	return time.Duration(conf.MaxZombieRounds*statistics.StoreHeartBeatReportInterval) * time.Second
+	return time.Duration(conf.MaxZombieRounds*utils.StoreHeartBeatReportInterval) * time.Second
 }
 
 func (conf *hotRegionSchedulerConfig) GetRegionsStatZombieDuration() time.Duration {
 	conf.RLock()
 	defer conf.RUnlock()
-	return time.Duration(conf.MaxZombieRounds*statistics.RegionHeartBeatReportInterval) * time.Second
+	return time.Duration(conf.MaxZombieRounds*utils.RegionHeartBeatReportInterval) * time.Second
 }
 
 func (conf *hotRegionSchedulerConfig) GetMaxPeerNumber() int {
@@ -310,15 +314,21 @@ func (conf *hotRegionSchedulerConfig) getRankFormulaVersionLocked() string {
 	}
 }
 
-func (conf *hotRegionSchedulerConfig) IsForbidRWType(rw statistics.RWType) bool {
+func (conf *hotRegionSchedulerConfig) IsForbidRWType(rw utils.RWType) bool {
 	conf.RLock()
 	defer conf.RUnlock()
 	return rw.String() == conf.ForbidRWType
 }
 
+func (conf *hotRegionSchedulerConfig) getSplitThresholds() float64 {
+	conf.RLock()
+	defer conf.RUnlock()
+	return conf.SplitThresholds
+}
+
 func (conf *hotRegionSchedulerConfig) getForbidRWTypeLocked() string {
 	switch conf.ForbidRWType {
-	case statistics.Read.String(), statistics.Write.String():
+	case utils.Read.String(), utils.Write.String():
 		return conf.ForbidRWType
 	default:
 		return ""
@@ -342,7 +352,7 @@ func (conf *hotRegionSchedulerConfig) handleGetConfig(w http.ResponseWriter, r *
 func isPriorityValid(priorities []string) (map[string]bool, error) {
 	priorityMap := map[string]bool{}
 	for _, p := range priorities {
-		if p != statistics.BytePriority && p != statistics.KeyPriority && p != statistics.QueryPriority {
+		if p != utils.BytePriority && p != utils.KeyPriority && p != utils.QueryPriority {
 			return nil, errs.ErrSchedulerConfig.FastGenByArgs("invalid scheduling dimensions")
 		}
 		priorityMap[p] = true
@@ -365,7 +375,7 @@ func (conf *hotRegionSchedulerConfig) valid() error {
 	}
 	if pm, err := isPriorityValid(conf.WritePeerPriorities); err != nil {
 		return err
-	} else if pm[statistics.QueryPriority] {
+	} else if pm[utils.QueryPriority] {
 		return errs.ErrSchedulerConfig.FastGenByArgs("query is not allowed to be set in priorities for write-peer-priorities")
 	}
 
@@ -373,9 +383,12 @@ func (conf *hotRegionSchedulerConfig) valid() error {
 		return errs.ErrSchedulerConfig.FastGenByArgs("invalid rank-formula-version")
 	}
 
-	if conf.ForbidRWType != statistics.Read.String() && conf.ForbidRWType != statistics.Write.String() &&
+	if conf.ForbidRWType != utils.Read.String() && conf.ForbidRWType != utils.Write.String() &&
 		conf.ForbidRWType != "none" && conf.ForbidRWType != "" {
 		return errs.ErrSchedulerConfig.FastGenByArgs("invalid forbid-rw-type")
+	}
+	if conf.SplitThresholds < 0.01 || conf.SplitThresholds > 1.0 {
+		return errs.ErrSchedulerConfig.FastGenByArgs("invalid split-thresholds, should be in range [0.01, 1.0]")
 	}
 	return nil
 }
@@ -408,7 +421,9 @@ func (conf *hotRegionSchedulerConfig) handleSetConfig(w http.ResponseWriter, r *
 	newc, _ := json.Marshal(conf)
 	if !bytes.Equal(oldc, newc) {
 		conf.persistLocked()
-		rd.Text(w, http.StatusOK, "success")
+		log.Info("hot-region-scheduler config is updated", zap.String("old", string(oldc)), zap.String("new", string(newc)))
+		rd.Text(w, http.StatusOK, "Config is updated.")
+		return
 	}
 
 	m := make(map[string]interface{})
@@ -418,29 +433,30 @@ func (conf *hotRegionSchedulerConfig) handleSetConfig(w http.ResponseWriter, r *
 	}
 	ok := reflectutil.FindSameFieldByJSON(conf, m)
 	if ok {
-		rd.Text(w, http.StatusOK, "no changed")
+		rd.Text(w, http.StatusOK, "Config is the same with origin, so do nothing.")
 		return
 	}
 
-	rd.Text(w, http.StatusBadRequest, "config item not found")
+	rd.Text(w, http.StatusBadRequest, "Config item is not found.")
 }
 
 func (conf *hotRegionSchedulerConfig) persistLocked() error {
-	data, err := schedule.EncodeConfig(conf)
+	data, err := EncodeConfig(conf)
 	if err != nil {
 		return err
 	}
-	return conf.storage.SaveScheduleConfig(HotRegionName, data)
+	return conf.storage.SaveSchedulerConfig(HotRegionName, data)
 }
 
-func (conf *hotRegionSchedulerConfig) checkQuerySupport(cluster schedule.Cluster) bool {
-	querySupport := versioninfo.IsFeatureSupported(cluster.GetOpts().GetClusterVersion(), versioninfo.HotScheduleWithQuery)
+func (conf *hotRegionSchedulerConfig) checkQuerySupport(cluster sche.SchedulerCluster) bool {
+	version := cluster.GetSchedulerConfig().GetClusterVersion()
+	querySupport := versioninfo.IsFeatureSupported(version, versioninfo.HotScheduleWithQuery)
 	conf.Lock()
 	defer conf.Unlock()
 	if querySupport != conf.lastQuerySupported {
 		log.Info("query supported changed",
 			zap.Bool("last-query-support", conf.lastQuerySupported),
-			zap.String("cluster-version", cluster.GetOpts().GetClusterVersion().String()),
+			zap.String("cluster-version", version.String()),
 			zap.Reflect("config", conf),
 			zap.Reflect("valid-config", conf.getValidConf()))
 		conf.lastQuerySupported = querySupport
@@ -476,7 +492,7 @@ func getWritePeerPriorities(c *prioritiesConfig) []string {
 // because tikv below 5.2.0 does not report query information, we will use byte and key as the scheduling dimensions
 func adjustPrioritiesConfig(querySupport bool, origins []string, getPriorities func(*prioritiesConfig) []string) []string {
 	withQuery := slice.AnyOf(origins, func(i int) bool {
-		return origins[i] == statistics.QueryPriority
+		return origins[i] == utils.QueryPriority
 	})
 	compatibles := getPriorities(&compatiblePrioritiesConfig)
 	if !querySupport && withQuery {
@@ -485,7 +501,7 @@ func adjustPrioritiesConfig(querySupport bool, origins []string, getPriorities f
 
 	defaults := getPriorities(&defaultPrioritiesConfig)
 	isLegal := slice.AllOf(origins, func(i int) bool {
-		return origins[i] == statistics.BytePriority || origins[i] == statistics.KeyPriority || origins[i] == statistics.QueryPriority
+		return origins[i] == utils.BytePriority || origins[i] == utils.KeyPriority || origins[i] == utils.QueryPriority
 	})
 	if len(defaults) == len(origins) && isLegal && origins[0] != origins[1] {
 		return origins

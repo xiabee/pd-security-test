@@ -147,8 +147,9 @@ type Reservation struct {
 	timeToAct        time.Time
 	needWaitDuration time.Duration
 	// This is the Limit at reservation time, it can change later.
-	limit Limit
-	err   error
+	limit           Limit
+	remainingTokens float64
+	err             error
 }
 
 // OK returns whether the limiter can provide the requested number of tokens
@@ -206,7 +207,7 @@ func (r *Reservation) CancelAt(now time.Time) {
 
 // Reserve returns a Reservation that indicates how long the caller must wait before n events happen.
 // The Limiter takes this Reservation into account when allowing future events.
-// The returned Reservation’s OK() method returns false if wait duration exceeds deadline.
+// The returned Reservation's OK() method returns false if wait duration exceeds deadline.
 // Usage example:
 //
 //	r := lim.Reserve(time.Now(), 1)
@@ -405,6 +406,7 @@ func (lim *Limiter) reserveN(now time.Time, n float64, maxFutureReserve time.Dur
 		lim:              lim,
 		limit:            lim.limit,
 		needWaitDuration: waitDuration,
+		remainingTokens:  tokens,
 	}
 	if ok {
 		r.tokens = n
@@ -512,7 +514,7 @@ func WaitReservations(ctx context.Context, now time.Time, reservations []*Reserv
 			if res.err != nil {
 				return res.needWaitDuration, res.err
 			}
-			return res.needWaitDuration, errs.ErrClientResourceGroupThrottled
+			return res.needWaitDuration, errs.ErrClientResourceGroupThrottled.FastGenByArgs(res.needWaitDuration, res.limit, res.remainingTokens)
 		}
 		delay := res.DelayFrom(now)
 		if delay > longestDelayDuration {

@@ -15,9 +15,7 @@
 package filter
 
 import (
-	"math/rand"
 	"testing"
-	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/require"
@@ -52,7 +50,7 @@ type idFilter func(uint64) bool
 
 func (f idFilter) Scope() string    { return "idFilter" }
 func (f idFilter) Type() filterType { return filterType(0) }
-func (f idFilter) Source(conf config.Config, store *core.StoreInfo) *plan.Status {
+func (f idFilter) Source(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if f(store.GetID()) {
 		return statusOK
 	}
@@ -60,7 +58,7 @@ func (f idFilter) Source(conf config.Config, store *core.StoreInfo) *plan.Status
 	return statusStoreScoreDisallowed
 }
 
-func (f idFilter) Target(conf config.Config, store *core.StoreInfo) *plan.Status {
+func (f idFilter) Target(conf config.SharedConfigProvider, store *core.StoreInfo) *plan.Status {
 	if f(store.GetID()) {
 		return statusOK
 	}
@@ -114,7 +112,7 @@ func newTestCandidates(ids ...uint64) *StoreCandidates {
 	for _, id := range ids {
 		stores = append(stores, core.NewStoreInfo(&metapb.Store{Id: id}))
 	}
-	return NewCandidates(rand.New(rand.NewSource(time.Now().UnixNano())), stores)
+	return NewCandidates(stores)
 }
 
 func check(re *require.Assertions, candidates *StoreCandidates, ids ...uint64) {

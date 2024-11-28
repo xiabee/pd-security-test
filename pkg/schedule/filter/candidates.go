@@ -17,6 +17,7 @@ package filter
 import (
 	"math/rand"
 	"sort"
+	"time"
 
 	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/schedule/config"
@@ -31,18 +32,18 @@ type StoreCandidates struct {
 }
 
 // NewCandidates creates StoreCandidates with store list.
-func NewCandidates(r *rand.Rand, stores []*core.StoreInfo) *StoreCandidates {
-	return &StoreCandidates{r: r, Stores: stores}
+func NewCandidates(stores []*core.StoreInfo) *StoreCandidates {
+	return &StoreCandidates{r: rand.New(rand.NewSource(time.Now().UnixNano())), Stores: stores}
 }
 
 // FilterSource keeps stores that can pass all source filters.
-func (c *StoreCandidates) FilterSource(conf config.Config, collector *plan.Collector, counter *Counter, filters ...Filter) *StoreCandidates {
+func (c *StoreCandidates) FilterSource(conf config.SharedConfigProvider, collector *plan.Collector, counter *Counter, filters ...Filter) *StoreCandidates {
 	c.Stores = SelectSourceStores(c.Stores, filters, conf, collector, counter)
 	return c
 }
 
 // FilterTarget keeps stores that can pass all target filters.
-func (c *StoreCandidates) FilterTarget(conf config.Config, collector *plan.Collector, counter *Counter, filters ...Filter) *StoreCandidates {
+func (c *StoreCandidates) FilterTarget(conf config.SharedConfigProvider, collector *plan.Collector, counter *Counter, filters ...Filter) *StoreCandidates {
 	c.Stores = SelectTargetStores(c.Stores, filters, conf, collector, counter)
 	return c
 }

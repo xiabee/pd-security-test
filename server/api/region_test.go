@@ -147,6 +147,12 @@ func (suite *regionTestSuite) TestRegion() {
 	suite.NoError(tu.ReadGetJSON(re, testDialClient, url, r2))
 	r2.Adjust()
 	suite.Equal(NewAPIRegionInfo(r), r2)
+
+	url = fmt.Sprintf("%s/region/key/%s?format=hex", suite.urlPrefix, hex.EncodeToString([]byte("a")))
+	r2 = &RegionInfo{}
+	suite.NoError(tu.ReadGetJSON(re, testDialClient, url, r2))
+	r2.Adjust()
+	suite.Equal(NewAPIRegionInfo(r), r2)
 }
 
 func (suite *regionTestSuite) TestRegionCheck() {
@@ -154,7 +160,10 @@ func (suite *regionTestSuite) TestRegionCheck() {
 		core.SetApproximateKeys(10),
 		core.SetApproximateSize(10))
 	downPeer := &metapb.Peer{Id: 13, StoreId: 2}
-	r = r.Clone(core.WithAddPeer(downPeer), core.WithDownPeers([]*pdpb.PeerStats{{Peer: downPeer, DownSeconds: 3600}}), core.WithPendingPeers([]*metapb.Peer{downPeer}))
+	r = r.Clone(
+		core.WithAddPeer(downPeer),
+		core.WithDownPeers([]*pdpb.PeerStats{{Peer: downPeer, DownSeconds: 3600}}),
+		core.WithPendingPeers([]*metapb.Peer{downPeer}))
 	re := suite.Require()
 	mustRegionHeartbeat(re, suite.svr, r)
 	url := fmt.Sprintf("%s/region/id/%d", suite.urlPrefix, r.GetID())
@@ -203,7 +212,18 @@ func (suite *regionTestSuite) TestRegionCheck() {
 	r7 := make([]*histItem, 1)
 	suite.NoError(tu.ReadGetJSON(re, testDialClient, url, &r7))
 	histKeys := []*histItem{{Start: 1000, End: 1999, Count: 1}}
-	re.Equal(histKeys, r7)
+	suite.Equal(histKeys, r7)
+
+	// ref https://github.com/tikv/pd/issues/3558, we should change size to pass `NeedUpdate` for observing.
+	r = r.Clone(core.SetApproximateKeys(0))
+	mustPutStore(re, suite.svr, 2, metapb.StoreState_Offline, metapb.NodeState_Removing, []*metapb.StoreLabel{})
+	mustRegionHeartbeat(re, suite.svr, r)
+	url = fmt.Sprintf("%s/regions/check/%s", suite.urlPrefix, "offline-peer")
+	r8 := &RegionsInfo{}
+	suite.NoError(tu.ReadGetJSON(re, testDialClient, url, r8))
+	r4.Adjust()
+	suite.Equal(1, r8.Count)
+	suite.Equal(r.GetID(), r8.Regions[0].ID)
 }
 
 func (suite *regionTestSuite) TestRegions() {
@@ -396,7 +416,7 @@ func (suite *regionTestSuite) TestSplitRegions() {
 		hex.EncodeToString([]byte("bbb")),
 		hex.EncodeToString([]byte("ccc")),
 		hex.EncodeToString([]byte("ddd")))
-	checkOpt := func(res []byte, code int) {
+	checkOpt := func(res []byte, code int, _ http.Header) {
 		s := &struct {
 			ProcessedPercentage int      `json:"processed-percentage"`
 			NewRegionsID        []uint64 `json:"regions-id"`
