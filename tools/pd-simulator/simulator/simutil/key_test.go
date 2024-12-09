@@ -15,12 +15,11 @@
 package simutil
 
 import (
+	"strings"
 	"testing"
 
-	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/pd/pkg/codec"
-	"github.com/tikv/pd/pkg/core"
 )
 
 func TestGenerateTableKeys(t *testing.T) {
@@ -98,41 +97,58 @@ func TestGenerateTiDBEncodedSplitKey(t *testing.T) {
 	re.Error(err)
 }
 
-func TestRegionSplitKey(t *testing.T) {
+func TestGenerateKeys(t *testing.T) {
 	re := require.New(t)
 
-	// empty start and end keys
-	var s []byte
-	var e []byte
-	splitKey, err := GenerateTiDBEncodedSplitKey(s, e)
-	re.NoError(err)
+	numKeys := 10
+	actual := GenerateKeys(numKeys)
+	re.Equal(len(actual), numKeys)
 
-	// left
-	leftSplit, err := GenerateTiDBEncodedSplitKey(s, splitKey)
-	re.NoError(err)
-	re.Less(string(leftSplit), string(splitKey))
-	rightSplit, err := GenerateTiDBEncodedSplitKey(splitKey, e)
-	re.NoError(err)
-	re.Less(string(splitKey), string(rightSplit))
-
-	meta := &metapb.Region{
-		Id:          0,
-		Peers:       nil,
-		RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
+	// make sure every key:
+	// i.  has length `keyLen`
+	// ii. has only characters from `keyChars`
+	for _, key := range actual {
+		re.Equal(len(key), keyLen)
+		for _, char := range key {
+			re.True(strings.ContainsRune(keyChars, char))
+		}
 	}
-	meta.StartKey = s
-	meta.EndKey = leftSplit
-	region := core.NewRegionInfo(
-		meta,
-		nil,
-		core.SetApproximateSize(int64(1)),
-		core.SetApproximateKeys(int64(1)),
-	)
+}
 
-	regionsInfo := core.NewRegionsInfo()
-	origin, overlaps, rangeChanged := regionsInfo.SetRegion(region)
-	regionsInfo.UpdateSubTree(region, origin, overlaps, rangeChanged)
+func TestGenerateSplitKey(t *testing.T) {
+	re := require.New(t)
 
-	getRegion := regionsInfo.GetRegionByKey([]byte("a"))
-	re.NotNil(getRegion)
+	// empty key
+	s := []byte("")
+	e := []byte{116, 128, 0, 0, 0, 0, 0, 0, 255, 1, 0, 0, 0, 0, 0, 0, 0, 248}
+	splitKey := GenerateSplitKey(s, e)
+	re.Less(string(s), string(splitKey))
+	re.Less(string(splitKey), string(e))
+
+	// empty end key
+	s = []byte{116, 128, 0, 0, 0, 0, 0, 0, 255, 1, 0, 0, 0, 0, 0, 0, 0, 248}
+	e = []byte("")
+	splitKey = GenerateSplitKey(s, e)
+	re.Less(string(s), string(splitKey))
+	re.Less(string(e), string(splitKey))
+
+	// empty start and end keys
+	s = []byte{}
+	e = []byte{}
+	splitKey = GenerateSplitKey(s, e)
+	re.Less(string(s), string(splitKey))
+	re.Less(string(e), string(splitKey))
+
+	// same start and end keys
+	s = codec.EncodeBytes([]byte{116, 128, 0, 0, 0, 0, 0, 0, 255, 1, 0, 0, 0, 0, 0, 0, 0, 248})
+	e = codec.EncodeBytes([]byte{116, 128, 0, 0, 0, 0, 0, 0, 255, 1, 0, 0, 0, 0, 0, 0, 0, 248})
+	splitKey = GenerateSplitKey(s, e)
+	re.Greater(string(s), string(splitKey))
+	re.Greater(string(e), string(splitKey))
+
+	s = codec.EncodeBytes([]byte{116, 128, 0, 0, 0, 0, 0, 0, 1})
+	e = codec.EncodeBytes([]byte{116, 128, 0, 0, 0, 0, 0, 0, 1, 1})
+	splitKey = GenerateSplitKey(s, e)
+	re.Greater(string(s), string(splitKey))
+	re.Less(string(splitKey), string(e))
 }

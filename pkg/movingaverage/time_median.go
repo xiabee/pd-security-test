@@ -21,15 +21,20 @@ import "time"
 // Delay is aotSize * mfSize * reportInterval/4
 // and the min filled period is aotSize * reportInterval, which is not related with mfSize
 type TimeMedian struct {
-	aot *AvgOverTime
-	mf  *MedianFilter
+	aot           *AvgOverTime
+	mf            *MedianFilter
+	aotSize       int
+	mfSize        int
+	instantaneous float64
 }
 
 // NewTimeMedian returns a TimeMedian with given size.
 func NewTimeMedian(aotSize, mfSize int, reportInterval time.Duration) *TimeMedian {
 	return &TimeMedian{
-		aot: NewAvgOverTime(time.Duration(aotSize) * reportInterval),
-		mf:  NewMedianFilter(mfSize),
+		aot:     NewAvgOverTime(time.Duration(aotSize) * reportInterval),
+		mf:      NewMedianFilter(mfSize),
+		aotSize: aotSize,
+		mfSize:  mfSize,
 	}
 }
 
@@ -40,6 +45,7 @@ func (t *TimeMedian) Get() float64 {
 
 // Add adds recent change to TimeMedian.
 func (t *TimeMedian) Add(delta float64, interval time.Duration) {
+	t.instantaneous = delta / interval.Seconds()
 	t.aot.Add(delta, interval)
 	if t.aot.IsFull() {
 		t.mf.Add(t.aot.Get())
@@ -51,15 +57,23 @@ func (t *TimeMedian) Set(avg float64) {
 	t.mf.Set(avg)
 }
 
+// GetFilledPeriod returns filled period.
+func (t *TimeMedian) GetFilledPeriod() int { // it is unrelated with mfSize
+	return t.aotSize
+}
+
 // GetInstantaneous returns instantaneous speed
 func (t *TimeMedian) GetInstantaneous() float64 {
-	return t.aot.GetInstantaneous()
+	return t.instantaneous
 }
 
 // Clone returns a copy of TimeMedian
 func (t *TimeMedian) Clone() *TimeMedian {
 	return &TimeMedian{
-		aot: t.aot.Clone(),
-		mf:  t.mf.Clone(),
+		aot:           t.aot.Clone(),
+		mf:            t.mf.Clone(),
+		aotSize:       t.aotSize,
+		mfSize:        t.mfSize,
+		instantaneous: t.instantaneous,
 	}
 }

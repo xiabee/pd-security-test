@@ -22,18 +22,16 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/tikv/pd/pkg/core"
-	"github.com/tikv/pd/pkg/core/constant"
+	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/errs"
-	sche "github.com/tikv/pd/pkg/schedule/core"
-	"github.com/tikv/pd/pkg/schedule/filter"
-	"github.com/tikv/pd/pkg/schedule/operator"
-	"github.com/tikv/pd/pkg/schedule/plan"
-	"github.com/tikv/pd/pkg/schedule/schedulers"
-	"github.com/tikv/pd/pkg/schedule/types"
-	"github.com/tikv/pd/pkg/storage/endpoint"
-	"github.com/tikv/pd/pkg/utils/apiutil"
-	"github.com/tikv/pd/pkg/utils/syncutil"
+	"github.com/tikv/pd/pkg/syncutil"
+	"github.com/tikv/pd/server/core"
+	"github.com/tikv/pd/server/schedule"
+	"github.com/tikv/pd/server/schedule/filter"
+	"github.com/tikv/pd/server/schedule/operator"
+	"github.com/tikv/pd/server/schedule/plan"
+	"github.com/tikv/pd/server/schedulers"
+	"github.com/tikv/pd/server/storage/endpoint"
 	"github.com/unrolled/render"
 )
 
@@ -43,13 +41,11 @@ const (
 	// EvictLeaderType is evict leader scheduler type.
 	EvictLeaderType        = "user-evict-leader"
 	noStoreInSchedulerInfo = "No store in user-evict-leader-scheduler-config"
-
-	userEvictLeaderScheduler types.CheckerSchedulerType = "user-evict-leader-scheduler"
 )
 
 func init() {
-	schedulers.RegisterSliceDecoderBuilder(userEvictLeaderScheduler, func(args []string) schedulers.ConfigDecoder {
-		return func(v any) error {
+	schedule.RegisterSliceDecoderBuilder(EvictLeaderType, func(args []string) schedule.ConfigDecoder {
+		return func(v interface{}) error {
 			if len(args) != 1 {
 				return errors.New("should specify the store-id")
 			}
@@ -71,7 +67,7 @@ func init() {
 		}
 	})
 
-	schedulers.RegisterScheduler(userEvictLeaderScheduler, func(opController *operator.Controller, storage endpoint.ConfigStorage, decoder schedulers.ConfigDecoder, _ ...func(string) error) (schedulers.Scheduler, error) {
+	schedule.RegisterScheduler(EvictLeaderType, func(opController *schedule.OperatorController, storage endpoint.ConfigStorage, decoder schedule.ConfigDecoder) (schedule.Scheduler, error) {
 		conf := &evictLeaderSchedulerConfig{StoreIDWitRanges: make(map[uint64][]core.KeyRange), storage: storage}
 		if err := decoder(conf); err != nil {
 			return nil, err
@@ -82,11 +78,13 @@ func init() {
 }
 
 // SchedulerType returns the type of the scheduler
+// nolint
 func SchedulerType() string {
 	return EvictLeaderType
 }
 
 // SchedulerArgs returns the args for the scheduler
+// nolint
 func SchedulerArgs() []string {
 	args := []string{"1"}
 	return args
@@ -96,10 +94,9 @@ type evictLeaderSchedulerConfig struct {
 	mu               syncutil.RWMutex
 	storage          endpoint.ConfigStorage
 	StoreIDWitRanges map[uint64][]core.KeyRange `json:"store-id-ranges"`
-	cluster          *core.BasicCluster
+	cluster          schedule.Cluster
 }
 
-// BuildWithArgs builds the config with the args.
 func (conf *evictLeaderSchedulerConfig) BuildWithArgs(args []string) error {
 	if len(args) != 1 {
 		return errors.New("should specify the store-id")
@@ -119,7 +116,6 @@ func (conf *evictLeaderSchedulerConfig) BuildWithArgs(args []string) error {
 	return nil
 }
 
-// Clone clones the config.
 func (conf *evictLeaderSchedulerConfig) Clone() *evictLeaderSchedulerConfig {
 	conf.mu.RLock()
 	defer conf.mu.RUnlock()
@@ -128,15 +124,19 @@ func (conf *evictLeaderSchedulerConfig) Clone() *evictLeaderSchedulerConfig {
 	}
 }
 
-// Persist saves the config.
 func (conf *evictLeaderSchedulerConfig) Persist() error {
+	name := conf.getScheduleName()
 	conf.mu.RLock()
 	defer conf.mu.RUnlock()
-	data, err := schedulers.EncodeConfig(conf)
+	data, err := schedule.EncodeConfig(conf)
 	if err != nil {
 		return err
 	}
-	return conf.storage.SaveSchedulerConfig(EvictLeaderName, data)
+	return conf.storage.SaveScheduleConfig(name, data)
+}
+
+func (conf *evictLeaderSchedulerConfig) getScheduleName() string {
+	return EvictLeaderName
 }
 
 func (conf *evictLeaderSchedulerConfig) getRanges(id uint64) []string {
@@ -157,8 +157,8 @@ type evictLeaderScheduler struct {
 
 // newEvictLeaderScheduler creates an admin scheduler that transfers all leaders
 // out of a store.
-func newEvictLeaderScheduler(opController *operator.Controller, conf *evictLeaderSchedulerConfig) schedulers.Scheduler {
-	base := schedulers.NewBaseScheduler(opController, userEvictLeaderScheduler, nil)
+func newEvictLeaderScheduler(opController *schedule.OperatorController, conf *evictLeaderSchedulerConfig) schedule.Scheduler {
+	base := schedulers.NewBaseScheduler(opController)
 	handler := newEvictLeaderHandler(conf)
 	return &evictLeaderScheduler{
 		BaseScheduler: base,
@@ -167,20 +167,25 @@ func newEvictLeaderScheduler(opController *operator.Controller, conf *evictLeade
 	}
 }
 
-// ServeHTTP implements the http.Handler interface.
 func (s *evictLeaderScheduler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
 
-// EncodeConfig implements the Scheduler interface.
+func (s *evictLeaderScheduler) GetName() string {
+	return EvictLeaderName
+}
+
+func (s *evictLeaderScheduler) GetType() string {
+	return EvictLeaderType
+}
+
 func (s *evictLeaderScheduler) EncodeConfig() ([]byte, error) {
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
-	return schedulers.EncodeConfig(s.conf)
+	return schedule.EncodeConfig(s.conf)
 }
 
-// PrepareConfig ensures the scheduler config is valid.
-func (s *evictLeaderScheduler) PrepareConfig(cluster sche.SchedulerCluster) error {
+func (s *evictLeaderScheduler) Prepare(cluster schedule.Cluster) error {
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
 	var res error
@@ -192,8 +197,7 @@ func (s *evictLeaderScheduler) PrepareConfig(cluster sche.SchedulerCluster) erro
 	return res
 }
 
-// CleanConfig is used to clean the scheduler config.
-func (s *evictLeaderScheduler) CleanConfig(cluster sche.SchedulerCluster) {
+func (s *evictLeaderScheduler) Cleanup(cluster schedule.Cluster) {
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
 	for id := range s.conf.StoreIDWitRanges {
@@ -201,17 +205,15 @@ func (s *evictLeaderScheduler) CleanConfig(cluster sche.SchedulerCluster) {
 	}
 }
 
-// IsScheduleAllowed checks if the scheduler is allowed to schedule.
-func (s *evictLeaderScheduler) IsScheduleAllowed(cluster sche.SchedulerCluster) bool {
-	allowed := s.OpController.OperatorCount(operator.OpLeader) < cluster.GetSchedulerConfig().GetLeaderScheduleLimit()
+func (s *evictLeaderScheduler) IsScheduleAllowed(cluster schedule.Cluster) bool {
+	allowed := s.OpController.OperatorCount(operator.OpLeader) < cluster.GetOpts().GetLeaderScheduleLimit()
 	if !allowed {
-		operator.IncOperatorLimitCounter(s.GetType(), operator.OpLeader)
+		operator.OperatorLimitCounter.WithLabelValues(s.GetType(), operator.OpLeader.String()).Inc()
 	}
 	return allowed
 }
 
-// Schedule schedules the evict leader operator.
-func (s *evictLeaderScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) ([]*operator.Operator, []plan.Plan) {
+func (s *evictLeaderScheduler) Schedule(cluster schedule.Cluster, dryRun bool) ([]*operator.Operator, []plan.Plan) {
 	ops := make([]*operator.Operator, 0, len(s.conf.StoreIDWitRanges))
 	s.conf.mu.RLock()
 	defer s.conf.mu.RUnlock()
@@ -222,18 +224,18 @@ func (s *evictLeaderScheduler) Schedule(cluster sche.SchedulerCluster, _ bool) (
 		if region == nil {
 			continue
 		}
-		target := filter.NewCandidates(s.R, cluster.GetFollowerStores(region)).
-			FilterTarget(cluster.GetSchedulerConfig(), nil, nil, &filter.StoreStateFilter{ActionScope: EvictLeaderName, TransferLeader: true, OperatorLevel: constant.Urgent}).
+		target := filter.NewCandidates(cluster.GetFollowerStores(region)).
+			FilterTarget(cluster.GetOpts(), nil, nil, &filter.StoreStateFilter{ActionScope: EvictLeaderName, TransferLeader: true}).
 			RandomPick()
 		if target == nil {
 			continue
 		}
-		op, err := operator.CreateTransferLeaderOperator(s.GetName(), cluster, region, target.GetID(), []uint64{}, operator.OpLeader)
+		op, err := operator.CreateTransferLeaderOperator(EvictLeaderType, cluster, region, region.GetLeader().GetStoreId(), target.GetID(), []uint64{}, operator.OpLeader)
 		if err != nil {
 			log.Debug("fail to create evict leader operator", errs.ZapError(err))
 			continue
 		}
-		op.SetPriorityLevel(constant.High)
+		op.SetPriorityLevel(core.High)
 		ops = append(ops, op)
 	}
 
@@ -245,9 +247,8 @@ type evictLeaderHandler struct {
 	config *evictLeaderSchedulerConfig
 }
 
-// updateConfig updates the config.
-func (handler *evictLeaderHandler) updateConfig(w http.ResponseWriter, r *http.Request) {
-	var input map[string]any
+func (handler *evictLeaderHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
+	var input map[string]interface{}
 	if err := apiutil.ReadJSONRespondError(handler.rd, w, r.Body, &input); err != nil {
 		return
 	}
@@ -273,32 +274,20 @@ func (handler *evictLeaderHandler) updateConfig(w http.ResponseWriter, r *http.R
 		args = append(args, handler.config.getRanges(id)...)
 	}
 
-	err := handler.config.BuildWithArgs(args)
+	handler.config.BuildWithArgs(args)
+	err := handler.config.Persist()
 	if err != nil {
-		handler.config.mu.Lock()
-		handler.config.cluster.ResumeLeaderTransfer(id)
-		handler.config.mu.Unlock()
-		handler.rd.JSON(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	err = handler.config.Persist()
-	if err != nil {
-		handler.config.mu.Lock()
-		delete(handler.config.StoreIDWitRanges, id)
-		handler.config.cluster.ResumeLeaderTransfer(id)
-		handler.config.mu.Unlock()
 		handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
-		return
 	}
 	handler.rd.JSON(w, http.StatusOK, nil)
 }
 
-func (handler *evictLeaderHandler) listConfig(w http.ResponseWriter, _ *http.Request) {
+func (handler *evictLeaderHandler) ListConfig(w http.ResponseWriter, r *http.Request) {
 	conf := handler.config.Clone()
 	handler.rd.JSON(w, http.StatusOK, conf)
 }
 
-func (handler *evictLeaderHandler) deleteConfig(w http.ResponseWriter, r *http.Request) {
+func (handler *evictLeaderHandler) DeleteConfig(w http.ResponseWriter, r *http.Request) {
 	idStr := mux.Vars(r)["store_id"]
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -308,25 +297,24 @@ func (handler *evictLeaderHandler) deleteConfig(w http.ResponseWriter, r *http.R
 
 	handler.config.mu.Lock()
 	defer handler.config.mu.Unlock()
-	ranges, exists := handler.config.StoreIDWitRanges[id]
-	if !exists {
-		handler.rd.JSON(w, http.StatusInternalServerError, errors.New("the config does not exist"))
-		return
-	}
-	delete(handler.config.StoreIDWitRanges, id)
-	handler.config.cluster.ResumeLeaderTransfer(id)
+	_, exists := handler.config.StoreIDWitRanges[id]
+	if exists {
+		delete(handler.config.StoreIDWitRanges, id)
+		handler.config.cluster.ResumeLeaderTransfer(id)
 
-	if err := handler.config.Persist(); err != nil {
-		handler.config.StoreIDWitRanges[id] = ranges
-		_ = handler.config.cluster.PauseLeaderTransfer(id)
-		handler.rd.JSON(w, http.StatusInternalServerError, err.Error())
+		handler.config.mu.Unlock()
+		handler.config.Persist()
+		handler.config.mu.Lock()
+
+		var resp interface{}
+		if len(handler.config.StoreIDWitRanges) == 0 {
+			resp = noStoreInSchedulerInfo
+		}
+		handler.rd.JSON(w, http.StatusOK, resp)
 		return
 	}
-	var resp any
-	if len(handler.config.StoreIDWitRanges) == 0 {
-		resp = noStoreInSchedulerInfo
-	}
-	handler.rd.JSON(w, http.StatusOK, resp)
+
+	handler.rd.JSON(w, http.StatusInternalServerError, errors.New("the config does not exist"))
 }
 
 func newEvictLeaderHandler(config *evictLeaderSchedulerConfig) http.Handler {
@@ -335,9 +323,9 @@ func newEvictLeaderHandler(config *evictLeaderSchedulerConfig) http.Handler {
 		rd:     render.New(render.Options{IndentJSON: true}),
 	}
 	router := mux.NewRouter()
-	router.HandleFunc("/config", h.updateConfig).Methods(http.MethodPost)
-	router.HandleFunc("/list", h.listConfig).Methods(http.MethodGet)
-	router.HandleFunc("/delete/{store_id}", h.deleteConfig).Methods(http.MethodDelete)
+	router.HandleFunc("/config", h.UpdateConfig).Methods(http.MethodPost)
+	router.HandleFunc("/list", h.ListConfig).Methods(http.MethodGet)
+	router.HandleFunc("/delete/{store_id}", h.DeleteConfig).Methods(http.MethodDelete)
 	return router
 }
 

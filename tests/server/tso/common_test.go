@@ -23,12 +23,12 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"go.uber.org/goleak"
 )
 
 const (
-	tsoRequestConcurrencyNumber = 3
+	tsoRequestConcurrencyNumber = 5
 	tsoRequestRound             = 30
 	tsoCount                    = 10
 )
@@ -36,7 +36,7 @@ const (
 func checkAndReturnTimestampResponse(re *require.Assertions, req *pdpb.TsoRequest, resp *pdpb.TsoResponse) *pdpb.Timestamp {
 	re.Equal(req.GetCount(), resp.GetCount())
 	timestamp := resp.GetTimestamp()
-	re.Positive(timestamp.GetPhysical())
+	re.Greater(timestamp.GetPhysical(), int64(0))
 	re.GreaterOrEqual(uint32(timestamp.GetLogical())>>timestamp.GetSuffixBits(), req.GetCount())
 	return timestamp
 }

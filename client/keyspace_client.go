@@ -21,33 +21,32 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
-	"github.com/tikv/pd/client/errs"
+	"github.com/pingcap/log"
+	"github.com/tikv/pd/client/grpcutil"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 // KeyspaceClient manages keyspace metadata.
 type KeyspaceClient interface {
 	// LoadKeyspace load and return target keyspace's metadata.
 	LoadKeyspace(ctx context.Context, name string) (*keyspacepb.KeyspaceMeta, error)
-	// UpdateKeyspaceState updates target keyspace's state.
-	UpdateKeyspaceState(ctx context.Context, id uint32, state keyspacepb.KeyspaceState) (*keyspacepb.KeyspaceMeta, error)
 	// WatchKeyspaces watches keyspace meta changes.
 	WatchKeyspaces(ctx context.Context) (chan []*keyspacepb.KeyspaceMeta, error)
-	// GetAllKeyspaces get all keyspace's metadata.
-	GetAllKeyspaces(ctx context.Context, startID uint32, limit uint32) ([]*keyspacepb.KeyspaceMeta, error)
 }
 
 // keyspaceClient returns the KeyspaceClient from current PD leader.
 func (c *client) keyspaceClient() keyspacepb.KeyspaceClient {
-	if client := c.pdSvcDiscovery.GetServingEndpointClientConn(); client != nil {
-		return keyspacepb.NewKeyspaceClient(client)
+	if cc, ok := c.clientConns.Load(c.GetLeaderAddr()); ok {
+		return keyspacepb.NewKeyspaceClient(cc.(*grpc.ClientConn))
 	}
 	return nil
 }
 
 // LoadKeyspace loads and returns target keyspace's metadata.
 func (c *client) LoadKeyspace(ctx context.Context, name string) (*keyspacepb.KeyspaceMeta, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-		span = span.Tracer().StartSpan("keyspaceClient.LoadKeyspace", opentracing.ChildOf(span.Context()))
+	if span := opentracing.SpanFromContext(ctx); span != nil {
+		span = opentracing.StartSpan("keyspaceClient.LoadKeyspace", opentracing.ChildOf(span.Context()))
 		defer span.Finish()
 	}
 	start := time.Now()
@@ -57,17 +56,13 @@ func (c *client) LoadKeyspace(ctx context.Context, name string) (*keyspacepb.Key
 		Header: c.requestHeader(),
 		Name:   name,
 	}
-	protoClient := c.keyspaceClient()
-	if protoClient == nil {
-		cancel()
-		return nil, errs.ErrClientGetProtoClient
-	}
-	resp, err := protoClient.LoadKeyspace(ctx, req)
+	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
+	resp, err := c.keyspaceClient().LoadKeyspace(ctx, req)
 	cancel()
 
 	if err != nil {
 		cmdFailedDurationLoadKeyspace.Observe(time.Since(start).Seconds())
-		c.pdSvcDiscovery.ScheduleCheckMemberChanged()
+		c.ScheduleCheckLeader()
 		return nil, err
 	}
 
@@ -79,91 +74,40 @@ func (c *client) LoadKeyspace(ctx context.Context, name string) (*keyspacepb.Key
 	return resp.Keyspace, nil
 }
 
-// UpdateKeyspaceState attempts to update the keyspace specified by ID to the target state,
-// it will also record StateChangedAt for the given keyspace if a state change took place.
-// Currently, legal operations includes:
-//
-//	ENABLED -> {ENABLED, DISABLED}
-//	DISABLED -> {ENABLED, DISABLED, ARCHIVED}
-//	ARCHIVED -> {ARCHIVED, TOMBSTONE}
-//	TOMBSTONE -> {TOMBSTONE}
-//
-// Updated keyspace meta will be returned.
-func (c *client) UpdateKeyspaceState(ctx context.Context, id uint32, state keyspacepb.KeyspaceState) (*keyspacepb.KeyspaceMeta, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-		span = span.Tracer().StartSpan("keyspaceClient.UpdateKeyspaceState", opentracing.ChildOf(span.Context()))
-		defer span.Finish()
-	}
-	start := time.Now()
-	defer func() { cmdDurationUpdateKeyspaceState.Observe(time.Since(start).Seconds()) }()
-	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
-	req := &keyspacepb.UpdateKeyspaceStateRequest{
-		Header: c.requestHeader(),
-		Id:     id,
-		State:  state,
-	}
-	protoClient := c.keyspaceClient()
-	if protoClient == nil {
-		cancel()
-		return nil, errs.ErrClientGetProtoClient
-	}
-	resp, err := protoClient.UpdateKeyspaceState(ctx, req)
-	cancel()
-
-	if err != nil {
-		cmdFailedDurationUpdateKeyspaceState.Observe(time.Since(start).Seconds())
-		c.pdSvcDiscovery.ScheduleCheckMemberChanged()
-		return nil, err
-	}
-
-	if resp.Header.GetError() != nil {
-		cmdFailedDurationUpdateKeyspaceState.Observe(time.Since(start).Seconds())
-		return nil, errors.Errorf("Update state for keyspace id %d failed: %s", id, resp.Header.GetError().String())
-	}
-
-	return resp.Keyspace, nil
-}
-
 // WatchKeyspaces watches keyspace meta changes.
 // It returns a stream of slices of keyspace metadata.
 // The first message in stream contains all current keyspaceMeta,
 // all subsequent messages contains new put events for all keyspaces.
-func (*client) WatchKeyspaces(context.Context) (chan []*keyspacepb.KeyspaceMeta, error) {
-	return nil, errors.Errorf("WatchKeyspaces unimplemented")
-}
-
-// GetAllKeyspaces get all keyspaces metadata.
-func (c *client) GetAllKeyspaces(ctx context.Context, startID uint32, limit uint32) ([]*keyspacepb.KeyspaceMeta, error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-		span = span.Tracer().StartSpan("keyspaceClient.GetAllKeyspaces", opentracing.ChildOf(span.Context()))
-		defer span.Finish()
+func (c *client) WatchKeyspaces(ctx context.Context) (chan []*keyspacepb.KeyspaceMeta, error) {
+	keyspaceWatcherChan := make(chan []*keyspacepb.KeyspaceMeta)
+	req := &keyspacepb.WatchKeyspacesRequest{
+		Header: c.requestHeader(),
 	}
-	start := time.Now()
-	defer func() { cmdDurationGetAllKeyspaces.Observe(time.Since(start).Seconds()) }()
-	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
-	req := &keyspacepb.GetAllKeyspacesRequest{
-		Header:  c.requestHeader(),
-		StartId: startID,
-		Limit:   limit,
-	}
-	protoClient := c.keyspaceClient()
-	if protoClient == nil {
-		cancel()
-		return nil, errs.ErrClientGetProtoClient
-	}
-	resp, err := protoClient.GetAllKeyspaces(ctx, req)
-	cancel()
-
+	stream, err := c.keyspaceClient().WatchKeyspaces(ctx, req)
 	if err != nil {
-		cmdDurationGetAllKeyspaces.Observe(time.Since(start).Seconds())
-		c.pdSvcDiscovery.ScheduleCheckMemberChanged()
+		close(keyspaceWatcherChan)
 		return nil, err
 	}
-
-	if resp.Header.GetError() != nil {
-		cmdDurationGetAllKeyspaces.Observe(time.Since(start).Seconds())
-		return nil, errors.Errorf("Get all keyspaces metadata failed: %s", resp.Header.GetError().String())
-	}
-
-	return resp.Keyspaces, nil
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("[pd] panic in keyspace client `WatchKeyspaces`", zap.Any("error", r))
+				return
+			}
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				close(keyspaceWatcherChan)
+				return
+			default:
+				resp, err := stream.Recv()
+				if err != nil {
+					return
+				}
+				keyspaceWatcherChan <- resp.Keyspaces
+			}
+		}
+	}()
+	return keyspaceWatcherChan, err
 }

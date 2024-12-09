@@ -24,9 +24,9 @@ import (
 )
 
 func addRandData(ma MovingAvg, n int, mx float64) {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rand.Seed(time.Now().UnixNano())
 	for i := 0; i < n; i++ {
-		ma.Add(r.Float64() * mx)
+		ma.Add(rand.Float64() * mx)
 	}
 }
 
@@ -43,7 +43,6 @@ func checkAdd(re *require.Assertions, ma MovingAvg, data []float64, expected []f
 	re.Len(data, len(expected))
 	for i, x := range data {
 		ma.Add(x)
-		re.Equal(x, ma.GetInstantaneous())
 		re.LessOrEqual(math.Abs(ma.Get()-expected[i]), 1e-7)
 	}
 }
@@ -72,6 +71,7 @@ func checkInstantaneous(re *require.Assertions, ma MovingAvg) {
 }
 
 func TestMedianFilter(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	var empty float64 = 0
 	data := []float64{2, 4, 2, 800, 600, 6, 3}
@@ -91,6 +91,7 @@ type testCase struct {
 }
 
 func TestMovingAvg(t *testing.T) {
+	t.Parallel()
 	re := require.New(t)
 	var empty float64 = 0
 	data := []float64{1, 1, 1, 1, 5, 1, 1, 1}

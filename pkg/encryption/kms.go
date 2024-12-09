@@ -15,13 +15,14 @@
 package encryption
 
 import (
-	"context"
 	"os"
 
-	sdkconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
-	"github.com/aws/aws-sdk-go-v2/service/kms"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/kms"
+	"github.com/aws/aws-sdk-go/service/sts"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	"github.com/tikv/pd/pkg/errs"
 )
@@ -47,40 +48,24 @@ func newMasterKeyFromKMS(
 	if config.Vendor != kmsVendorAWS {
 		return nil, errs.ErrEncryptionKMS.GenWithStack("unsupported KMS vendor: %s", config.Vendor)
 	}
-
-	cfg, err := sdkconfig.LoadDefaultConfig(context.TODO(),
-		sdkconfig.WithRegion(config.Region),
-	)
+	credentials, err := newAwsCredentials()
+	if err != nil {
+		return nil, err
+	}
+	session, err := session.NewSession(&aws.Config{
+		Credentials: credentials,
+		Region:      &config.Region,
+		Endpoint:    &config.Endpoint,
+	})
 	if err != nil {
 		return nil, errs.ErrEncryptionKMS.Wrap(err).GenWithStack(
-			"fail to load default config")
+			"fail to create AWS session to access KMS CMK")
 	}
-
-	// Credentials from K8S IAM role.
-	roleArn := os.Getenv(envAwsRoleArn)
-	tokenFile := os.Getenv(envAwsWebIdentityTokenFile)
-	sessionName := os.Getenv(envAwsRoleSessionName)
-	optFn := func(*kms.Options) {}
-	// Session name is optional.
-	if roleArn != "" && tokenFile != "" {
-		client := sts.NewFromConfig(cfg)
-		webIdentityRoleProvider := stscreds.NewWebIdentityRoleProvider(
-			client,
-			roleArn,
-			stscreds.IdentityTokenFile(tokenFile),
-			func(o *stscreds.WebIdentityRoleOptions) {
-				o.RoleSessionName = sessionName
-			},
-		)
-		optFn = func(options *kms.Options) {
-			options.Credentials = webIdentityRoleProvider
-		}
-	}
-	client := kms.NewFromConfig(cfg, optFn)
+	client := kms.New(session)
 	if len(ciphertextKey) == 0 {
-		numberOfBytes := int32(masterKeyLength)
+		numberOfBytes := int64(masterKeyLength)
 		// Create a new data key.
-		output, err := client.GenerateDataKey(context.Background(), &kms.GenerateDataKeyInput{
+		output, err := client.GenerateDataKey(&kms.GenerateDataKeyInput{
 			KeyId:         &config.KeyId,
 			NumberOfBytes: &numberOfBytes,
 		})
@@ -90,7 +75,7 @@ func newMasterKeyFromKMS(
 		}
 		if len(output.Plaintext) != masterKeyLength {
 			return nil, errs.ErrEncryptionKMS.GenWithStack(
-				"unexpected data key length generated from AWS KMS, expected %d vs actual %d",
+				"unexpected data key length generated from AWS KMS, expectd %d vs actual %d",
 				masterKeyLength, len(output.Plaintext))
 		}
 		masterKey = &MasterKey{
@@ -99,7 +84,7 @@ func newMasterKeyFromKMS(
 		}
 	} else {
 		// Decrypt existing data key.
-		output, err := client.Decrypt(context.Background(), &kms.DecryptInput{
+		output, err := client.Decrypt(&kms.DecryptInput{
 			KeyId:          &config.KeyId,
 			CiphertextBlob: ciphertextKey,
 		})
@@ -118,4 +103,37 @@ func newMasterKeyFromKMS(
 		}
 	}
 	return
+}
+
+func newAwsCredentials() (*credentials.Credentials, error) {
+	var providers []credentials.Provider
+
+	// Credentials from K8S IAM role.
+	roleArn := os.Getenv(envAwsRoleArn)
+	tokenFile := os.Getenv(envAwsWebIdentityTokenFile)
+	sessionName := os.Getenv(envAwsRoleSessionName)
+	// Session name is optional.
+	if roleArn != "" && tokenFile != "" {
+		session, err := session.NewSession()
+		if err != nil {
+			return nil, errs.ErrEncryptionKMS.Wrap(err).GenWithStack(
+				"fail to create AWS session to create a WebIdentityRoleProvider")
+		}
+		webIdentityProvider := stscreds.NewWebIdentityRoleProvider(
+			sts.New(session), roleArn, sessionName, tokenFile)
+		providers = append(providers, webIdentityProvider)
+	}
+
+	providers = append(providers,
+		// Credentials from AWS environment variables.
+		&credentials.EnvProvider{},
+		// Credentials from default AWS credentials file.
+		&credentials.SharedCredentialsProvider{
+			Filename: "",
+			Profile:  "",
+		},
+	)
+
+	credentials := credentials.NewChainCredentials(providers)
+	return credentials, nil
 }

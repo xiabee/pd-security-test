@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/utils/testutil"
+	"github.com/tikv/pd/pkg/testutil"
 	"github.com/tikv/pd/tests"
 	"go.uber.org/goleak"
 )
@@ -40,9 +40,9 @@ func TestAPI(t *testing.T) {
 
 	err = cluster.RunInitialServers()
 	re.NoError(err)
-	re.NotEmpty(cluster.WaitLeader())
+	cluster.WaitLeader()
 
-	leaderServer := cluster.GetLeaderServer()
+	leaderServer := cluster.GetServer(cluster.GetLeader())
 	re.NoError(leaderServer.BootstrapCluster())
 
 	var jsonStr = []byte(`

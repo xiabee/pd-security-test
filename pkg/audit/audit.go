@@ -19,7 +19,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tikv/pd/pkg/utils/requestutil"
+	"github.com/tikv/pd/pkg/requestutil"
 	"go.uber.org/zap"
 )
 
@@ -98,7 +98,7 @@ func (b *PrometheusHistogramBackend) ProcessHTTPRequest(req *http.Request) bool 
 	if !ok {
 		return false
 	}
-	b.histogramVec.WithLabelValues(requestInfo.ServiceLabel, "HTTP", requestInfo.CallerID, requestInfo.IP).Observe(float64(endTime - requestInfo.StartTimeStamp))
+	b.histogramVec.WithLabelValues(requestInfo.ServiceLabel, "HTTP", requestInfo.Component, requestInfo.IP).Observe(float64(endTime - requestInfo.StartTimeStamp))
 	return true
 }
 
@@ -118,11 +118,11 @@ func NewLocalLogBackend(before bool) Backend {
 }
 
 // ProcessHTTPRequest is used to implement audit.Backend
-func (*LocalLogBackend) ProcessHTTPRequest(r *http.Request) bool {
+func (l *LocalLogBackend) ProcessHTTPRequest(r *http.Request) bool {
 	requestInfo, ok := requestutil.RequestInfoFrom(r.Context())
 	if !ok {
 		return false
 	}
-	log.Info("audit log", zap.String("service-info", requestInfo.String()))
+	log.Info("Audit Log", zap.String("service-info", requestInfo.String()))
 	return true
 }
