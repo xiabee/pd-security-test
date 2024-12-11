@@ -21,13 +21,13 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
+	"github.com/tikv/pd/pkg/core"
 	"github.com/tikv/pd/pkg/errs"
-	"github.com/tikv/pd/pkg/logutil"
-	"github.com/tikv/pd/pkg/typeutil"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/schedule"
-	"github.com/tikv/pd/server/statistics/buckets"
-	"github.com/tikv/pd/server/versioninfo"
+	"github.com/tikv/pd/pkg/schedule/operator"
+	"github.com/tikv/pd/pkg/statistics/buckets"
+	"github.com/tikv/pd/pkg/utils/logutil"
+	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/versioninfo"
 	"go.uber.org/zap"
 )
 
@@ -37,14 +37,14 @@ func (c *RaftCluster) HandleRegionHeartbeat(region *core.RegionInfo) error {
 		return err
 	}
 
-	c.coordinator.opController.Dispatch(region, schedule.DispatchFromHeartBeat)
+	c.coordinator.GetOperatorController().Dispatch(region, operator.DispatchFromHeartBeat, c.coordinator.RecordOpStepWithTTL)
 	return nil
 }
 
 // HandleAskSplit handles the split request.
 func (c *RaftCluster) HandleAskSplit(request *pdpb.AskSplitRequest) (*pdpb.AskSplitResponse, error) {
-	if allowed, err := c.CheckSchedulingAllowance(); !allowed {
-		return nil, err
+	if c.IsSchedulingHalted() {
+		return nil, errs.ErrSchedulingIsHalted.FastGenByArgs()
 	}
 	if !c.opt.IsTikvRegionSplitEnabled() {
 		return nil, errs.ErrSchedulerTiKVSplitDisabled.FastGenByArgs()
@@ -105,8 +105,8 @@ func (c *RaftCluster) ValidRequestRegion(reqRegion *metapb.Region) error {
 
 // HandleAskBatchSplit handles the batch split request.
 func (c *RaftCluster) HandleAskBatchSplit(request *pdpb.AskBatchSplitRequest) (*pdpb.AskBatchSplitResponse, error) {
-	if allowed, err := c.CheckSchedulingAllowance(); !allowed {
-		return nil, err
+	if c.IsSchedulingHalted() {
+		return nil, errs.ErrSchedulingIsHalted.FastGenByArgs()
 	}
 	if !c.opt.IsTikvRegionSplitEnabled() {
 		return nil, errs.ErrSchedulerTiKVSplitDisabled.FastGenByArgs()
@@ -246,6 +246,8 @@ func (c *RaftCluster) HandleReportBuckets(b *metapb.Buckets) error {
 	if err := c.processReportBuckets(b); err != nil {
 		return err
 	}
-	c.hotBuckets.CheckAsync(buckets.NewCheckPeerTask(b))
+	if !c.isAPIServiceMode {
+		c.hotStat.CheckAsync(buckets.NewCheckPeerTask(b))
+	}
 	return nil
 }

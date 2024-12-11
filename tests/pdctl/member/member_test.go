@@ -22,8 +22,8 @@ import (
 
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/etcdutil"
-	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
+	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/tests"
 	"github.com/tikv/pd/tests/pdctl"
 	pdctlCmd "github.com/tikv/pd/tools/pd-ctl/pdctl"
@@ -38,7 +38,7 @@ func TestMember(t *testing.T) {
 	err = cluster.RunInitialServers()
 	re.NoError(err)
 	cluster.WaitLeader()
-	leaderServer := cluster.GetServer(cluster.GetLeader())
+	leaderServer := cluster.GetLeaderServer()
 	re.NoError(leaderServer.BootstrapCluster())
 	pdAddr := cluster.GetConfig().GetClientURL()
 	re.NoError(err)
@@ -87,14 +87,14 @@ func TestMember(t *testing.T) {
 	// member delete name <member_name>
 	err = svr.Destroy()
 	re.NoError(err)
-	members, err := etcdutil.ListEtcdMembers(client)
+	members, err := etcdutil.ListEtcdMembers(ctx, client)
 	re.NoError(err)
 	re.Len(members.Members, 3)
 	args = []string{"-u", pdAddr, "member", "delete", "name", name}
 	_, err = pdctl.ExecuteCommand(cmd, args...)
 	re.NoError(err)
 	testutil.Eventually(re, func() bool {
-		members, err = etcdutil.ListEtcdMembers(client)
+		members, err = etcdutil.ListEtcdMembers(ctx, client)
 		re.NoError(err)
 		return len(members.Members) == 2
 	})
@@ -104,7 +104,7 @@ func TestMember(t *testing.T) {
 	_, err = pdctl.ExecuteCommand(cmd, args...)
 	re.NoError(err)
 	testutil.Eventually(re, func() bool {
-		members, err = etcdutil.ListEtcdMembers(client)
+		members, err = etcdutil.ListEtcdMembers(ctx, client)
 		re.NoError(err)
 		return len(members.Members) == 2
 	})

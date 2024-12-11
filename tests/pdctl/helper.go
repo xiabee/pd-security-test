@@ -16,26 +16,19 @@ package pdctl
 
 import (
 	"bytes"
-	"context"
-	"fmt"
 	"sort"
 
-	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/typeutil"
-	"github.com/tikv/pd/server"
+	"github.com/tikv/pd/pkg/core"
+	"github.com/tikv/pd/pkg/utils/typeutil"
 	"github.com/tikv/pd/server/api"
-	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/versioninfo"
-	"github.com/tikv/pd/tests"
 )
 
 // ExecuteCommand is used for test purpose.
 func ExecuteCommand(root *cobra.Command, args ...string) (output []byte, err error) {
 	buf := new(bytes.Buffer)
-	root.SetOutput(buf)
+	root.SetOut(buf)
 	root.SetArgs(args)
 	err = root.Execute()
 	return buf.Bytes(), err
@@ -87,38 +80,4 @@ func CheckRegionsInfo(re *require.Assertions, output *api.RegionsInfo, expected 
 	for i, region := range expected {
 		CheckRegionInfo(re, &got[i], region)
 	}
-}
-
-// MustPutStore is used for test purpose.
-func MustPutStore(re *require.Assertions, svr *server.Server, store *metapb.Store) {
-	store.Address = fmt.Sprintf("tikv%d", store.GetId())
-	if len(store.Version) == 0 {
-		store.Version = versioninfo.MinSupportedVersion(versioninfo.Version2_0).String()
-	}
-	grpcServer := &server.GrpcServer{Server: svr}
-	_, err := grpcServer.PutStore(context.Background(), &pdpb.PutStoreRequest{
-		Header: &pdpb.RequestHeader{ClusterId: svr.ClusterID()},
-		Store:  store,
-	})
-	re.NoError(err)
-}
-
-// MustPutRegion is used for test purpose.
-func MustPutRegion(re *require.Assertions, cluster *tests.TestCluster, regionID, storeID uint64, start, end []byte, opts ...core.RegionCreateOption) *core.RegionInfo {
-	leader := &metapb.Peer{
-		Id:      regionID,
-		StoreId: storeID,
-	}
-	metaRegion := &metapb.Region{
-		Id:          regionID,
-		StartKey:    start,
-		EndKey:      end,
-		Peers:       []*metapb.Peer{leader},
-		RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
-	}
-	opts = append(opts, core.SetSource(core.Heartbeat))
-	r := core.NewRegionInfo(metaRegion, leader, opts...)
-	err := cluster.HandleRegionHeartbeat(r)
-	re.NoError(err)
-	return r
 }

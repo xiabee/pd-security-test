@@ -21,6 +21,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
 )
 
@@ -30,6 +31,6 @@ func Enabled() bool {
 }
 
 // NewHandler creates a HTTP handler for Swagger.
-func NewHandler(context.Context, *server.Server) (http.Handler, server.ServiceGroup, error) {
-	return nil, server.ServiceGroup{}, nil
+func NewHandler(context.Context, *server.Server) (http.Handler, apiutil.APIServiceGroup, error) {
+	return nil, apiutil.APIServiceGroup{}, nil
 }

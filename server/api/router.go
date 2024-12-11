@@ -23,12 +23,16 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/pingcap/failpoint"
-	"github.com/tikv/pd/pkg/apiutil"
 	"github.com/tikv/pd/pkg/audit"
 	"github.com/tikv/pd/pkg/ratelimit"
+	"github.com/tikv/pd/pkg/tso"
+	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/server"
 	"github.com/unrolled/render"
 )
+
+// enableFailPointAPI enable fail point API handler.
+var enableFailPointAPI bool
 
 // createRouteOption is used to register service for mux.Route
 type createRouteOption func(route *mux.Route)
@@ -216,13 +220,14 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 	registerFunc(clusterRouter, "/store/{id}/limit", storeHandler.SetStoreLimit, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 
 	storesHandler := newStoresHandler(handler, rd)
-	registerFunc(clusterRouter, "/stores", storesHandler.GetStores, setMethods(http.MethodGet), setAuditBackend(prometheus))
+	registerFunc(clusterRouter, "/stores", storesHandler.GetAllStores, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(clusterRouter, "/stores/remove-tombstone", storesHandler.RemoveTombStone, setMethods(http.MethodDelete), setAuditBackend(localLog, prometheus))
 	registerFunc(clusterRouter, "/stores/limit", storesHandler.GetAllStoresLimit, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(clusterRouter, "/stores/limit", storesHandler.SetAllStoresLimit, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 	registerFunc(clusterRouter, "/stores/limit/scene", storesHandler.SetStoreLimitScene, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 	registerFunc(clusterRouter, "/stores/limit/scene", storesHandler.GetStoreLimitScene, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(clusterRouter, "/stores/progress", storesHandler.GetStoresProgress, setMethods(http.MethodGet), setAuditBackend(prometheus))
+	registerFunc(clusterRouter, "/stores/check", storesHandler.GetStoresByState, setMethods(http.MethodGet), setAuditBackend(prometheus))
 
 	labelsHandler := newLabelsHandler(svr, rd)
 	registerFunc(clusterRouter, "/labels", labelsHandler.GetLabels, setMethods(http.MethodGet), setAuditBackend(prometheus))
@@ -233,6 +238,7 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 	registerFunc(apiRouter, "/hotspot/regions/read", hotStatusHandler.GetHotReadRegions, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(apiRouter, "/hotspot/regions/history", hotStatusHandler.GetHistoryHotRegions, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(apiRouter, "/hotspot/stores", hotStatusHandler.GetHotStores, setMethods(http.MethodGet), setAuditBackend(prometheus))
+	registerFunc(apiRouter, "/hotspot/buckets", hotStatusHandler.GetHotBuckets, setMethods(http.MethodGet), setAuditBackend(prometheus))
 
 	regionHandler := newRegionHandler(svr, rd)
 	registerFunc(clusterRouter, "/region/id/{id}", regionHandler.GetRegionByID, setMethods(http.MethodGet), setAuditBackend(prometheus))
@@ -240,12 +246,13 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 
 	srd := createStreamingRender()
 	regionsAllHandler := newRegionsHandler(svr, srd)
-	registerFunc(clusterRouter, "/regions", regionsAllHandler.GetRegions, setMethods(http.MethodGet), setAuditBackend(prometheus))
+	registerFunc(clusterRouter, "/regions", regionsAllHandler.GetRegions, setMethods(http.MethodGet), setAuditBackend(localLog, prometheus))
 
 	regionsHandler := newRegionsHandler(svr, rd)
 	registerFunc(clusterRouter, "/regions/key", regionsHandler.ScanRegions, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(clusterRouter, "/regions/count", regionsHandler.GetRegionCount, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(clusterRouter, "/regions/store/{id}", regionsHandler.GetStoreRegions, setMethods(http.MethodGet), setAuditBackend(prometheus))
+	registerFunc(clusterRouter, "/regions/keyspace/id/{id}", regionsHandler.GetKeyspaceRegions, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(clusterRouter, "/regions/writeflow", regionsHandler.GetTopWriteFlowRegions, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(clusterRouter, "/regions/readflow", regionsHandler.GetTopReadFlowRegions, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(clusterRouter, "/regions/confver", regionsHandler.GetTopConfVerRegions, setMethods(http.MethodGet), setAuditBackend(prometheus))
@@ -295,10 +302,8 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 
 	adminHandler := newAdminHandler(svr, rd)
 	registerFunc(clusterRouter, "/admin/cache/region/{id}", adminHandler.DeleteRegionCache, setMethods(http.MethodDelete), setAuditBackend(localLog, prometheus))
+	registerFunc(clusterRouter, "/admin/storage/region/{id}", adminHandler.DeleteRegionStorage, setMethods(http.MethodDelete), setAuditBackend(localLog, prometheus))
 	registerFunc(clusterRouter, "/admin/cache/regions", adminHandler.DeleteAllRegionCache, setMethods(http.MethodDelete), setAuditBackend(localLog, prometheus))
-	// br ebs restore phase 1 will reset ts, but at that time the cluster hasn't bootstrapped, so cannot use clusterRouter
-	registerFunc(apiRouter, "/admin/reset-ts", adminHandler.ResetTS, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
-	registerFunc(apiRouter, "/admin/persist-file/{file_name}", adminHandler.SavePersistFile, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 	registerFunc(apiRouter, "/admin/persist-file/{file_name}", adminHandler.SavePersistFile, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 	registerFunc(apiRouter, "/admin/cluster/markers/snapshot-recovering", adminHandler.IsSnapshotRecovering, setMethods(http.MethodGet), setAuditBackend(localLog, prometheus))
 	registerFunc(apiRouter, "/admin/cluster/markers/snapshot-recovering", adminHandler.MarkSnapshotRecovering, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
@@ -308,7 +313,8 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 	serviceMiddlewareHandler := newServiceMiddlewareHandler(svr, rd)
 	registerFunc(apiRouter, "/service-middleware/config", serviceMiddlewareHandler.GetServiceMiddlewareConfig, setMethods(http.MethodGet), setAuditBackend(prometheus))
 	registerFunc(apiRouter, "/service-middleware/config", serviceMiddlewareHandler.SetServiceMiddlewareConfig, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
-	registerFunc(apiRouter, "/service-middleware/config/rate-limit", serviceMiddlewareHandler.SetRatelimitConfig, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus), setRateLimitAllowList())
+	registerFunc(apiRouter, "/service-middleware/config/rate-limit", serviceMiddlewareHandler.SetRateLimitConfig, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus), setRateLimitAllowList())
+	registerFunc(apiRouter, "/service-middleware/config/grpc-rate-limit", serviceMiddlewareHandler.SetGRPCRateLimitConfig, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus), setRateLimitAllowList())
 
 	logHandler := newLogHandler(svr, rd)
 	registerFunc(apiRouter, "/admin/log", logHandler.SetLogLevel, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
@@ -326,10 +332,6 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 	// metric query use to query metric data, the protocol is compatible with prometheus.
 	registerFunc(apiRouter, "/metric/query", newQueryMetric(svr).QueryMetric, setMethods(http.MethodGet, http.MethodPost), setAuditBackend(prometheus))
 	registerFunc(apiRouter, "/metric/query_range", newQueryMetric(svr).QueryMetric, setMethods(http.MethodGet, http.MethodPost), setAuditBackend(prometheus))
-
-	// tso API
-	tsoHandler := newTSOHandler(svr, rd)
-	registerFunc(apiRouter, "/tso/allocator/transfer/{name}", tsoHandler.TransferLocalTSOAllocator, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
 
 	pprofHandler := newPprofHandler(svr, rd)
 	// profile API
@@ -361,16 +363,21 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 	registerFunc(clusterRouter, "/admin/unsafe/remove-failed-stores/show",
 		unsafeOperationHandler.GetFailedStoresRemovalStatus, setMethods(http.MethodGet), setAuditBackend(prometheus))
 
+	// tso API
+	tsoHandler := newTSOHandler(svr, rd)
+	registerFunc(apiRouter, "/tso/allocator/transfer/{name}", tsoHandler.TransferLocalTSOAllocator, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
+	tsoAdminHandler := tso.NewAdminHandler(svr.GetHandler(), rd)
+	// br ebs restore phase 1 will reset ts, but at that time the cluster hasn't bootstrapped, so cannot use clusterRouter
+	registerFunc(apiRouter, "/admin/reset-ts", tsoAdminHandler.ResetTS, setMethods(http.MethodPost), setAuditBackend(localLog, prometheus))
+
 	// API to set or unset failpoints
-	failpoint.Inject("enableFailpointAPI", func() {
-		// this function will be named to "func2". It may be used in test
+	if enableFailPointAPI {
 		registerPrefix(apiRouter, "/fail", "FailPoint", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// The HTTP handler of failpoint requires the full path to be the failpoint path.
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix+apiPrefix+"/fail")
 			new(failpoint.HttpHandler).ServeHTTP(w, r)
-		}), setAuditBackend("test"))
-	})
-
+		}), setAuditBackend(localLog))
+	}
 	// Deprecated: use /pd/api/v1/health instead.
 	rootRouter.HandleFunc("/health", healthHandler.GetHealthStatus).Methods(http.MethodGet)
 	// Deprecated: use /pd/api/v1/ping instead.

@@ -17,34 +17,54 @@ package errs
 import "github.com/pingcap/errors"
 
 const (
-	// NotLeaderErr indicates the the non-leader member received the requests which should be received by leader.
+	// NotLeaderErr indicates the non-leader member received the requests which should be received by leader.
+	// Note: keep the same as the ones defined on the client side, because the client side checks if an error message
+	// contains this string to judge whether the leader is changed.
 	NotLeaderErr = "is not leader"
-	// MismatchLeaderErr indicates the the non-leader member received the requests which should be received by leader.
+	// MismatchLeaderErr indicates the non-leader member received the requests which should be received by leader.
+	// Note: keep the same as the ones defined on the client side, because the client side checks if an error message
+	// contains this string to judge whether the leader is changed.
 	MismatchLeaderErr = "mismatch leader id"
+	// NotServedErr indicates an tso node/pod received the requests for the keyspace groups which are not served by it.
+	// Note: keep the same as the ones defined on the client side, because the client side checks if an error message
+	// contains this string to judge whether the leader is changed.
+	NotServedErr = "is not served"
 )
 
 // common error in multiple packages
 var (
 	ErrGetSourceStore      = errors.Normalize("failed to get the source store", errors.RFCCodeText("PD:common:ErrGetSourceStore"))
+	ErrGetTargetStore      = errors.Normalize("failed to get the target store", errors.RFCCodeText("PD:common:ErrGetTargetStore"))
 	ErrIncorrectSystemTime = errors.Normalize("incorrect system time", errors.RFCCodeText("PD:common:ErrIncorrectSystemTime"))
 )
 
 // tso errors
 var (
-	ErrSetLocalTSOConfig  = errors.Normalize("set local tso config failed, %s", errors.RFCCodeText("PD:tso:ErrSetLocalTSOConfig"))
-	ErrGetAllocator       = errors.Normalize("get allocator failed, %s", errors.RFCCodeText("PD:tso:ErrGetAllocator"))
-	ErrGetLocalAllocator  = errors.Normalize("get local allocator failed, %s", errors.RFCCodeText("PD:tso:ErrGetLocalAllocator"))
-	ErrSyncMaxTS          = errors.Normalize("sync max ts failed, %s", errors.RFCCodeText("PD:tso:ErrSyncMaxTS"))
-	ErrResetUserTimestamp = errors.Normalize("reset user timestamp failed, %s", errors.RFCCodeText("PD:tso:ErrResetUserTimestamp"))
-	ErrGenerateTimestamp  = errors.Normalize("generate timestamp failed, %s", errors.RFCCodeText("PD:tso:ErrGenerateTimestamp"))
-	ErrLogicOverflow      = errors.Normalize("logic part overflow", errors.RFCCodeText("PD:tso:ErrLogicOverflow"))
-	ErrProxyTSOTimeout    = errors.Normalize("proxy tso timeout", errors.RFCCodeText("PD:tso:ErrProxyTSOTimeout"))
+	ErrSetLocalTSOConfig                = errors.Normalize("set local tso config failed, %s", errors.RFCCodeText("PD:tso:ErrSetLocalTSOConfig"))
+	ErrGetAllocator                     = errors.Normalize("get allocator failed, %s", errors.RFCCodeText("PD:tso:ErrGetAllocator"))
+	ErrGetLocalAllocator                = errors.Normalize("get local allocator failed, %s", errors.RFCCodeText("PD:tso:ErrGetLocalAllocator"))
+	ErrSyncMaxTS                        = errors.Normalize("sync max ts failed, %s", errors.RFCCodeText("PD:tso:ErrSyncMaxTS"))
+	ErrResetUserTimestamp               = errors.Normalize("reset user timestamp failed, %s", errors.RFCCodeText("PD:tso:ErrResetUserTimestamp"))
+	ErrGenerateTimestamp                = errors.Normalize("generate timestamp failed, %s", errors.RFCCodeText("PD:tso:ErrGenerateTimestamp"))
+	ErrUpdateTimestamp                  = errors.Normalize("update timestamp failed, %s", errors.RFCCodeText("PD:tso:ErrUpdateTimestamp"))
+	ErrLogicOverflow                    = errors.Normalize("logic part overflow", errors.RFCCodeText("PD:tso:ErrLogicOverflow"))
+	ErrProxyTSOTimeout                  = errors.Normalize("proxy tso timeout", errors.RFCCodeText("PD:tso:ErrProxyTSOTimeout"))
+	ErrKeyspaceGroupIDInvalid           = errors.Normalize("the keyspace group id is invalid, %s", errors.RFCCodeText("PD:tso:ErrKeyspaceGroupIDInvalid"))
+	ErrGetAllocatorManager              = errors.Normalize("get allocator manager failed, %s", errors.RFCCodeText("PD:tso:ErrGetAllocatorManager"))
+	ErrLoadKeyspaceGroupsTimeout        = errors.Normalize("load keyspace groups timeout", errors.RFCCodeText("PD:tso:ErrLoadKeyspaceGroupsTimeout"))
+	ErrLoadKeyspaceGroupsTerminated     = errors.Normalize("load keyspace groups terminated", errors.RFCCodeText("PD:tso:ErrLoadKeyspaceGroupsTerminated"))
+	ErrLoadKeyspaceGroupsRetryExhausted = errors.Normalize("load keyspace groups retry exhausted, %s", errors.RFCCodeText("PD:tso:ErrLoadKeyspaceGroupsRetryExhausted"))
+	ErrKeyspaceGroupNotInitialized      = errors.Normalize("the keyspace group %d isn't initialized", errors.RFCCodeText("PD:tso:ErrKeyspaceGroupNotInitialized"))
+	ErrKeyspaceNotAssigned              = errors.Normalize("the keyspace %d isn't assigned to any keyspace group", errors.RFCCodeText("PD:tso:ErrKeyspaceNotAssigned"))
+	ErrGetMinTS                         = errors.Normalize("get min ts failed, %s", errors.RFCCodeText("PD:tso:ErrGetMinTS"))
+	ErrKeyspaceGroupIsMerging           = errors.Normalize("the keyspace group %d is merging", errors.RFCCodeText("PD:tso:ErrKeyspaceGroupIsMerging"))
 )
 
 // member errors
 var (
 	ErrEtcdLeaderNotFound = errors.Normalize("etcd leader not found", errors.RFCCodeText("PD:member:ErrEtcdLeaderNotFound"))
 	ErrMarshalLeader      = errors.Normalize("marshal leader failed", errors.RFCCodeText("PD:member:ErrMarshalLeader"))
+	ErrCheckCampaign      = errors.Normalize("check campaign failed", errors.RFCCodeText("PD:member:ErrCheckCampaign"))
 )
 
 // core errors
@@ -57,6 +77,7 @@ var (
 	ErrStoreUnhealthy         = errors.Normalize("store %v is unhealthy", errors.RFCCodeText("PD:core:ErrStoreUnhealthy"))
 	ErrStoreServing           = errors.Normalize("store %v has been serving", errors.RFCCodeText("PD:core:ErrStoreServing"))
 	ErrSlowStoreEvicted       = errors.Normalize("store %v is evicted as a slow store", errors.RFCCodeText("PD:core:ErrSlowStoreEvicted"))
+	ErrSlowTrendEvicted       = errors.Normalize("store %v is evicted as a slow store by trend", errors.RFCCodeText("PD:core:ErrSlowTrendEvicted"))
 	ErrStoresNotEnough        = errors.Normalize("can not remove store %v since the number of up stores would be %v while need %v", errors.RFCCodeText("PD:core:ErrStoresNotEnough"))
 	ErrNoStoreForRegionLeader = errors.Normalize("can not remove store %d since there are no extra up store to store the leader", errors.RFCCodeText("PD:core:ErrNoStoreForRegionLeader"))
 )
@@ -65,9 +86,34 @@ var (
 var (
 	ErrClientCreateTSOStream = errors.Normalize("create TSO stream failed, %s", errors.RFCCodeText("PD:client:ErrClientCreateTSOStream"))
 	ErrClientGetTSOTimeout   = errors.Normalize("get TSO timeout", errors.RFCCodeText("PD:client:ErrClientGetTSOTimeout"))
-	ErrClientGetTSO          = errors.Normalize("get TSO failed, %v", errors.RFCCodeText("PD:client:ErrClientGetTSO"))
-	ErrClientGetLeader       = errors.Normalize("get leader from %v error", errors.RFCCodeText("PD:client:ErrClientGetLeader"))
+	ErrClientGetTSO          = errors.Normalize("get TSO failed", errors.RFCCodeText("PD:client:ErrClientGetTSO"))
+	ErrClientGetLeader       = errors.Normalize("get leader failed, %v", errors.RFCCodeText("PD:client:ErrClientGetLeader"))
 	ErrClientGetMember       = errors.Normalize("get member failed", errors.RFCCodeText("PD:client:ErrClientGetMember"))
+	ErrClientGetMinTSO       = errors.Normalize("get min TSO failed, %v", errors.RFCCodeText("PD:client:ErrClientGetMinTSO"))
+)
+
+// operator errors
+var (
+	// ErrOperatorNotFound is error info for operator not found.
+	ErrOperatorNotFound = errors.Normalize("operator not found", errors.RFCCodeText("PD:operator:ErrOperatorNotFound"))
+	// ErrAddOperator is error info for already have an operator when adding operator.
+	ErrAddOperator = errors.Normalize("failed to add operator, maybe already have one", errors.RFCCodeText("PD:operator:ErrAddOperator"))
+)
+
+// region errors
+var (
+	// ErrRegionNotAdjacent is error info for region not adjacent.
+	ErrRegionNotAdjacent = errors.Normalize("two regions are not adjacent", errors.RFCCodeText("PD:region:ErrRegionNotAdjacent"))
+	// ErrRegionNotFound is error info for region not found.
+	ErrRegionNotFound = errors.Normalize("region %v not found", errors.RFCCodeText("PD:region:ErrRegionNotFound"))
+	// ErrRegionAbnormalPeer is error info for region has abnormal peer.
+	ErrRegionAbnormalPeer = errors.Normalize("region %v has abnormal peer", errors.RFCCodeText("PD:region:ErrRegionAbnormalPeer"))
+)
+
+// plugin errors
+var (
+	// ErrPluginNotFound is error info for plugin not found.
+	ErrPluginNotFound = errors.Normalize("plugin is not found: %s", errors.RFCCodeText("PD:operator:ErrPluginNotFound"))
 )
 
 // schedule errors
@@ -155,13 +201,15 @@ var (
 
 // server errors
 var (
-	ErrServiceRegistered     = errors.Normalize("service with path [%s] already registered", errors.RFCCodeText("PD:server:ErrServiceRegistered"))
-	ErrAPIInformationInvalid = errors.Normalize("invalid api information, group %s version %s", errors.RFCCodeText("PD:server:ErrAPIInformationInvalid"))
-	ErrClientURLEmpty        = errors.Normalize("client url empty", errors.RFCCodeText("PD:server:ErrClientEmpty"))
-	ErrLeaderNil             = errors.Normalize("leader is nil", errors.RFCCodeText("PD:server:ErrLeaderNil"))
-	ErrCancelStartEtcd       = errors.Normalize("etcd start canceled", errors.RFCCodeText("PD:server:ErrCancelStartEtcd"))
-	ErrConfigItem            = errors.Normalize("cannot set invalid configuration", errors.RFCCodeText("PD:server:ErrConfiguration"))
-	ErrServerNotStarted      = errors.Normalize("server not started", errors.RFCCodeText("PD:server:ErrServerNotStarted"))
+	ErrServiceRegistered      = errors.Normalize("service with path [%s] already registered", errors.RFCCodeText("PD:server:ErrServiceRegistered"))
+	ErrAPIInformationInvalid  = errors.Normalize("invalid api information, group %s version %s", errors.RFCCodeText("PD:server:ErrAPIInformationInvalid"))
+	ErrClientURLEmpty         = errors.Normalize("client url empty", errors.RFCCodeText("PD:server:ErrClientEmpty"))
+	ErrLeaderNil              = errors.Normalize("leader is nil", errors.RFCCodeText("PD:server:ErrLeaderNil"))
+	ErrCancelStartEtcd        = errors.Normalize("etcd start canceled", errors.RFCCodeText("PD:server:ErrCancelStartEtcd"))
+	ErrConfigItem             = errors.Normalize("cannot set invalid configuration", errors.RFCCodeText("PD:server:ErrConfiguration"))
+	ErrServerNotStarted       = errors.Normalize("server not started", errors.RFCCodeText("PD:server:ErrServerNotStarted"))
+	ErrRateLimitExceeded      = errors.Normalize("rate limit exceeded", errors.RFCCodeText("PD:server:ErrRateLimitExceeded"))
+	ErrLeaderFrequentlyChange = errors.Normalize("leader %s frequently changed, leader-key is [%s]", errors.RFCCodeText("PD:server:ErrLeaderFrequentlyChange"))
 )
 
 // logutil errors
@@ -348,4 +396,11 @@ var (
 var (
 	ErrProgressWrongStatus = errors.Normalize("progress status is wrong", errors.RFCCodeText("PD:progress:ErrProgressWrongStatus"))
 	ErrProgressNotFound    = errors.Normalize("no progress found for %s", errors.RFCCodeText("PD:progress:ErrProgressNotFound"))
+)
+
+// Resource Manager errors
+var (
+	ErrResourceGroupNotExists = errors.Normalize("the %s resource group does not exist", errors.RFCCodeText("PD:resourcemanager:ErrGroupNotExists"))
+	ErrDeleteReservedGroup    = errors.Normalize("cannot delete reserved group", errors.RFCCodeText("PD:resourcemanager:ErrDeleteReservedGroup"))
+	ErrInvalidGroup           = errors.Normalize("invalid group settings, please check the group name, priority and the number of resources", errors.RFCCodeText("PD:resourcemanager:ErrInvalidGroup"))
 )

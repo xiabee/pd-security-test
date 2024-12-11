@@ -29,9 +29,9 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/pd/pkg/assertutil"
-	"github.com/tikv/pd/pkg/etcdutil"
-	"github.com/tikv/pd/pkg/testutil"
+	"github.com/tikv/pd/pkg/utils/assertutil"
+	"github.com/tikv/pd/pkg/utils/etcdutil"
+	"github.com/tikv/pd/pkg/utils/testutil"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/tests"
@@ -63,7 +63,7 @@ func TestMemberDelete(t *testing.T) {
 	re.NoError(err)
 	leaderName := cluster.WaitLeader()
 	re.NotEmpty(leaderName)
-	leader := cluster.GetServer(leaderName)
+	leader := cluster.GetLeaderServer()
 	var members []*tests.TestServer
 	for _, s := range cluster.GetConfig().InitialServers {
 		if s.Name != leaderName {
@@ -323,6 +323,60 @@ func TestMoveLeader(t *testing.T) {
 	}
 }
 
+func TestCampaignLeaderFrequently(t *testing.T) {
+	re := require.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cluster, err := tests.NewTestCluster(ctx, 3)
+	defer cluster.Destroy()
+	re.NoError(err)
+
+	err = cluster.RunInitialServers()
+	re.NoError(err)
+	// the 1st time campaign leader.
+	cluster.WaitLeader()
+	leader := cluster.GetLeader()
+	re.NotEmpty(cluster.GetLeader())
+
+	// need to prevent 3 times(including the above 1st time) campaign leader in 5 min.
+	for i := 0; i < 2; i++ {
+		cluster.GetServers()[cluster.GetLeader()].ResetPDLeader()
+		cluster.WaitLeader()
+		re.Equal(leader, cluster.GetLeader())
+	}
+	// check for the 4th time.
+	cluster.GetLeaderServer().ResetPDLeader()
+	cluster.WaitLeader()
+	// PD leader should be different from before because etcd leader changed.
+	re.NotEmpty(cluster.GetLeader())
+	re.NotEqual(leader, cluster.GetLeader())
+}
+
+func TestGrantLeaseFailed(t *testing.T) {
+	re := require.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cluster, err := tests.NewTestCluster(ctx, 5)
+	defer cluster.Destroy()
+	re.NoError(err)
+
+	err = cluster.RunInitialServers()
+	re.NoError(err)
+	cluster.WaitLeader()
+	leader := cluster.GetLeader()
+	re.NotEmpty(cluster.GetLeader())
+	re.NoError(failpoint.Enable("github.com/tikv/pd/pkg/election/skipGrantLeader", fmt.Sprintf("return(\"%s\")", leader)))
+
+	for i := 0; i < 3; i++ {
+		cluster.GetLeaderServer().ResetPDLeader()
+		cluster.WaitLeader()
+	}
+	// PD leader should be different from before because etcd leader changed.
+	re.NotEmpty(cluster.GetLeader())
+	re.NotEqual(leader, cluster.GetLeader())
+	re.NoError(failpoint.Disable("github.com/tikv/pd/pkg/election/skipGrantLeader"))
+}
+
 func TestGetLeader(t *testing.T) {
 	re := require.New(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -331,7 +385,7 @@ func TestGetLeader(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	done := make(chan bool)
-	svr, err := server.CreateServer(ctx, cfg)
+	svr, err := server.CreateServer(ctx, cfg, nil, server.CreateMockHandler(re, "127.0.0.1"))
 	re.NoError(err)
 	defer svr.Close()
 	re.NoError(svr.Run())
